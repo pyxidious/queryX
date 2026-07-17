@@ -13,6 +13,7 @@ class ConnectorError(RuntimeError):
 class MetadataConnector(ABC):
     source: str
     database_type: DatabaseType
+    source_id: str
 
     @abstractmethod
     def health_check(self) -> dict[str, Any]:

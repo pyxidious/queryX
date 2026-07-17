@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
+from time import monotonic
 from typing import Any
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from queryx.app.catalog.models import SourceMetadata
+from queryx.app.catalog.models import ProfilingBudget, SourceMetadata
 from queryx.app.connectors.base import ConnectorError, MetadataConnector
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,17 @@ class MySQLConnector(MetadataConnector):
     source = "mysql"
     database_type = "mysql"
 
-    def __init__(self, url: str, timeout_seconds: int = 3) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout_seconds: int = 3,
+        source_id: str = "mysql",
+        profiling_budget: ProfilingBudget | None = None,
+    ) -> None:
         self.url = url
         self.timeout_seconds = timeout_seconds
+        self.source_id = source_id
+        self.profiling_budget = profiling_budget or ProfilingBudget()
         self.engine = self._create_engine()
 
     def _create_engine(self) -> Engine:
@@ -83,10 +92,11 @@ class MySQLConnector(MetadataConnector):
                     }
                 )
             return SourceMetadata(
-                source=self.source,
+                source=self.source_id,
                 database_type=self.database_type,
                 declared={"tables": tables},
                 inferred={},
+                profiling_metrics=self._profile_tables([table["name"] for table in tables]),
             )
         except SQLAlchemyError as exc:
             logger.warning("MySQL scan failed: %s", exc)
@@ -97,3 +107,52 @@ class MySQLConnector(MetadataConnector):
         if value is None:
             return None
         return str(value)
+
+    def _profile_tables(self, table_names: list[str]) -> dict[str, Any]:
+        budget = self.profiling_budget
+        metrics: dict[str, Any] = {
+            "enabled": budget.enabled,
+            "entities": [],
+            "total_records_sampled": 0,
+            "entities_not_profiled": [],
+            "limits_reached": [],
+            "timeouts": [],
+        }
+        if not budget.enabled:
+            metrics["entities_not_profiled"] = table_names
+            return metrics
+
+        profiled_entities = 0
+        total_records = 0
+        with self.engine.connect() as connection:
+            for table_name in table_names:
+                if profiled_entities >= budget.max_entities:
+                    metrics["entities_not_profiled"].append(table_name)
+                    metrics["limits_reached"].append("max_entities")
+                    continue
+                remaining = budget.max_total_records - total_records
+                if remaining <= 0:
+                    metrics["entities_not_profiled"].append(table_name)
+                    metrics["limits_reached"].append("max_total_records")
+                    continue
+                limit = min(budget.max_records_per_entity, remaining)
+                started = monotonic()
+                sampled = 0
+                if limit > 0:
+                    quoted_table = table_name.replace("`", "``")
+                    result = connection.execute(text(f"SELECT 1 FROM `{quoted_table}` LIMIT :limit"), {"limit": limit})
+                    sampled = len(result.fetchall())
+                duration = monotonic() - started
+                if duration > budget.max_seconds_per_entity:
+                    metrics["timeouts"].append(table_name)
+                metrics["entities"].append(
+                    {
+                        "name": table_name,
+                        "records_sampled": sampled,
+                        "sample_scope": "limited_rows",
+                    }
+                )
+                total_records += sampled
+                profiled_entities += 1
+        metrics["total_records_sampled"] = total_records
+        return metrics
