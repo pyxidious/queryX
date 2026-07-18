@@ -15,4 +15,5 @@ docker compose up --build
 - `POST /catalog/scan`
 - `GET /catalog/latest`
 
-Ollama is configurable but not called in this phase.
+Ollama enrichment is optional. Run Ollama on the host and expose it at `OLLAMA_BASE_URL`
+before calling the semantic enrichment endpoints.

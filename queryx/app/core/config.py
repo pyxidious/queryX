@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,8 +46,22 @@ class Settings(BaseSettings):
     profiling_max_entities: int = Field(default=100, ge=0)
     profiling_max_total_records: int = Field(default=500, ge=0)
 
-    ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+    ollama_base_url: str = Field(
+        default="http://host.docker.internal:11434",
+        validation_alias=AliasChoices("OLLAMA_BASE_URL", "OLLAMA_URL"),
+    )
+    ollama_model: str = "qwen3.5:9b"
+    ollama_timeout_seconds: int = Field(default=120, ge=1)
+    ollama_num_ctx: int = Field(default=8192, ge=512)
+    ollama_temperature: float = Field(default=0, ge=0)
+    ollama_think: bool = False
+    ollama_keep_alive: str = "10m"
+    ollama_debug_prompts: bool = False
+
+    queryx_enrichment_max_entities: int = Field(default=50, ge=1)
+    queryx_enrichment_max_fields_per_request: int = Field(default=40, ge=1)
+    queryx_enrichment_max_retries: int = Field(default=1, ge=0)
+    queryx_enrichment_max_prompt_chars: int = Field(default=12000, ge=1000)
 
 
 @lru_cache

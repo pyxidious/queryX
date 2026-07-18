@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DatabaseType = Literal["mysql", "mongodb"]
 MetadataKind = Literal["declared", "inferred"]
@@ -11,6 +11,7 @@ RunStatus = Literal["completed", "partial", "failed"]
 ScanStatus = Literal["completed", "failed"]
 FreshnessStatus = Literal["current", "stale"]
 DriftSeverity = Literal["none", "low", "medium", "high"]
+Sensitivity = Literal["none", "potential_pii", "confidential", "unknown"]
 
 
 class DataSource(BaseModel):
@@ -124,3 +125,81 @@ class DriftReport(BaseModel):
     previous_scan_id: int | None
     current_scan_id: int | None
     changes: list[DriftChange] = Field(default_factory=list)
+
+
+class EntitySemanticAnnotation(BaseModel):
+    source_id: str
+    entity_name: str
+    entity_kind: str
+    description: str
+    business_domain: str
+    synonyms: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    confidence_source: str = "model_self_reported"
+    language: str = "it"
+
+    @model_validator(mode="after")
+    def force_confidence_source(self) -> EntitySemanticAnnotation:
+        self.confidence_source = "model_self_reported"
+        return self
+
+
+class FieldSemanticAnnotation(BaseModel):
+    source_id: str
+    entity_name: str
+    field_path: str
+    description: str
+    semantic_type: str
+    business_terms: list[str] = Field(default_factory=list)
+    synonyms: list[str] = Field(default_factory=list)
+    unit: str | None = None
+    sensitivity: Sensitivity = "unknown"
+    confidence: float = Field(ge=0, le=1)
+    confidence_source: str = "model_self_reported"
+    language: str = "it"
+
+    @model_validator(mode="after")
+    def force_confidence_source(self) -> FieldSemanticAnnotation:
+        self.confidence_source = "model_self_reported"
+        return self
+
+
+class EnrichmentResult(BaseModel):
+    entity: EntitySemanticAnnotation
+    fields: list[FieldSemanticAnnotation] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    unannotated_fields: list[str] = Field(default_factory=list)
+    output_schema_version: str = "semantic-annotation-v1"
+
+
+class EnrichmentRun(BaseModel):
+    id: int | None = None
+    source_id: str
+    source_snapshot_id: int
+    technical_fingerprint: str
+    model_name: str
+    prompt_version: str
+    output_schema_version: str
+    created_at: datetime
+    started_at: datetime
+    finished_at: datetime
+    duration_ms: int
+    status: RunStatus
+    entities_processed: int
+    fields_processed: int
+    failures: int
+    token_metrics: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    request_count: int = 0
+    retry_count: int = 0
+    invalid_responses: int = 0
+    reused_result: bool = False
+    results: list[EnrichmentResult] = Field(default_factory=list)
+
+
+class EnrichmentRequest(BaseModel):
+    force: bool = False
+    language: str = "it"
+    max_entities: int | None = None

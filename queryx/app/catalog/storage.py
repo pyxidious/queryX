@@ -11,6 +11,10 @@ from queryx.app.catalog.models import (
     CurrentCatalog,
     CurrentCatalogSource,
     DataSource,
+    EnrichmentResult,
+    EnrichmentRun,
+    EntitySemanticAnnotation,
+    FieldSemanticAnnotation,
     ScanRun,
     SourceMetadata,
     SourceScanResult,
@@ -112,8 +116,64 @@ class CatalogStorage:
                 "CREATE INDEX IF NOT EXISTS idx_source_scan_results_source ON source_scan_results(source_id, scan_run_id)"
             )
             connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS enrichment_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id TEXT NOT NULL,
+                    source_snapshot_id INTEGER NOT NULL,
+                    technical_fingerprint TEXT NOT NULL,
+                    model_name TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    output_schema_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    entities_processed INTEGER NOT NULL,
+                    fields_processed INTEGER NOT NULL,
+                    failures INTEGER NOT NULL,
+                    token_metrics_json TEXT NOT NULL,
+                    warnings_json TEXT NOT NULL,
+                    errors_json TEXT NOT NULL,
+                    request_count INTEGER NOT NULL,
+                    retry_count INTEGER NOT NULL,
+                    invalid_responses INTEGER NOT NULL,
+                    reused_result INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_annotations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enrichment_run_id INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,
+                    entity_name TEXT NOT NULL,
+                    annotation_json TEXT NOT NULL,
+                    FOREIGN KEY(enrichment_run_id) REFERENCES enrichment_runs(id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS field_annotations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    enrichment_run_id INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,
+                    entity_name TEXT NOT NULL,
+                    field_path TEXT NOT NULL,
+                    annotation_json TEXT NOT NULL,
+                    FOREIGN KEY(enrichment_run_id) REFERENCES enrichment_runs(id)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_enrichment_runs_source ON enrichment_runs(source_id, id)"
+            )
+            connection.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
-                (2, datetime.now(timezone.utc).isoformat()),
+                (3, datetime.now(timezone.utc).isoformat()),
             )
 
     def upsert_sources(self, sources: list[DataSource]) -> None:
@@ -332,6 +392,196 @@ class CatalogStorage:
             )
         return CurrentCatalog(generated_at=datetime.now(timezone.utc), sources=current_sources)
 
+    def find_reusable_enrichment_run(
+        self,
+        source_id: str,
+        source_snapshot_id: int,
+        technical_fingerprint: str,
+        model_name: str,
+        prompt_version: str,
+        output_schema_version: str,
+    ) -> EnrichmentRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM enrichment_runs
+                WHERE source_id = ?
+                    AND source_snapshot_id = ?
+                    AND technical_fingerprint = ?
+                    AND model_name = ?
+                    AND prompt_version = ?
+                    AND output_schema_version = ?
+                    AND status = 'completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    source_id,
+                    source_snapshot_id,
+                    technical_fingerprint,
+                    model_name,
+                    prompt_version,
+                    output_schema_version,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_enrichment_run(connection, row, include_results=True).model_copy(
+                update={"reused_result": True}
+            )
+
+    def save_enrichment_run(self, run: EnrichmentRun) -> EnrichmentRun:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO enrichment_runs (
+                    source_id, source_snapshot_id, technical_fingerprint, model_name,
+                    prompt_version, output_schema_version, created_at, started_at, finished_at,
+                    duration_ms, status, entities_processed, fields_processed, failures,
+                    token_metrics_json, warnings_json, errors_json, request_count, retry_count,
+                    invalid_responses, reused_result
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run.source_id,
+                    run.source_snapshot_id,
+                    run.technical_fingerprint,
+                    run.model_name,
+                    run.prompt_version,
+                    run.output_schema_version,
+                    run.created_at.isoformat(),
+                    run.started_at.isoformat(),
+                    run.finished_at.isoformat(),
+                    run.duration_ms,
+                    run.status,
+                    run.entities_processed,
+                    run.fields_processed,
+                    run.failures,
+                    self._dumps(run.token_metrics),
+                    self._dumps(run.warnings),
+                    self._dumps(run.errors),
+                    run.request_count,
+                    run.retry_count,
+                    run.invalid_responses,
+                    int(run.reused_result),
+                ),
+            )
+            run_id = int(cursor.lastrowid)
+            for result in run.results:
+                connection.execute(
+                    """
+                    INSERT INTO entity_annotations (
+                        enrichment_run_id, source_id, entity_name, annotation_json
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        result.entity.source_id,
+                        result.entity.entity_name,
+                        self._dumps(result.entity.model_dump(mode="json")),
+                    ),
+                )
+                for field in result.fields:
+                    connection.execute(
+                        """
+                        INSERT INTO field_annotations (
+                            enrichment_run_id, source_id, entity_name, field_path, annotation_json
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            run_id,
+                            field.source_id,
+                            field.entity_name,
+                            field.field_path,
+                            self._dumps(field.model_dump(mode="json")),
+                        ),
+                    )
+        return run.model_copy(update={"id": run_id})
+
+    def get_enrichment_run(self, run_id: int, include_results: bool = True) -> EnrichmentRun | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM enrichment_runs WHERE id = ?", (run_id,)).fetchone()
+            if row is None:
+                return None
+            return self._row_to_enrichment_run(connection, row, include_results)
+
+    def get_latest_enrichment_run(self, source_id: str, include_results: bool = True) -> EnrichmentRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM enrichment_runs
+                WHERE source_id = ? AND status IN ('completed', 'partial')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_enrichment_run(connection, row, include_results)
+
+    def get_enrichment_history(self, source_id: str) -> list[EnrichmentRun]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM enrichment_runs WHERE source_id = ? ORDER BY id DESC",
+                (source_id,),
+            ).fetchall()
+            return [self._row_to_enrichment_run(connection, row, include_results=False) for row in rows]
+
+    def get_compatible_enrichment_run(
+        self,
+        source_id: str,
+        source_snapshot_id: int,
+        technical_fingerprint: str,
+    ) -> EnrichmentRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM enrichment_runs
+                WHERE source_id = ?
+                    AND source_snapshot_id = ?
+                    AND technical_fingerprint = ?
+                    AND status IN ('completed', 'partial')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (source_id, source_snapshot_id, technical_fingerprint),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_enrichment_run(connection, row, include_results=True)
+
+    def get_semantic_current(self, sources: list[DataSource]) -> dict[str, Any]:
+        technical_current = self.get_current_catalog(sources)
+        semantic_sources: list[dict[str, Any]] = []
+        for source in technical_current.sources:
+            compatible = None
+            if source.fingerprint is not None:
+                compatible = self.get_compatible_enrichment_run(
+                    source.source_id,
+                    source.snapshot_id,
+                    source.fingerprint,
+                )
+            latest = self.get_latest_enrichment_run(source.source_id, include_results=False)
+            semantic_status = "missing"
+            run_payload = None
+            if compatible is not None:
+                semantic_status = "current"
+                run_payload = compatible.model_dump(mode="json")
+            elif latest is not None:
+                semantic_status = "stale"
+                run_payload = latest.model_dump(mode="json")
+            semantic_sources.append(
+                {
+                    "source_id": source.source_id,
+                    "technical_snapshot_id": source.snapshot_id,
+                    "technical_fingerprint": source.fingerprint,
+                    "semantic_status": semantic_status,
+                    "enrichment": run_payload,
+                }
+            )
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "sources": semantic_sources}
+
     def _load_results(
         self,
         connection: sqlite3.Connection,
@@ -371,6 +621,69 @@ class CatalogStorage:
             profiling_metrics=self._loads_dict(row["profiling_json"]),
             warnings=self._loads_list(row["warnings_json"]),
             error=self._loads_nullable(row["error_json"]),
+        )
+
+    def _row_to_enrichment_run(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        include_results: bool,
+    ) -> EnrichmentRun:
+        results: list[EnrichmentResult] = []
+        if include_results:
+            entity_rows = connection.execute(
+                """
+                SELECT annotation_json FROM entity_annotations
+                WHERE enrichment_run_id = ?
+                ORDER BY id ASC
+                """,
+                (row["id"],),
+            ).fetchall()
+            fields_by_entity: dict[str, list[FieldSemanticAnnotation]] = {}
+            field_rows = connection.execute(
+                """
+                SELECT annotation_json FROM field_annotations
+                WHERE enrichment_run_id = ?
+                ORDER BY id ASC
+                """,
+                (row["id"],),
+            ).fetchall()
+            for field_row in field_rows:
+                field = FieldSemanticAnnotation.model_validate(self._loads_dict(field_row["annotation_json"]))
+                fields_by_entity.setdefault(field.entity_name, []).append(field)
+            for entity_row in entity_rows:
+                entity = EntitySemanticAnnotation.model_validate(self._loads_dict(entity_row["annotation_json"]))
+                results.append(
+                    EnrichmentResult(
+                        entity=entity,
+                        fields=fields_by_entity.get(entity.entity_name, []),
+                        output_schema_version=row["output_schema_version"],
+                    )
+                )
+        return EnrichmentRun(
+            id=int(row["id"]),
+            source_id=row["source_id"],
+            source_snapshot_id=int(row["source_snapshot_id"]),
+            technical_fingerprint=row["technical_fingerprint"],
+            model_name=row["model_name"],
+            prompt_version=row["prompt_version"],
+            output_schema_version=row["output_schema_version"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            started_at=datetime.fromisoformat(row["started_at"]),
+            finished_at=datetime.fromisoformat(row["finished_at"]),
+            duration_ms=int(row["duration_ms"]),
+            status=row["status"],
+            entities_processed=int(row["entities_processed"]),
+            fields_processed=int(row["fields_processed"]),
+            failures=int(row["failures"]),
+            token_metrics=self._loads_dict(row["token_metrics_json"]),
+            warnings=self._loads_list(row["warnings_json"]),
+            errors=self._loads_list(row["errors_json"]),
+            request_count=int(row["request_count"]),
+            retry_count=int(row["retry_count"]),
+            invalid_responses=int(row["invalid_responses"]),
+            reused_result=bool(row["reused_result"]),
+            results=results,
         )
 
     def _save_legacy_snapshot(
