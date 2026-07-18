@@ -1,0 +1,9 @@
+{% if preview %}
+<div class="preview-heading"><span class="status status-neutral">Preview {{ preview.source }}</span></div>
+{% if preview.truncated_columns %}<div class="alert alert-warning">Colonne limitate dalla configurazione UI.</div>{% endif %}
+{% if preview.columns %}<div class="table-wrap preview"><table>
+  <thead><tr>{% for column in preview.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for row in preview.rows %}<tr>{% for value in row %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+</table></div>{% else %}<p class="empty">Nessuna riga disponibile.</p>{% endif %}
+{% endif %}
+

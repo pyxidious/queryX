@@ -270,6 +270,14 @@ class ProcessingStorage:
                 rows = connection.execute("SELECT * FROM processing_runs ORDER BY created_at").fetchall()
         return [self._row_to_run(row) for row in rows]
 
+    def list_runs_for_version(self, asset_version_id: str) -> list[ProcessingRun]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM processing_runs WHERE asset_version_id = ? ORDER BY created_at DESC",
+                (asset_version_id,),
+            ).fetchall()
+        return [self._row_to_run(row) for row in rows]
+
     def prepare_binding(
         self,
         asset_version_id: str,

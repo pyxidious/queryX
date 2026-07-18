@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     worker_shutdown_seconds: int = Field(default=30, ge=1, le=600)
     duckdb_lock_path: Path = Path("data/queryx.duckdb.lock")
     duckdb_lock_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    queryx_ui_enabled: bool = True
+    queryx_ui_secret_key: str = Field(
+        default="queryx-ui-development-key-change-me",
+        min_length=16,
+        repr=False,
+    )
+    queryx_ui_max_preview_columns: int = Field(default=50, ge=1, le=500)
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 

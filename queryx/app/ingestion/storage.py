@@ -101,7 +101,7 @@ class IngestionStorage:
                 );
                 CREATE TABLE IF NOT EXISTS ingestion_jobs (
                     id TEXT PRIMARY KEY, status TEXT NOT NULL, source_type TEXT NOT NULL,
-                    original_filename TEXT NOT NULL, source_reference TEXT, target_backend TEXT NOT NULL,
+                    original_filename TEXT NOT NULL, logical_name TEXT, source_reference TEXT, target_backend TEXT NOT NULL,
                     bytes_received INTEGER NOT NULL DEFAULT 0, records_detected INTEGER,
                     records_loaded INTEGER, records_rejected INTEGER, warnings_json TEXT NOT NULL,
                     error_json TEXT, source_fingerprint TEXT, asset_id TEXT, asset_version_id TEXT,
@@ -131,6 +131,7 @@ class IngestionStorage:
             self._ensure_column(connection, "ingestion_jobs", "updated_at", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "heartbeat_at", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "requested_asset_id", "TEXT")
+            self._ensure_column(connection, "ingestion_jobs", "logical_name", "TEXT")
             for column, definition in (
                 ("binding_role", "TEXT NOT NULL DEFAULT 'raw'"),
                 ("status", "TEXT NOT NULL DEFAULT 'ready'"),
@@ -179,6 +180,10 @@ class IngestionStorage:
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (6, applied_at),
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (10, applied_at),
+            )
 
     @staticmethod
     def _ensure_column(
@@ -196,6 +201,7 @@ class IngestionStorage:
         original_filename: str,
         source_type: str = "upload",
         asset_id: str | None = None,
+        logical_name: str | None = None,
     ) -> IngestionJob:
         now = _now()
         job = IngestionJob(
@@ -203,6 +209,7 @@ class IngestionStorage:
             status=IngestionStatus.CREATED,
             source_type=source_type,
             original_filename=original_filename,
+            logical_name=logical_name,
             target_backend="file",
             asset_id=None,
             requested_asset_id=asset_id,
@@ -212,14 +219,15 @@ class IngestionStorage:
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO ingestion_jobs (
-                    id, status, source_type, original_filename, target_backend, bytes_received,
+                    id, status, source_type, original_filename, logical_name, target_backend, bytes_received,
                     warnings_json, requested_asset_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.id,
                     job.status,
                     job.source_type,
                     job.original_filename,
+                    logical_name,
                     job.target_backend,
                     0,
                     "[]",
@@ -587,6 +595,14 @@ class IngestionStorage:
             rows = connection.execute(
                 f"SELECT * FROM ingestion_jobs WHERE status IN ({placeholders}) ORDER BY created_at",
                 tuple(status.value for status in statuses),
+            ).fetchall()
+        return [self._row_to_job(row) for row in rows]
+
+    def list_jobs(self, limit: int = 20) -> list[IngestionJob]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM ingestion_jobs ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         return [self._row_to_job(row) for row in rows]
 

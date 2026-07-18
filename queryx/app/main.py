@@ -13,7 +13,13 @@ def create_app() -> FastAPI:
     logging.basicConfig(level=settings.log_level)
 
     app = FastAPI(title=settings.app_name, version="0.1.0")
+    app.state.settings = settings
     app.include_router(router)
+    if settings.queryx_ui_enabled:
+        from queryx.app.ui.routes import install_exception_handlers, router as ui_router
+
+        app.include_router(ui_router)
+        install_exception_handlers(app)
     return app
 
 

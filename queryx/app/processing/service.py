@@ -430,6 +430,12 @@ class ProcessingService:
     def get_run(self, run_id: str) -> ProcessingRun | None:
         return self.storage.get_run(run_id)
 
+    def list_runs(self, limit: int = 20) -> list[ProcessingRun]:
+        return self.storage.list_runs()[-limit:][::-1]
+
+    def list_runs_for_version(self, version_id: str) -> list[ProcessingRun]:
+        return self.storage.list_runs_for_version(version_id)
+
     def cancel(self, run_id: str) -> ProcessingRun:
         run = self.storage.get_run(run_id)
         if run is None:

@@ -1,0 +1,6 @@
+{% if alerts %}
+<div class="alerts" aria-live="polite">
+  {% for alert in alerts %}<div class="alert alert-{{ alert.level }}">{{ alert.message }}</div>{% endfor %}
+</div>
+{% endif %}
+

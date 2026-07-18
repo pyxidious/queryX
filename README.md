@@ -22,6 +22,7 @@ Sono disponibili:
 - worker single-process separato dall'API, avviato automaticamente da Docker Compose;
 - coordinamento DuckDB cross-process tramite file lock nel volume dati;
 - API per stato job, preview limitata e consultazione degli asset;
+- UI server-rendered offline per dashboard, upload, polling, asset, versioni, binding, drift e preview;
 - test automatici offline.
 
 L'ingestion termina nello stato `ready`: il raw e la versione logica sono pronti. La preparazione analitica è un flusso separato; il relativo `ProcessingRun` diventa `completed` soltanto quando Parquet normalizzato e vista DuckDB sono entrambi pronti e validati.
@@ -54,8 +55,13 @@ Il progetto è un modular monolith: API e worker usano la stessa immagine e gli 
 
 ```mermaid
 flowchart LR
-    Client[Client] --> API[FastAPI API]
+    Client[API client] --> API[FastAPI JSON API]
+    Browser[Browser] --> UI[Jinja UI routes]
+    UI --> Services[Application services]
+    UI --> Queue
+    UI --> DuckDB
     API --> Queue[(SQLite queue)]
+    API --> Services
     Queue --> Worker[Single worker]
     API --> Registry[Source registry]
     API --> Scan[Scan orchestrator]
@@ -84,6 +90,7 @@ flowchart LR
 Componenti:
 
 - **API**: espone health, source registry, catalogo, enrichment, ingestion e asset;
+- **UI routes**: renderizzano HTML Jinja e traducono form e azioni negli stessi application service usati dalle API, senza duplicare regole di dominio;
 - **source registry**: costruisce le sorgenti configurate senza persistere credenziali nel catalogo;
 - **connectors**: estraggono metadata da MySQL e MongoDB entro budget configurati;
 - **catalog**: salva scansioni, snapshot, fingerprint, drift e stato current/stale;
@@ -94,6 +101,26 @@ Componenti:
 - **worker**: reclama un WorkItem alla volta, rinnova la lease, esegue reconciliation e inoltra il task al service corretto;
 - **SQLite**: persiste catalogo, job, run, WorkItem, stato runtime del worker, binding e lineage, mai i file binari;
 - **Ollama**: dipendenza opzionale usata soltanto per metadata semantici.
+
+### UI server-rendered
+
+La UI è disponibile sotto `/ui` e non modifica i contratti JSON. FastAPI gestisce routing e form multipart, Jinja2 produce HTML con autoescape, mentre gli asset CSS e JavaScript sono serviti localmente da QueryX: non servono CDN, Node.js o una build frontend. Il JavaScript locale implementa il polling dichiarativo HTMX usato dai frammenti di stato.
+
+Il percorso principale è:
+
+```text
+upload → redirect al job → polling HTMX → asset/versione → prepare → polling run → preview DuckDB
+```
+
+La dashboard mostra health, worker online/stale/offline, contatori della coda, asset, ingestion e run recenti e freshness delle sorgenti. In worker mode un worker non disponibile genera un alert evidente, ma le pagine di consultazione restano navigabili.
+
+Il wizard di importazione usa un normale form multipart. Consente un nome logico e un `asset_id` opzionali; il secondo crea una nuova versione dello stesso asset. La pagina del job espone WorkItem, fase, tentativi, warning/error, risultato e preview raw quando disponibile. Le pagine asset/versione mostrano drift, fingerprint abbreviati, observed schema e binding raggruppati per ruolo. Dopo `prepare`, ProcessingRun, canonical/serving schema e preview DuckDB sono consultabili senza esporre path, relation name o SQL.
+
+Solo i frammenti `/status` effettuano polling ogni due secondi. Il polling ingestion termina su `ready`, `failed` o `cancelled`; quello processing termina su `completed`, `failed` o `cancelled`. `partial` continua a essere mostrato come stato recuperabile, non come completamento.
+
+Le preview rispettano i limiti dei service esistenti e il limite UI di colonne. Valori null, booleani e strutturati vengono formattati centralmente, i testi lunghi sono troncati e ogni cella è autoescaped. “Preview raw” legge il file raw controllato; “Preview DuckDB” interroga esclusivamente la vista del serving binding con un limite imposto dal server.
+
+Ogni POST HTML richiede un token CSRF HMAC, inviato sia nel cookie `HttpOnly` `SameSite=Lax` sia nel form. Il confronto double-submit e la firma usano `QUERYX_UI_SECRET_KEY`. Le pagine errore UI per 404, 409, 413, 422 e 500 non includono stack trace o dettagli fisici. Questa protezione è intenzionalmente minima e non sostituisce autenticazione e autorizzazione in un deployment pubblico.
 
 ### Flusso delle sorgenti esterne
 
@@ -263,7 +290,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-L'API è disponibile su `http://localhost:8000`. Compose avvia API, una sola replica `queryx-worker`, MySQL demo e MongoDB demo. API e worker condividono il volume `queryx_catalog` montato su `/app/data`, che contiene SQLite, staging/raw/normalized, DuckDB e il file lock. Compose forza `QUERYX_EXECUTION_MODE=worker` per entrambi i processi.
+L'API è disponibile su `http://localhost:8000`; la UI su `http://localhost:8000/ui`. Compose avvia API, una sola replica `queryx-worker`, MySQL demo e MongoDB demo. API e worker condividono il volume `queryx_catalog` montato su `/app/data`, che contiene SQLite, staging/raw/normalized, DuckDB e il file lock. Compose forza `QUERYX_EXECUTION_MODE=worker` per entrambi i processi.
 
 Per sviluppo locale:
 
@@ -368,6 +395,22 @@ La data preview accetta soltanto `limit` entro il massimo configurato. Non accet
 
 Gli errori hanno forma strutturata, per esempio `detail.error.code` e `detail.error.message`; non includono stack trace o percorsi assoluti.
 
+## Rotte UI
+
+Le rotte HTML principali sono:
+
+- `GET /ui`: dashboard;
+- `GET /ui/ingestions/new` e `POST /ui/ingestions`: form e acquisizione upload;
+- `GET /ui/ingestions/{job_id}` e `/status`: dettaglio e frammento polling;
+- `POST /ui/ingestions/{job_id}/cancel`: cancellazione cooperativa;
+- `GET /ui/assets`, `/ui/assets/{asset_id}` e `/ui/assets/{asset_id}/versions/{version_id}`;
+- `POST /ui/assets/{asset_id}/versions/{version_id}/prepare`;
+- `GET /ui/processing/runs/{run_id}` e `/status`;
+- `POST /ui/processing/runs/{run_id}/cancel`;
+- `GET /ui/sources` e `/ui/sources/{source_id}`.
+
+Il browser gestisce automaticamente il token CSRF emesso dalla pagina form. Per questo gli esempi `curl` restano riferiti alle API JSON: le POST UI non sono endpoint di automazione.
+
 ## Directory dati
 
 ```text
@@ -411,6 +454,9 @@ I file sono nel filesystem/volume, non in SQLite. `data/` è esclusa dal reposit
 | `WORKER_SHUTDOWN_SECONDS` | `30` | Finestra cooperativa concessa al lavoro corrente. |
 | `DUCKDB_LOCK_PATH` | `/app/data/queryx.duckdb.lock` | File lock condiviso, mai controllato dal client. |
 | `DUCKDB_LOCK_TIMEOUT_SECONDS` | `5` | Timeout delle operazioni DuckDB coordinate. |
+| `QUERYX_UI_ENABLED` | `true` | Registra le rotte e gli asset locali `/ui`; se `false`, rispondono 404. |
+| `QUERYX_UI_SECRET_KEY` | nessun segreto reale nel repository | Chiave HMAC per i token CSRF; deve essere sostituita fuori dallo sviluppo locale. |
+| `QUERYX_UI_MAX_PREVIEW_COLUMNS` | `50` | Massimo numero di colonne renderizzate in una preview HTML. |
 
 Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, SQLite e Ollama. Non inserire credenziali reali nel repository.
 
@@ -422,7 +468,8 @@ Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, 
 - nessuna fusione o deduplicazione fisica automatica tra asset differenti;
 - CSV supporta UTF-8 e schema inferito su campione, senza policy avanzate per locale o encoding;
 - serving limitato a viste DuckDB e preview bounded; nessuna API per SQL arbitrario;
-- nessuna UI di importazione, Kaggle o GraphDB;
+- UI locale senza autenticazione completa, filtri, ordinamento avanzato o aggiornamenti WebSocket/SSE;
+- nessuna acquisizione Kaggle o integrazione GraphDB;
 - nessuna query generation.
 
 ## Roadmap
@@ -430,7 +477,7 @@ Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, 
 Funzionalità pianificate, **non ancora implementate**:
 
 1. acquisizione Kaggle dietro un source adapter;
-2. UI server-rendered per upload, stato e preview;
+2. autenticazione/autorizzazione e UX avanzata della UI;
 3. materializzazione controllata in MySQL e MongoDB;
 4. storage e lineage GraphDB;
 5. logical query plan indipendente dai backend;

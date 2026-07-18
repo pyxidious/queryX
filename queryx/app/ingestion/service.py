@@ -24,6 +24,7 @@ from queryx.app.ingestion.models import (
     DataFormat,
     IngestionJob,
     IngestionStatus,
+    InspectionResult,
     ReconciliationReport,
     UploadResult,
 )
@@ -66,18 +67,37 @@ class IngestionService:
         }
         self._finalization_lock = threading.RLock()
 
-    async def ingest_upload(self, upload: UploadFile, asset_id: str | None = None) -> UploadResult:
-        accepted = await self.accept_upload(upload, asset_id=asset_id, enqueue=False)
+    async def ingest_upload(
+        self,
+        upload: UploadFile,
+        asset_id: str | None = None,
+        logical_name: str | None = None,
+    ) -> UploadResult:
+        accepted = await self.accept_upload(
+            upload,
+            asset_id=asset_id,
+            logical_name=logical_name,
+            enqueue=False,
+        )
         return self.execute_ingestion_job(accepted.job_id)
 
     async def accept_upload(
         self,
         upload: UploadFile,
         asset_id: str | None = None,
+        logical_name: str | None = None,
         enqueue: bool = True,
     ) -> UploadResult:
         original_filename = upload.filename or ""
-        job = self.storage.create_job(original_filename=original_filename, asset_id=asset_id)
+        resolved_name = logical_name.strip() if logical_name and logical_name.strip() else None
+        if resolved_name is not None and len(resolved_name) > 200:
+            await upload.close()
+            raise IngestionServiceError("invalid_logical_name", "Logical name is too long", 422)
+        job = self.storage.create_job(
+            original_filename=original_filename,
+            asset_id=asset_id,
+            logical_name=resolved_name,
+        )
         staged_path: Path | None = None
         try:
             safe_name, data_format = validate_filename(original_filename)
@@ -203,7 +223,7 @@ class IngestionService:
                 try:
                     prepared = self.storage.prepare_version(
                         job_id=job.id,
-                        name=Path(safe_name).stem,
+                        name=job.logical_name or Path(safe_name).stem,
                         requested_asset_id=job.requested_asset_id or job.asset_id,
                         raw_reference=raw_reference,
                         data_format=data_format,
@@ -308,6 +328,9 @@ class IngestionService:
     def get_job(self, job_id: str) -> IngestionJob | None:
         return self.storage.get_job(job_id)
 
+    def list_jobs(self, limit: int = 20) -> list[IngestionJob]:
+        return self.storage.list_jobs(limit)
+
     def cancel(self, job_id: str) -> IngestionJob:
         job = self.storage.get_job(job_id)
         if job is None:
@@ -382,6 +405,9 @@ class IngestionService:
 
     def get_version(self, asset_id: str, version_id: str) -> AssetVersion | None:
         return self.storage.get_version(asset_id, version_id)
+
+    def get_version_inspection(self, version_id: str) -> InspectionResult | None:
+        return self.storage.get_version_inspection(version_id)
 
     def get_latest_diff(self, asset_id: str) -> AssetSchemaDiff | None:
         return self.storage.get_latest_diff(asset_id)

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% from "components/status_badge.html" import status_badge %}
+{% block content %}
+{% include "components/alerts.html" %}
+<div class="page-heading"><div><p class="eyebrow">Sistema</p><h1>Dashboard</h1></div><div class="actions"><a class="button" href="/ui/ingestions/new">Importa dataset</a><a class="button secondary" href="/ui/assets">Apri asset</a></div></div>
+<div class="card-grid metrics-grid">
+  <section class="card"><h2>Health</h2>{{ status_badge(health) }}</section>
+  <section class="card"><h2>Asset</h2><p class="big-number">{{ assets_count }}</p></section>
+  {% include "components/worker_status.html" %}
+</div>
+<section><h2>Ultime ingestion</h2>{% if jobs %}<div class="table-wrap"><table><thead><tr><th>Job</th><th>File</th><th>Stato</th><th>Aggiornato</th></tr></thead><tbody>{% for job in jobs %}<tr><td><a href="/ui/ingestions/{{ job.id }}"><code>{{ job.short_id }}</code></a></td><td>{{ job.filename }}</td><td>{{ status_badge(job.status) }}</td><td>{{ job.updated_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessuna ingestion.</p>{% endif %}</section>
+<section><h2>Ultimi processing run</h2>{% if runs %}<div class="table-wrap"><table><thead><tr><th>Run</th><th>Recipe</th><th>Stato</th><th>Aggiornato</th></tr></thead><tbody>{% for run in runs %}<tr><td><a href="/ui/processing/runs/{{ run.id }}"><code>{{ run.short_id }}</code></a></td><td>{{ run.recipe_name }}</td><td>{{ status_badge(run.status) }}</td><td>{{ run.updated_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessun processing run.</p>{% endif %}</section>
+<section><h2>Sorgenti configurate</h2>{% if sources %}<div class="card-grid">{% for source in sources %}<article class="card"><div class="card-heading"><a href="/ui/sources/{{ source.id }}">{{ source.name }}</a>{{ status_badge(source.freshness) }}</div><p>{{ source.database_type }}</p></article>{% endfor %}</div>{% endif %}</section>
+{% endblock %}
+

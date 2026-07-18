@@ -317,6 +317,15 @@ class WorkerStorage:
             ).fetchone()
         return self._row(row) if row is not None else None
 
+    def latest_for(self, task_type: TaskType, aggregate_id: str) -> WorkItem | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM work_items WHERE task_type = ? AND aggregate_id = ?
+                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                (task_type.value, aggregate_id),
+            ).fetchone()
+        return self._row(row) if row is not None else None
+
     def list_items(self, statuses: tuple[WorkStatus, ...] | None = None) -> list[WorkItem]:
         with self._connect() as connection:
             if statuses:

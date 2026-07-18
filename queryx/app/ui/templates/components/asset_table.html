@@ -1,0 +1,11 @@
+{% if assets %}
+<div class="table-wrap"><table>
+  <thead><tr><th>Nome</th><th>Asset ID</th><th>Ultima versione</th><th>Aggiornato</th><th>Warning</th></tr></thead>
+  <tbody>{% for asset in assets %}<tr>
+    <td><a href="/ui/assets/{{ asset.id }}">{{ asset.name }}</a></td>
+    <td><code>{{ asset.short_id }}</code></td><td>{{ asset.latest_version_number }}</td>
+    <td>{{ asset.updated_at }}</td><td>{{ asset.warnings|join(", ") if asset.warnings else "—" }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div>
+{% else %}<p class="empty">Nessun asset disponibile.</p>{% endif %}
+

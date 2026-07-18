@@ -1,0 +1,5 @@
+{% if fields %}<div class="table-wrap"><table>
+  <thead><tr><th>Campo</th><th>Tipo</th><th>Nullable</th></tr></thead>
+  <tbody>{% for field in fields %}<tr><td>{{ field.name }}</td><td><code>{{ field.data_type }}</code></td><td>{{ field.nullable }}</td></tr>{% endfor %}</tbody>
+</table></div>{% else %}<p class="empty">Schema non disponibile.</p>{% endif %}
+

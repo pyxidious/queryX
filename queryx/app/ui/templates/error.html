@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="error-page" aria-labelledby="error-title">
+  <p class="eyebrow">Errore {{ error_status }}</p>
+  <h1 id="error-title">{{ error_title }}</h1>
+  <p>{{ error_message }}</p>
+  <a class="button" href="/ui">Torna alla dashboard</a>
+</section>
+{% endblock %}
+

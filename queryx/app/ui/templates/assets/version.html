@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% from "components/status_badge.html" import status_badge %}
+{% block content %}
+{% include "components/alerts.html" %}
+<div class="page-heading"><div><p class="eyebrow">Asset version</p><h1>Versione {{ version.number }}</h1><p><code>{{ version.id }}</code> · {{ status_badge(version.status) }}</p></div>{% if can_prepare %}<form method="post" action="/ui/assets/{{ version.asset_id }}/versions/{{ version.id }}/prepare"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button" type="submit">Prepara analytics</button></form>{% endif %}</div>
+{% if version.drift %}<section class="card"><h2>Schema drift</h2>{% if version.drift.has_drift %}<div class="alert alert-warning">Differenze rispetto alla versione precedente.</div><p>Aggiunti: {{ version.drift.added|join(", ") or "—" }}</p><p>Rimossi: {{ version.drift.removed|join(", ") or "—" }}</p><p>Tipi: {{ version.drift.type_changes|join(" · ") or "—" }}</p>{% else %}<p>Nessun drift tecnico.</p>{% endif %}</section>{% endif %}
+<section><h2>Observed schema</h2>{% with fields=observed_schema %}{% include "components/schema_table.html" %}{% endwith %}</section>
+<section><h2>Storage binding</h2>{% for role, items in bindings_by_role.items() %}<h3>{{ role }}</h3>{% with bindings=items %}{% include "components/binding_table.html" %}{% endwith %}{% endfor %}</section>
+<section><h2>Processing run</h2>{% if runs %}<div class="card-grid">{% for run in runs %}<article class="card"><div class="card-heading"><a href="/ui/processing/runs/{{ run.id }}"><code>{{ run.short_id }}</code></a>{{ status_badge(run.status) }}</div><p>{{ run.recipe_name }}</p></article>{% endfor %}</div>{% else %}<p class="empty">Nessun run.</p>{% endif %}</section>
+<div class="two-columns"><section><h2>Canonical schema</h2>{% with fields=canonical_schema %}{% include "components/schema_table.html" %}{% endwith %}</section><section><h2>Serving schema</h2>{% with fields=serving_schema %}{% include "components/schema_table.html" %}{% endwith %}</section></div>
+<section><h2>Preview raw</h2>{% with preview=raw_preview %}{% include "components/preview_table.html" %}{% endwith %}</section>
+<section><h2>Preview serving</h2>{% with preview=serving_preview %}{% include "components/preview_table.html" %}{% endwith %}</section>
+{% endblock %}
+

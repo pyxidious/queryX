@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% from "components/status_badge.html" import status_badge %}
+{% block content %}<div class="page-heading"><div><p class="eyebrow">External sources</p><h1>Sources</h1></div></div><div class="card-grid">{% for source in sources %}<article class="card"><div class="card-heading"><h2><a href="/ui/sources/{{ source.id }}">{{ source.name }}</a></h2>{{ status_badge(source.freshness) }}</div><p>{{ source.database_type }} · {% if source.enabled %}abilitata{% else %}disabilitata{% endif %}</p>{% if source.warning %}<div class="alert alert-warning">{{ source.warning }}</div>{% endif %}</article>{% endfor %}</div>{% endblock %}
+

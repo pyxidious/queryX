@@ -1,0 +1,11 @@
+{% from "components/status_badge.html" import status_badge %}
+<section class="card" aria-labelledby="worker-title">
+  <div class="card-heading"><h2 id="worker-title">Worker</h2>{{ status_badge(worker_badge) }}</div>
+  <dl class="metrics compact">
+    <div><dt>Queued</dt><dd>{{ worker.queued }}</dd></div>
+    <div><dt>Leased</dt><dd>{{ worker.leased }}</dd></div>
+    <div><dt>Retry wait</dt><dd>{{ worker.retry_wait }}</dd></div>
+  </dl>
+  <p class="muted">ID: {{ worker.worker_id or "—" }}</p>
+</section>
+

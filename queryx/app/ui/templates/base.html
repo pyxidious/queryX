@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "QueryX" }} · QueryX</title>
+  <link rel="stylesheet" href="/ui/static/queryx.css">
+  <script src="/ui/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Vai al contenuto</a>
+  <header class="topbar">
+    <a class="brand" href="/ui">QueryX</a>
+    <nav aria-label="Navigazione principale">
+      <a href="/ui">Dashboard</a>
+      <a href="/ui/sources">Sources</a>
+      <a href="/ui/assets">Asset</a>
+      <a class="button small" href="/ui/ingestions/new">Importa dataset</a>
+    </nav>
+  </header>
+  <main id="main" class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">QueryX · modalità {{ execution_mode }}</footer>
+</body>
+</html>
+

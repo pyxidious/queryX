@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Passaggio 1</p><h1>Importa dataset</h1><p>CSV o Parquet, massimo {{ max_upload }} byte.</p></div></div>
+<form class="card form" action="/ui/ingestions" method="post" enctype="multipart/form-data">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>File CSV o Parquet<input type="file" name="file" accept=".csv,.parquet,text/csv,application/vnd.apache.parquet" required></label>
+  <label>Nome logico opzionale<input type="text" name="logical_name" maxlength="200" autocomplete="off"></label>
+  <label>Asset esistente opzionale<select name="asset_id"><option value="">Crea nuovo asset</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.short_id }}</option>{% endfor %}</select></label>
+  <button class="button" type="submit">Carica e avvia</button>
+</form>
+{% endblock %}
+

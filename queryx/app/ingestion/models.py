@@ -161,6 +161,7 @@ class IngestionJob(BaseModel):
     status: IngestionStatus
     source_type: str
     original_filename: str
+    logical_name: str | None = None
     source_reference: str | None = None
     target_backend: BackendType
     bytes_received: int = Field(default=0, ge=0)

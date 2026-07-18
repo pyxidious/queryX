@@ -1,0 +1,12 @@
+{% from "components/status_badge.html" import status_badge %}
+{% if versions %}<div class="table-wrap"><table>
+  <thead><tr><th>Versione</th><th>Stato</th><th>Source FP</th><th>Schema FP</th><th>Recipe FP</th><th>Drift</th><th>Creata</th></tr></thead>
+  <tbody>{% for version in versions %}<tr>
+    <td><a href="/ui/assets/{{ version.asset_id }}/versions/{{ version.id }}">v{{ version.number }}</a></td>
+    <td>{{ status_badge(version.status) }}</td><td><code>{{ version.source_fingerprint }}</code></td>
+    <td><code>{{ version.schema_fingerprint }}</code></td><td><code>{{ version.recipe_fingerprint }}</code></td>
+    <td>{% if version.drift and version.drift.has_drift %}<span class="status status-warning">drift</span>{% else %}no{% endif %}</td>
+    <td>{{ version.created_at }}</td>
+  </tr>{% endfor %}</tbody>
+</table></div>{% else %}<p class="empty">Nessuna versione.</p>{% endif %}
+

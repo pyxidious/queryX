@@ -1,0 +1,10 @@
+{% from "components/status_badge.html" import status_badge %}
+{% if bindings %}<div class="table-wrap"><table>
+  <thead><tr><th>ID</th><th>Backend</th><th>Stato</th><th>Formato</th><th>Recipe FP</th><th>Content FP</th><th>Schema FP</th></tr></thead>
+  <tbody>{% for binding in bindings %}<tr>
+    <td><code>{{ binding.short_id }}</code></td><td>{{ binding.backend }}</td><td>{{ status_badge(binding.status) }}</td>
+    <td>{{ binding.format }}</td><td><code>{{ binding.recipe_fingerprint }}</code></td>
+    <td><code>{{ binding.content_fingerprint }}</code></td><td><code>{{ binding.schema_fingerprint }}</code></td>
+  </tr>{% endfor %}</tbody>
+</table></div>{% else %}<p class="empty">Nessun binding {{ role }}.</p>{% endif %}
+
