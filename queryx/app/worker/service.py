@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+from queryx.app.acquisition.models import AcquisitionStatus
+from queryx.app.acquisition.service import AcquisitionService
 from queryx.app.core.config import Settings
 from queryx.app.ingestion.models import IngestionStatus
 from queryx.app.ingestion.service import IngestionService
@@ -33,11 +35,15 @@ class WorkerService:
         ingestion: IngestionService | None = None,
         processing: ProcessingService | None = None,
         worker_id: str | None = None,
+        acquisition: AcquisitionService | None = None,
     ) -> None:
         self.settings = settings
         self.storage = storage or WorkerStorage(settings.catalog_db_path)
         self.ingestion = ingestion or IngestionService(settings)
         self.processing = processing or ProcessingService(settings)
+        self.acquisition = acquisition or AcquisitionService(
+            settings, ingestion=self.ingestion, work_storage=self.storage
+        )
         self.worker_id = worker_id or settings.worker_id or _process_worker_id()
         self.handler = WorkItemHandler(
             settings,
@@ -45,6 +51,7 @@ class WorkerService:
             self.worker_id,
             self.ingestion,
             self.processing,
+            self.acquisition,
             shutdown_expired=self._shutdown_expired,
         )
         self._shutdown_requested = False
@@ -101,11 +108,13 @@ class WorkerService:
         resolved = now or _now()
         ingestion_report = self.ingestion.reconcile(resolved)
         processing_report = self.processing.reconcile(resolved)
+        acquisition_report = self.acquisition.reconcile(resolved)
         report = self._reconcile_work_items(resolved)
         metrics = {
             "work_items": report.model_dump(mode="json"),
             "ingestion": ingestion_report.model_dump(mode="json"),
             "processing": processing_report.model_dump(mode="json"),
+            "acquisition": acquisition_report.model_dump(mode="json"),
         }
         self.storage.record_reconciliation(self.worker_id, metrics)
         logger.info(
@@ -227,6 +236,19 @@ class WorkerService:
                 )
                 if not reused:
                     report.recreated_items.append(item.id)
+        for acquisition in self.acquisition.storage.list_runs(
+            (AcquisitionStatus.CREATED, AcquisitionStatus.INSPECTING, AcquisitionStatus.DOWNLOADING)
+        ):
+            task = (
+                TaskType.KAGGLE_INSPECT
+                if acquisition.status in {AcquisitionStatus.CREATED, AcquisitionStatus.INSPECTING}
+                else TaskType.KAGGLE_DOWNLOAD
+            )
+            key = (task, acquisition.id)
+            if key not in active_keys:
+                item, reused = self.storage.enqueue(task, acquisition.id, self.settings.worker_max_attempts)
+                if not reused:
+                    report.recreated_items.append(item.id)
         return report
 
     def _aggregate_state(self, item: WorkItem) -> str:
@@ -239,6 +261,32 @@ class WorkerService:
             if job.status == IngestionStatus.CANCELLED:
                 return "cancelled"
             if job.status in {IngestionStatus.FAILED, IngestionStatus.PARTIAL}:
+                return "failed"
+            return "active"
+        if item.task_type in {TaskType.KAGGLE_INSPECT, TaskType.KAGGLE_DOWNLOAD}:
+            run = self.acquisition.storage.get_run(item.aggregate_id)
+            if run is None:
+                return "missing"
+            expected = (
+                {
+                    AcquisitionStatus.AWAITING_SELECTION,
+                    AcquisitionStatus.DOWNLOADING,
+                    AcquisitionStatus.AWAITING_INGESTION,
+                    AcquisitionStatus.COMPLETED,
+                    AcquisitionStatus.PARTIAL,
+                }
+                if item.task_type == TaskType.KAGGLE_INSPECT
+                else {
+                    AcquisitionStatus.AWAITING_INGESTION,
+                    AcquisitionStatus.COMPLETED,
+                    AcquisitionStatus.PARTIAL,
+                }
+            )
+            if run.status in expected:
+                return "completed"
+            if run.status == AcquisitionStatus.CANCELLED:
+                return "cancelled"
+            if run.status == AcquisitionStatus.FAILED:
                 return "failed"
             return "active"
         run = self.processing.get_run(item.aggregate_id)
@@ -272,15 +320,19 @@ class WorkerService:
     def _fail_aggregate(self, item: WorkItem, code: str, message: str) -> None:
         if item.task_type == TaskType.INGESTION:
             self.ingestion.fail_execution(item.aggregate_id, code, message)
-        else:
+        elif item.task_type == TaskType.PROCESSING:
             self.processing.fail_execution(item.aggregate_id, code, message)
+        else:
+            self.acquisition.fail_execution(item.aggregate_id, code, message)
 
     def _cancel_aggregate(self, item: WorkItem) -> None:
         try:
             if item.task_type == TaskType.INGESTION:
                 self.ingestion.cancel(item.aggregate_id)
-            else:
+            elif item.task_type == TaskType.PROCESSING:
                 self.processing.cancel(item.aggregate_id)
+            else:
+                self.acquisition.cancel(item.aggregate_id)
         except Exception:
             logger.warning(
                 "aggregate_cancellation_reconciliation_failed task_type=%s aggregate_id=%s",

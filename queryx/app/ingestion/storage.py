@@ -711,6 +711,20 @@ class IngestionStorage:
             ).fetchall()
         return [LineageEdge(**dict(row)) for row in rows]
 
+    def add_lineage(self, source_reference: str, asset_version_id: str, operation: str) -> None:
+        """Add provider provenance without changing the immutable asset version."""
+        with self._connect() as connection:
+            existing = connection.execute(
+                """SELECT id FROM lineage_edges WHERE source_reference = ?
+                   AND target_asset_version_id = ? AND operation = ? LIMIT 1""",
+                (source_reference, asset_version_id, operation),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    "INSERT INTO lineage_edges VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid4()), source_reference, asset_version_id, operation, _now().isoformat()),
+                )
+
     def fail_jobs_for_version(self, version_id: str, error: dict[str, Any]) -> list[str]:
         now = _now().isoformat()
         with self._connect() as connection:

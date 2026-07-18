@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from queryx.app.acquisition.models import AcquisitionFile, AcquisitionRun
 from queryx.app.catalog.models import DataSource
 from queryx.app.ingestion.models import AssetSchemaDiff, AssetVersion, DataAsset, IngestionJob, StorageBinding
 from queryx.app.processing.models import ProcessingRun
@@ -166,6 +167,47 @@ class ScanVM:
     finished_at: str
     fingerprint: str
     warnings: list[str]
+
+
+@dataclass(frozen=True)
+class AcquisitionFileVM:
+    id: str
+    name: str
+    size: str
+    format: str
+    selected: bool
+    supported: bool
+    status: BadgeVM
+    logical_name: str
+    target_asset_id: str | None
+    ingestion_job_id: str | None
+    asset_id: str | None
+    asset_version_id: str | None
+    warning: str | None
+    error: str | None
+
+
+@dataclass(frozen=True)
+class AcquisitionVM:
+    id: str
+    short_id: str
+    dataset: str
+    requested_version: str
+    resolved_version: str
+    title: str
+    license_name: str
+    status: BadgeVM
+    files_total: int
+    files_selected: int
+    files_downloaded: int
+    files_ready: int
+    files_failed: int
+    updated_at: str
+    warnings: list[str]
+    errors: list[str]
+    terminal: bool
+    can_cancel: bool
+    can_select: bool
 
 
 def badge(status: Any) -> BadgeVM:
@@ -339,4 +381,48 @@ def scan_vm(scan: Any) -> ScanVM:
         finished_at=format_timestamp(scan.finished_at),
         fingerprint=abbreviate(scan.fingerprint),
         warnings=[str(value) for value in scan.warnings],
+    )
+
+
+def acquisition_file_vm(item: AcquisitionFile) -> AcquisitionFileVM:
+    return AcquisitionFileVM(
+        id=item.id,
+        name=item.display_name,
+        size=format_bytes(item.size_bytes) if item.size_bytes is not None else "—",
+        format=item.format,
+        selected=item.selected,
+        supported=str(item.status) != "unsupported",
+        status=badge(item.status),
+        logical_name=item.logical_name or "",
+        target_asset_id=item.target_asset_id,
+        ingestion_job_id=item.ingestion_job_id,
+        asset_id=item.asset_id,
+        asset_version_id=item.asset_version_id,
+        warning=structured_message(item.warning),
+        error=structured_message(item.error),
+    )
+
+
+def acquisition_vm(run: AcquisitionRun) -> AcquisitionVM:
+    terminal = str(run.status) in {"completed", "partial", "failed", "cancelled"}
+    return AcquisitionVM(
+        id=run.id,
+        short_id=abbreviate(run.id),
+        dataset=run.dataset_reference,
+        requested_version=run.requested_version,
+        resolved_version=run.resolved_version or "—",
+        title=run.title or "—",
+        license_name=run.license_name or "Non dichiarata",
+        status=badge(run.status),
+        files_total=run.files_total,
+        files_selected=run.files_selected,
+        files_downloaded=run.files_downloaded,
+        files_ready=run.files_ready,
+        files_failed=run.files_failed,
+        updated_at=format_timestamp(run.updated_at),
+        warnings=[structured_message(value) or "Warning" for value in run.warnings],
+        errors=[structured_message(value) or "Errore" for value in run.errors],
+        terminal=terminal,
+        can_cancel=not terminal,
+        can_select=str(run.status) == "awaiting_selection",
     )

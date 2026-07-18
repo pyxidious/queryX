@@ -19,6 +19,7 @@ dependencies = [
     "pyarrow>=17.0.0",
     "duckdb>=1.1.0",
     "jinja2>=3.1.4",
+    "kaggle>=1.7.4.5",
 ]
 
 [project.optional-dependencies]

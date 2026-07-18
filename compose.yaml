@@ -5,6 +5,7 @@ services:
       - .env
     environment:
       QUERYX_EXECUTION_MODE: worker
+      KAGGLE_CREDENTIALS_PATH: ""
     ports:
       - "8000:8000"
     extra_hosts:

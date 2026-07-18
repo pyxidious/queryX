@@ -1,0 +1,8 @@
+{% from "components/status_badge.html" import status_badge %}
+{% set polling = acquisition.status.label in ["created", "inspecting", "downloading", "awaiting_ingestion"] %}
+<section id="acquisition-status" class="card" {% if polling %}hx-get="/ui/acquisitions/{{ acquisition.id }}/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <div class="card-heading"><h2>Stato acquisizione</h2>{{ status_badge(acquisition.status) }}</div>
+  <dl class="details"><div><dt>File selezionati</dt><dd>{{ acquisition.files_selected }}</dd></div><div><dt>Scaricati</dt><dd>{{ acquisition.files_downloaded }}</dd></div><div><dt>Ready</dt><dd>{{ acquisition.files_ready }}</dd></div><div><dt>Falliti</dt><dd>{{ acquisition.files_failed }}</dd></div><div><dt>Aggiornato</dt><dd>{{ acquisition.updated_at }}</dd></div></dl>
+  {% if acquisition.warnings %}<div class="alert alert-warning">{{ acquisition.warnings|join(" · ") }}</div>{% endif %}
+  {% if acquisition.errors %}<div class="alert alert-danger">{{ acquisition.errors|join(" · ") }}</div>{% endif %}
+</section>

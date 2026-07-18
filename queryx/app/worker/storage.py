@@ -37,7 +37,9 @@ class WorkerStorage:
                 """
                 CREATE TABLE IF NOT EXISTS work_items (
                     id TEXT PRIMARY KEY,
-                    task_type TEXT NOT NULL CHECK(task_type IN ('ingestion', 'processing')),
+                    task_type TEXT NOT NULL CHECK(task_type IN (
+                        'ingestion', 'processing', 'kaggle_inspect', 'kaggle_download'
+                    )),
                     aggregate_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN (
                         'queued', 'leased', 'retry_wait', 'completed', 'failed', 'cancelled'
@@ -79,10 +81,53 @@ class WorkerStorage:
                 );
                 """
             )
+            self._migrate_task_types(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (8, _now().isoformat()),
             )
+
+    def _migrate_task_types(self, connection: sqlite3.Connection) -> None:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'work_items'"
+        ).fetchone()
+        if row is None or "kaggle_inspect" in row["sql"]:
+            return
+        connection.executescript(
+            """
+            DROP INDEX IF EXISTS idx_work_items_claim;
+            DROP INDEX IF EXISTS idx_work_items_lease;
+            DROP INDEX IF EXISTS idx_work_items_aggregate;
+            DROP INDEX IF EXISTS uq_work_item_active_aggregate;
+            ALTER TABLE work_items RENAME TO work_items_legacy;
+            CREATE TABLE work_items (
+                id TEXT PRIMARY KEY,
+                task_type TEXT NOT NULL CHECK(task_type IN (
+                    'ingestion', 'processing', 'kaggle_inspect', 'kaggle_download'
+                )),
+                aggregate_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'queued', 'leased', 'retry_wait', 'completed', 'failed', 'cancelled'
+                )),
+                priority INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL,
+                claimed_by TEXT, lease_expires_at TEXT, heartbeat_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                max_attempts INTEGER NOT NULL CHECK(max_attempts > 0),
+                cancellation_requested INTEGER NOT NULL DEFAULT 0,
+                last_error_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            INSERT INTO work_items SELECT * FROM work_items_legacy;
+            DROP TABLE work_items_legacy;
+            CREATE INDEX idx_work_items_claim
+                ON work_items(status, available_at, priority DESC, created_at);
+            CREATE INDEX idx_work_items_lease ON work_items(status, lease_expires_at);
+            CREATE INDEX idx_work_items_aggregate ON work_items(task_type, aggregate_id, created_at);
+            CREATE UNIQUE INDEX uq_work_item_active_aggregate
+                ON work_items(task_type, aggregate_id)
+                WHERE status IN ('queued', 'leased', 'retry_wait');
+            """
+        )
 
     def enqueue(
         self,

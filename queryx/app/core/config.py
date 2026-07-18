@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=None, env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "QueryX"
     log_level: str = "INFO"
@@ -70,6 +70,14 @@ class Settings(BaseSettings):
         repr=False,
     )
     queryx_ui_max_preview_columns: int = Field(default=50, ge=1, le=500)
+    kaggle_enabled: bool = False
+    kaggle_credentials_path: str | None = None
+    kaggle_download_timeout_seconds: int = Field(default=120, ge=1, le=3600)
+    kaggle_max_dataset_bytes: int = Field(default=1_073_741_824, ge=1)
+    kaggle_max_file_bytes: int = Field(default=268_435_456, ge=1)
+    kaggle_max_files: int = Field(default=50, ge=1, le=1000)
+    kaggle_allowed_formats: str = Field(default="csv,parquet", pattern=r"^[A-Za-z0-9_, -]+$")
+    kaggle_temp_dir: Path = Path("data/acquisition")
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 
@@ -99,4 +107,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(_env_file=".env")

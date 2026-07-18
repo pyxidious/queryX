@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 class TaskType(StrEnum):
     INGESTION = "ingestion"
     PROCESSING = "processing"
+    KAGGLE_INSPECT = "kaggle_inspect"
+    KAGGLE_DOWNLOAD = "kaggle_download"
 
 
 class WorkStatus(StrEnum):
@@ -54,4 +56,3 @@ class WorkReconciliationReport(BaseModel):
     missing_aggregates: list[str] = Field(default_factory=list)
     recreated_items: list[str] = Field(default_factory=list)
     duplicate_items: list[str] = Field(default_factory=list)
-

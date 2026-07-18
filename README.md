@@ -23,6 +23,7 @@ Sono disponibili:
 - coordinamento DuckDB cross-process tramite file lock nel volume dati;
 - API per stato job, preview limitata e consultazione degli asset;
 - UI server-rendered offline per dashboard, upload, polling, asset, versioni, binding, drift e preview;
+- acquisition provider Kaggle con inspection del manifest, selezione esplicita e dispatch asincrono verso ingestion;
 - test automatici offline.
 
 L'ingestion termina nello stato `ready`: il raw e la versione logica sono pronti. La preparazione analitica è un flusso separato; il relativo `ProcessingRun` diventa `completed` soltanto quando Parquet normalizzato e vista DuckDB sono entrambi pronti e validati.
@@ -57,6 +58,13 @@ Il progetto è un modular monolith: API e worker usano la stessa immagine e gli 
 flowchart LR
     Client[API client] --> API[FastAPI JSON API]
     Browser[Browser] --> UI[Jinja UI routes]
+    Browser -->|owner/dataset + selezione| UI
+    Kaggle[Kaggle API] --> Provider[Kaggle acquisition provider]
+    Provider --> Acquisition[Acquisition WorkItem]
+    Acquisition --> Worker
+    Worker --> AcqStage[(acquisition temp / staging)]
+    AcqStage --> ChildJob[Child IngestionJob]
+    ChildJob --> Ingestion
     UI --> Services[Application services]
     UI --> Queue
     UI --> DuckDB
@@ -91,6 +99,7 @@ Componenti:
 
 - **API**: espone health, source registry, catalogo, enrichment, ingestion e asset;
 - **UI routes**: renderizzano HTML Jinja e traducono form e azioni negli stessi application service usati dalle API, senza duplicare regole di dominio;
+- **acquisition**: isola provider esterni, manifest e download; consegna poi file controllati alla normale ingestion;
 - **source registry**: costruisce le sorgenti configurate senza persistere credenziali nel catalogo;
 - **connectors**: estraggono metadata da MySQL e MongoDB entro budget configurati;
 - **catalog**: salva scansioni, snapshot, fingerprint, drift e stato current/stale;
@@ -104,12 +113,12 @@ Componenti:
 
 ### UI server-rendered
 
-La UI è disponibile sotto `/ui` e non modifica i contratti JSON. FastAPI gestisce routing e form multipart, Jinja2 produce HTML con autoescape, mentre gli asset CSS e JavaScript sono serviti localmente da QueryX: non servono CDN, Node.js o una build frontend. Il JavaScript locale implementa il polling dichiarativo HTMX usato dai frammenti di stato.
+La UI è disponibile sotto `/ui` e non modifica i contratti JSON. FastAPI gestisce routing e form multipart, Jinja2 produce HTML con autoescape, mentre gli asset CSS e JavaScript sono serviti localmente da QueryX: non servono CDN, Node.js o una build frontend. `queryx-polling.js` è un helper locale limitato al polling e alla sostituzione dei frammenti usati da QueryX; non è distribuito né descritto come HTMX ufficiale.
 
 Il percorso principale è:
 
 ```text
-upload → redirect al job → polling HTMX → asset/versione → prepare → polling run → preview DuckDB
+upload → redirect al job → polling locale → asset/versione → prepare → polling run → preview DuckDB
 ```
 
 La dashboard mostra health, worker online/stale/offline, contatori della coda, asset, ingestion e run recenti e freshness delle sorgenti. In worker mode un worker non disponibile genera un alert evidente, ma le pagine di consultazione restano navigabili.
@@ -121,6 +130,46 @@ Solo i frammenti `/status` effettuano polling ogni due secondi. Il polling inges
 Le preview rispettano i limiti dei service esistenti e il limite UI di colonne. Valori null, booleani e strutturati vengono formattati centralmente, i testi lunghi sono troncati e ogni cella è autoescaped. “Preview raw” legge il file raw controllato; “Preview DuckDB” interroga esclusivamente la vista del serving binding con un limite imposto dal server.
 
 Ogni POST HTML richiede un token CSRF HMAC, inviato sia nel cookie `HttpOnly` `SameSite=Lax` sia nel form. Il confronto double-submit e la firma usano `QUERYX_UI_SECRET_KEY`. Le pagine errore UI per 404, 409, 413, 422 e 500 non includono stack trace o dettagli fisici. Questa protezione è intenzionalmente minima e non sostituisce autenticazione e autorizzazione in un deployment pubblico.
+
+### Kaggle come acquisition provider
+
+Kaggle è esclusivamente un provider di acquisizione. Non possiede reader, inspection tecnica, asset creation o normalizzazione alternativi: dopo il download ogni file selezionato genera un normale `IngestionJob`, che attraversa staging, inspection CSV/Parquet, fingerprint, raw binding e creazione `DataAsset`/`AssetVersion` esattamente come un upload locale.
+
+`AcquisitionRun` rappresenta la richiesta dataset/versione e il suo avanzamento complessivo. `AcquisitionFile` rappresenta una voce del manifest persistito, la selezione dell'utente, l'eventuale mapping verso un asset e il collegamento al child job. L'inspection risolve `latest` in una versione concreta, registra titolo e licenza dichiarata e classifica CSV/Parquet come selezionabili; gli altri formati rimangono `unsupported` e non possono essere avviati.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser/API
+    participant Q as SQLite WorkItem
+    participant W as Worker
+    participant K as Kaggle provider
+    participant A as Acquisition service
+    participant I as Ingestion service
+    participant F as staging/raw
+    B->>Q: kaggle_inspect(owner/dataset, latest)
+    W->>K: inspect manifest only
+    K-->>A: resolved version + files + declared license
+    A-->>B: awaiting_selection
+    B->>Q: kaggle_download(selected file IDs)
+    W->>K: bounded download, one file at a time
+    K->>F: controlled temporary file
+    A->>I: create normal IngestionJob + WorkItem
+    A-->>Q: acquisition download completed
+    W->>I: execute child ingestion later
+    I->>F: staging → raw
+    I-->>A: asset/version ready
+    A->>A: reconciliation → completed/partial/failed
+```
+
+Ogni file può avere `logical_name` e `target_asset_id` differenti. Nessun file viene selezionato automaticamente e QueryX non scarica l'intero dataset indiscriminatamente. Il riferimento di provenance viene costruito internamente come `kaggle://owner/dataset@version/file` e aggiunto al lineage dopo il successo del child job. La licenza è soltanto metadata dichiarato dal provider: QueryX non fornisce valutazioni legali sul suo utilizzo.
+
+Inspection e download sono WorkItem distinti. Il task download accoda i child ingestion e termina senza attenderli, così il singolo worker può reclamarli successivamente senza deadlock. Reconciliation osserva i figli e conclude il parent soltanto quando sono terminali: tutti ready → `completed`; ready e fallimenti/cancellazioni → `partial`; nessun risultato valido → `failed`.
+
+Le rotte Kaggle richiedono `QUERYX_EXECUTION_MODE=worker`: non eseguono chiamate provider nel processo API né in modalità inline. Questo mantiene credenziali e traffico Kaggle confinati al worker.
+
+Il fingerprint della richiesta include provider, dataset canonico, versione risolta, file selezionati, mapping logico/asset e `kaggle-acquisition-v1`. Esclude credenziali, timestamp, path e WorkItem. Una richiesta equivalente attiva produce `409`; un risultato equivalente completato viene riusato; versioni o mapping differenti restano acquisizioni distinte.
+
+Timeout e interruzioni esplicitamente transitorie usano lease e backoff della coda. Riferimenti invalidi, provider disabilitato, credenziali mancanti, formati non supportati e limiti superati sono permanenti. La cancellazione è cooperativa, impedisce nuovi child job ai checkpoint e non elimina asset già pronti. Reconciliation rileva run stale, child mancanti, child WorkItem mancanti e temporanei orfani senza cancellare raw, normalized o asset validi.
 
 ### Flusso delle sorgenti esterne
 
@@ -328,6 +377,10 @@ Endpoint principali già presenti:
 - `GET /assets/{asset_id}/versions/{version_id}/bindings`;
 - `GET /assets/{asset_id}/versions/{version_id}/data-preview?limit=10`.
 - `GET /worker/status`.
+- `GET /acquisition/providers`;
+- `POST /acquisitions/kaggle/inspect`;
+- `GET /acquisitions/{acquisition_id}` e `/files`;
+- `POST /acquisitions/{acquisition_id}/start` e `/cancel`.
 
 Upload CSV:
 
@@ -393,6 +446,21 @@ curl -sS http://localhost:8000/worker/status
 
 La data preview accetta soltanto `limit` entro il massimo configurato. Non accetta SQL, filtri o nomi di relazione e legge esclusivamente dalla vista associata al serving binding.
 
+Inspection e selezione Kaggle:
+
+```bash
+curl -sS -X POST http://localhost:8000/acquisitions/kaggle/inspect \
+  -H 'Content-Type: application/json' \
+  -d '{"dataset":"owner/dataset","version":"latest"}'
+curl -sS http://localhost:8000/acquisitions/ACQUISITION_ID/files
+curl -sS -X POST http://localhost:8000/acquisitions/ACQUISITION_ID/start \
+  -H 'Content-Type: application/json' \
+  -d '{"files":[{"file_id":"FILE_ID","logical_name":"customers","target_asset_id":null}]}'
+curl -sS http://localhost:8000/acquisitions/ACQUISITION_ID
+```
+
+In worker mode entrambe le POST operative restituiscono `202`. Dataset e file reference non sono URL arbitrari: il primo deve essere `owner/dataset`, mentre i secondi sono ID provenienti dal manifest persistito.
+
 Gli errori hanno forma strutturata, per esempio `detail.error.code` e `detail.error.message`; non includono stack trace o percorsi assoluti.
 
 ## Rotte UI
@@ -408,6 +476,10 @@ Le rotte HTML principali sono:
 - `GET /ui/processing/runs/{run_id}` e `/status`;
 - `POST /ui/processing/runs/{run_id}/cancel`;
 - `GET /ui/sources` e `/ui/sources/{source_id}`.
+- `GET /ui/acquisitions/kaggle`;
+- `POST /ui/acquisitions/kaggle/inspect`;
+- `GET /ui/acquisitions/{acquisition_id}` e `/status`;
+- `POST /ui/acquisitions/{acquisition_id}/start` e `/cancel`.
 
 Il browser gestisce automaticamente il token CSRF emesso dalla pagina form. Per questo gli esempi `curl` restano riferiti alle API JSON: le POST UI non sono endpoint di automazione.
 
@@ -419,6 +491,7 @@ data/
 ├── staging/                # file temporanei durante acquisition/inspection
 ├── raw/                    # upload validati, immutati
 ├── normalized/             # Parquet canonici per recipe
+├── acquisition/            # temporanei provider isolati, ripuliti dopo dispatch/failure
 ├── queryx.duckdb           # catalogo viste serving, dati non duplicati
 └── queryx.duckdb.lock      # coordinamento cross-process controllato
 ```
@@ -457,8 +530,18 @@ I file sono nel filesystem/volume, non in SQLite. `data/` è esclusa dal reposit
 | `QUERYX_UI_ENABLED` | `true` | Registra le rotte e gli asset locali `/ui`; se `false`, rispondono 404. |
 | `QUERYX_UI_SECRET_KEY` | nessun segreto reale nel repository | Chiave HMAC per i token CSRF; deve essere sostituita fuori dallo sviluppo locale. |
 | `QUERYX_UI_MAX_PREVIEW_COLUMNS` | `50` | Massimo numero di colonne renderizzate in una preview HTML. |
+| `KAGGLE_ENABLED` | `false` | Abilita i task acquisition Kaggle nel worker. |
+| `KAGGLE_CREDENTIALS_PATH` | vuoto | Path worker-only a un `kaggle.json` montato; non viene persistito né restituito. |
+| `KAGGLE_DOWNLOAD_TIMEOUT_SECONDS` | `120` | Timeout nominale delle operazioni provider. |
+| `KAGGLE_MAX_DATASET_BYTES` | `1073741824` | Somma massima dichiarata dal manifest. |
+| `KAGGLE_MAX_FILE_BYTES` | `268435456` | Limite dichiarato e bounded del singolo download. |
+| `KAGGLE_MAX_FILES` | `50` | Numero massimo di voci manifest/selezione. |
+| `KAGGLE_ALLOWED_FORMATS` | `csv,parquet` | Formati selezionabili nella prima versione. |
+| `KAGGLE_TEMP_DIR` | `/app/data/acquisition` | Directory temporanea controllata del worker. |
 
 Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, SQLite e Ollama. Non inserire credenziali reali nel repository.
+
+Le credenziali Kaggle devono essere montate soltanto nel container `queryx-worker`. Compose azzera esplicitamente `KAGGLE_CREDENTIALS_PATH` nel processo API; token, username, path e URL firmati non entrano in SQLite, WorkItem, fingerprint, risposte o template. I test usano `FakeKaggleProvider` e non effettuano accessi Internet.
 
 ## Limiti attuali
 
@@ -469,14 +552,15 @@ Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, 
 - CSV supporta UTF-8 e schema inferito su campione, senza policy avanzate per locale o encoding;
 - serving limitato a viste DuckDB e preview bounded; nessuna API per SQL arbitrario;
 - UI locale senza autenticazione completa, filtri, ordinamento avanzato o aggiornamenti WebSocket/SSE;
-- nessuna acquisizione Kaggle o integrazione GraphDB;
+- Kaggle richiede uno slug e una selezione manuale: nessuna ricerca, scelta autonoma o download globale;
+- nessuna integrazione GraphDB;
 - nessuna query generation.
 
 ## Roadmap
 
 Funzionalità pianificate, **non ancora implementate**:
 
-1. acquisizione Kaggle dietro un source adapter;
+1. ricerca/catalogo Kaggle opzionale con policy esplicite;
 2. autenticazione/autorizzazione e UX avanzata della UI;
 3. materializzazione controllata in MySQL e MongoDB;
 4. storage e lineage GraphDB;

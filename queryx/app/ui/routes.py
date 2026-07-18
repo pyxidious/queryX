@@ -22,6 +22,8 @@ from queryx.app.processing.service import ProcessingService, ProcessingServiceEr
 from queryx.app.sources.registry import SourceRegistry
 from queryx.app.ui.view_models import (
     AlertVM,
+    acquisition_file_vm,
+    acquisition_vm,
     asset_vm,
     badge,
     binding_vm,
@@ -42,7 +44,10 @@ from queryx.app.worker.storage import WorkItemConflictError, WorkerStorage
 router = APIRouter(prefix="/ui", include_in_schema=False)
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 _CSRF_COOKIE = "queryx_ui_csrf"
-_STATIC_FILES = {"queryx.css": "text/css; charset=utf-8", "htmx.min.js": "text/javascript; charset=utf-8"}
+_STATIC_FILES = {
+    "queryx.css": "text/css; charset=utf-8",
+    "queryx-polling.js": "text/javascript; charset=utf-8",
+}
 
 
 def _settings(request: Request) -> Settings:
@@ -62,6 +67,23 @@ def _coordinator(request: Request) -> TaskCoordinator:
     settings = _settings(request)
     ingestion, processing, storage = _services(request)
     return TaskCoordinator(settings, ingestion, processing, storage)
+
+
+def _acquisition_service(request: Request) -> AcquisitionService:
+    settings = _settings(request)
+    return AcquisitionService(settings)
+
+
+def _acquisition_coordinator(request: Request) -> TaskCoordinator:
+    settings = _settings(request)
+    acquisition = _acquisition_service(request)
+    return TaskCoordinator(
+        settings,
+        ingestion=acquisition.ingestion,
+        work_storage=acquisition.work_storage,
+        acquisition=acquisition,
+        initialize_processing=False,
+    )
 
 
 def _signed_csrf(secret: str) -> str:
@@ -206,6 +228,102 @@ async def new_ingestion(request: Request) -> HTMLResponse:
             "assets": [asset_vm(asset) for asset in IngestionService(_settings(request)).list_assets()],
         },
     )
+
+
+@router.get("/acquisitions/kaggle", response_class=HTMLResponse)
+async def kaggle_new(request: Request) -> HTMLResponse:
+    settings = _settings(request)
+    return _render(
+        request,
+        "acquisition/kaggle.html",
+        {"title": "Importa da Kaggle", "enabled": settings.kaggle_enabled},
+    )
+
+
+@router.post("/acquisitions/kaggle/inspect", response_class=HTMLResponse)
+async def kaggle_inspect_ui(
+    request: Request,
+    dataset: str = Form(...),
+    version: str = Form(default="latest"),
+    csrf_token: str | None = Form(default=None),
+) -> Response:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        submission = _acquisition_coordinator(request).inspect_kaggle(dataset, version)
+        return RedirectResponse(f"/ui/acquisitions/{submission.run.id}", status_code=303)
+    except AcquisitionServiceError as exc:
+        return _error(request, exc.status_code, "Acquisizione non disponibile", exc.message)
+
+
+@router.get("/acquisitions/{acquisition_id}", response_class=HTMLResponse)
+async def acquisition_detail(request: Request, acquisition_id: str) -> HTMLResponse:
+    service = _acquisition_service(request)
+    run = service.storage.get_run(acquisition_id)
+    if run is None:
+        return _error(request, 404, "Acquisizione non trovata", "L'acquisizione richiesta non esiste.")
+    return _render(
+        request,
+        "acquisition/detail.html",
+        {
+            "title": "Acquisizione Kaggle",
+            "acquisition": acquisition_vm(run),
+            "files": [acquisition_file_vm(item) for item in service.storage.list_files(run.id)],
+            "assets": [asset_vm(item) for item in service.ingestion.list_assets()],
+        },
+    )
+
+
+@router.get("/acquisitions/{acquisition_id}/status", response_class=HTMLResponse)
+async def acquisition_status_ui(request: Request, acquisition_id: str) -> HTMLResponse:
+    service = _acquisition_service(request)
+    run = service.storage.get_run(acquisition_id)
+    if run is None:
+        return _error(request, 404, "Acquisizione non trovata", "L'acquisizione richiesta non esiste.")
+    return _render(
+        request,
+        "components/acquisition_status.html",
+        {"acquisition": acquisition_vm(run), "fragment": True},
+    )
+
+
+@router.post("/acquisitions/{acquisition_id}/start", response_class=HTMLResponse)
+async def acquisition_start_ui(request: Request, acquisition_id: str) -> Response:
+    form = await request.form()
+    invalid = _require_csrf(request, str(form.get("csrf_token") or ""))
+    if invalid:
+        return invalid
+    file_ids = [str(value) for value in form.getlist("file_id")]
+    selections = [
+        FileSelection(
+            file_id=file_id,
+            logical_name=str(form.get(f"logical_name_{file_id}") or "") or None,
+            target_asset_id=str(form.get(f"target_asset_id_{file_id}") or "") or None,
+        )
+        for file_id in file_ids
+    ]
+    try:
+        _acquisition_coordinator(request).start_acquisition(acquisition_id, selections)
+        return RedirectResponse(f"/ui/acquisitions/{acquisition_id}", status_code=303)
+    except AcquisitionServiceError as exc:
+        return _error(request, exc.status_code, "Selezione non valida", exc.message)
+
+
+@router.post("/acquisitions/{acquisition_id}/cancel", response_class=HTMLResponse)
+async def acquisition_cancel_ui(
+    request: Request,
+    acquisition_id: str,
+    csrf_token: str | None = Form(default=None),
+) -> Response:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        _acquisition_coordinator(request).cancel_acquisition(acquisition_id)
+        return RedirectResponse(f"/ui/acquisitions/{acquisition_id}", status_code=303)
+    except AcquisitionServiceError as exc:
+        return _error(request, exc.status_code, "Cancellazione non disponibile", exc.message)
 
 
 @router.post("/ingestions", response_class=HTMLResponse)
@@ -469,3 +587,5 @@ def _source_view_models(settings: Settings) -> list[Any]:
     except Exception:
         current = {}
     return [source_vm(source, current.get(source.id)) for source in registry.list_sources()]
+from queryx.app.acquisition.models import FileSelection
+from queryx.app.acquisition.service import AcquisitionService, AcquisitionServiceError

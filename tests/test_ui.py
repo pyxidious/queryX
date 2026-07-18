@@ -107,7 +107,7 @@ def test_dashboard_static_assets_and_worker_offline(monkeypatch: object, tmp_pat
     assert response.status_code == 200
     assert "Dashboard" in response.text
     assert "Worker offline" in response.text
-    assert 'src="/ui/static/htmx.min.js"' in response.text
+    assert 'src="/ui/static/queryx-polling.js"' in response.text
     assert client.get("/ui/static/queryx.css").status_code == 200
     assert "cdn" not in response.text.lower()
 

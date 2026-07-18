@@ -4,7 +4,10 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
+from pydantic import BaseModel, Field
 
+from queryx.app.acquisition.models import FileSelection
+from queryx.app.acquisition.service import AcquisitionService, AcquisitionServiceError
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
 from queryx.app.catalog.service import CatalogService
@@ -21,6 +24,15 @@ from queryx.app.worker.storage import WorkItemConflictError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+class KaggleInspectRequest(BaseModel):
+    dataset: str = Field(min_length=3, max_length=201)
+    version: str = Field(default="latest", min_length=1, max_length=128)
+
+
+class AcquisitionStartRequest(BaseModel):
+    files: list[FileSelection] = Field(min_length=1)
 
 
 def _build_orchestrator(settings: Settings | None = None) -> ScanOrchestrator:
@@ -71,6 +83,23 @@ def _worker_service(settings: Settings | None = None) -> WorkerService:
     return WorkerService(settings or get_settings())
 
 
+def _acquisition_service(settings: Settings | None = None) -> AcquisitionService:
+    return AcquisitionService(settings or get_settings())
+
+
+def _acquisition_coordinator(settings: Settings | None = None) -> TaskCoordinator:
+    resolved = settings or get_settings()
+    ingestion = _ingestion_service(resolved)
+    acquisition = _acquisition_service(resolved)
+    return TaskCoordinator(
+        resolved,
+        ingestion=ingestion,
+        work_storage=acquisition.work_storage,
+        acquisition=acquisition,
+        initialize_processing=False,
+    )
+
+
 def _task_coordinator(settings: Settings | None = None) -> TaskCoordinator:
     ingestion = _ingestion_service()
     resolved = settings or ingestion.settings
@@ -104,9 +133,13 @@ def health() -> dict[str, Any]:
     worker_status: dict[str, object] | None = None
     worker_ok = True
     if settings.queryx_execution_mode == "worker":
-        worker_status = _worker_service(settings).status()
-        worker_ok = worker_status["status"] == "online"
-        checks["worker"] = {"ok": worker_ok, "status": worker_status["status"]}
+        try:
+            worker_status = _worker_service(settings).status()
+            worker_ok = worker_status["status"] == "online"
+            checks["worker"] = {"ok": worker_ok, "status": worker_status["status"]}
+        except (OSError, ValueError):
+            worker_ok = False
+            checks["worker"] = {"ok": False, "status": "offline"}
     return {
         "status": "ok" if checks and all(check["ok"] for check in checks.values()) and worker_ok else "degraded",
         "checks": checks,
@@ -121,6 +154,83 @@ async def health_endpoint() -> dict[str, Any]:
 @router.get("/worker/status")
 async def worker_status() -> dict[str, object]:
     return _worker_service().status()
+
+
+@router.get("/acquisition/providers")
+async def acquisition_providers() -> dict[str, Any]:
+    return {"providers": _acquisition_service().providers()}
+
+
+@router.post("/acquisitions/kaggle/inspect", status_code=status.HTTP_201_CREATED)
+async def inspect_kaggle(payload: KaggleInspectRequest, response: Response) -> dict[str, Any]:
+    try:
+        coordinator = _acquisition_coordinator()
+        submission = coordinator.inspect_kaggle(payload.dataset, payload.version)
+        if coordinator.settings.queryx_execution_mode == "worker":
+            response.status_code = status.HTTP_202_ACCEPTED
+        return {
+            "acquisition": submission.run.model_dump(mode="json"),
+            "work_item_id": submission.work_item_id,
+        }
+    except AcquisitionServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}},
+        ) from exc
+
+
+@router.get("/acquisitions/{acquisition_id}")
+async def get_acquisition(acquisition_id: str) -> dict[str, Any]:
+    run = _acquisition_service().storage.get_run(acquisition_id)
+    if run is None:
+        raise _not_found("acquisition", acquisition_id)
+    return run.model_dump(mode="json")
+
+
+@router.get("/acquisitions/{acquisition_id}/files")
+async def get_acquisition_files(acquisition_id: str) -> dict[str, Any]:
+    service = _acquisition_service()
+    if service.storage.get_run(acquisition_id) is None:
+        raise _not_found("acquisition", acquisition_id)
+    return {
+        "acquisition_id": acquisition_id,
+        "files": [item.model_dump(mode="json") for item in service.storage.list_files(acquisition_id)],
+    }
+
+
+@router.post("/acquisitions/{acquisition_id}/start", status_code=status.HTTP_201_CREATED)
+async def start_acquisition(
+    acquisition_id: str,
+    payload: AcquisitionStartRequest,
+    response: Response,
+) -> dict[str, Any]:
+    try:
+        coordinator = _acquisition_coordinator()
+        submission = coordinator.start_acquisition(acquisition_id, payload.files)
+        if coordinator.settings.queryx_execution_mode == "worker" and submission.work_item_id:
+            response.status_code = status.HTTP_202_ACCEPTED
+        return {
+            "acquisition": submission.run.model_dump(mode="json"),
+            "work_item_id": submission.work_item_id,
+            "reused": submission.reused,
+        }
+    except AcquisitionServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}},
+        ) from exc
+
+
+@router.post("/acquisitions/{acquisition_id}/cancel")
+async def cancel_acquisition(acquisition_id: str) -> dict[str, Any]:
+    try:
+        run = _acquisition_coordinator().cancel_acquisition(acquisition_id)
+        return run.model_dump(mode="json")
+    except AcquisitionServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}},
+        ) from exc
 
 
 @router.get("/llm/health")

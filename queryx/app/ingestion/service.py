@@ -160,6 +160,70 @@ class IngestionService:
         finally:
             await upload.close()
 
+    def accept_acquired_file(
+        self,
+        source: Path,
+        original_filename: str,
+        asset_id: str | None = None,
+        logical_name: str | None = None,
+        enqueue: bool = True,
+    ) -> UploadResult:
+        """Adopt a provider file into controlled staging without running inspection."""
+        resolved_name = logical_name.strip() if logical_name and logical_name.strip() else None
+        if resolved_name is not None and len(resolved_name) > 200:
+            raise IngestionServiceError("invalid_logical_name", "Logical name is too long", 422)
+        job = self.storage.create_job(original_filename, asset_id=asset_id, logical_name=resolved_name)
+        staged_path: Path | None = None
+        try:
+            safe_name, _ = validate_filename(original_filename)
+            if asset_id is not None and self.storage.get_asset(asset_id) is None:
+                raise IngestionServiceError("asset_not_found", "Target asset was not found", 404, job.id)
+            if source.is_symlink() or not source.is_file():
+                raise IngestionServiceError("unsafe_acquired_file", "Acquired file is unavailable", 422, job.id)
+            internal_name = f"{uuid4().hex}{Path(safe_name).suffix.lower()}"
+            staged_path = self._controlled_path(self.staging_dir, internal_name)
+            self.storage.transition_job(
+                job.id,
+                IngestionStatus.ACQUIRING,
+                source_reference=f"staging/{internal_name}",
+            )
+            received = 0
+            with source.open("rb") as incoming, staged_path.open("xb") as outgoing:
+                while chunk := incoming.read(1024 * 1024):
+                    received += len(chunk)
+                    validate_size(received, self.settings.ingestion_max_upload_bytes)
+                    outgoing.write(chunk)
+            validate_size(received, self.settings.ingestion_max_upload_bytes)
+            if received == 0:
+                raise IngestionServiceError("empty_file", "Uploaded file is empty", 400, job.id)
+            self.storage.update_job(job.id, bytes_received=received)
+            work_item_id = None
+            if enqueue:
+                from queryx.app.worker.models import TaskType
+                from queryx.app.worker.storage import WorkerStorage
+
+                item, _ = WorkerStorage(self.settings.catalog_db_path).enqueue(
+                    TaskType.INGESTION, job.id, self.settings.worker_max_attempts
+                )
+                work_item_id = item.id
+            return UploadResult(
+                job_id=job.id,
+                work_item_id=work_item_id,
+                status=IngestionStatus.ACQUIRING,
+                asset_id=asset_id,
+            )
+        except IngestionValidationError as exc:
+            self._cleanup(staged_path)
+            self._fail_job(job.id, exc.code, exc.message)
+            status_code = 413 if exc.code == "upload_too_large" else 415
+            raise IngestionServiceError(exc.code, exc.message, status_code, job.id) from exc
+        except Exception:
+            self._cleanup(staged_path)
+            current = self.storage.get_job(job.id)
+            if current and current.status not in {IngestionStatus.FAILED, IngestionStatus.CANCELLED}:
+                self._fail_job(job.id, "acquired_file_acceptance_failed", "Acquired file could not be accepted")
+            raise
+
     def execute_ingestion_job(
         self,
         job_id: str,

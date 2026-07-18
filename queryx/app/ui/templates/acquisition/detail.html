@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "components/status_badge.html" import status_badge %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Kaggle acquisition</p><h1>{{ acquisition.dataset }}</h1><p><code>{{ acquisition.short_id }}</code></p></div></div>
+{% include "components/acquisition_status.html" %}
+<section class="card"><h2>Dataset</h2><dl class="details"><div><dt>Titolo</dt><dd>{{ acquisition.title }}</dd></div><div><dt>Versione richiesta</dt><dd>{{ acquisition.requested_version }}</dd></div><div><dt>Versione risolta</dt><dd>{{ acquisition.resolved_version }}</dd></div><div><dt>Licenza dichiarata</dt><dd>{{ acquisition.license_name }}</dd></div></dl><p class="muted">La licenza è metadata dichiarato dal provider; QueryX non valuta la compatibilità legale d'uso.</p></section>
+{% if acquisition.can_select %}
+<form method="post" action="/ui/acquisitions/{{ acquisition.id }}/start">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <section><h2>Manifest</h2><div class="table-wrap"><table><thead><tr><th>Seleziona</th><th>File</th><th>Dimensione</th><th>Formato</th><th>Stato</th><th>Nome logico</th><th>Asset target</th></tr></thead><tbody>
+  {% for file in files %}<tr><td>{% if file.supported %}<input type="checkbox" name="file_id" value="{{ file.id }}" aria-label="Seleziona {{ file.name }}">{% else %}—{% endif %}</td><td>{{ file.name }}</td><td>{{ file.size }}</td><td>{{ file.format }}</td><td>{{ status_badge(file.status) }}</td><td>{% if file.supported %}<input name="logical_name_{{ file.id }}" maxlength="200" autocomplete="off">{% else %}—{% endif %}</td><td>{% if file.supported %}<select name="target_asset_id_{{ file.id }}"><option value="">Nuovo asset</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.short_id }}</option>{% endfor %}</select>{% else %}—{% endif %}</td></tr>{% endfor %}
+  </tbody></table></div><button class="button" type="submit">Scarica file selezionati</button></section>
+</form>
+{% elif files %}
+<section><h2>File</h2><div class="table-wrap"><table><thead><tr><th>File</th><th>Dimensione</th><th>Formato</th><th>Stato</th><th>Risultato</th></tr></thead><tbody>{% for file in files %}<tr><td>{{ file.name }}</td><td>{{ file.size }}</td><td>{{ file.format }}</td><td>{{ status_badge(file.status) }}</td><td>{% if file.ingestion_job_id %}<a href="/ui/ingestions/{{ file.ingestion_job_id }}">Job</a>{% endif %}{% if file.asset_id %} · <a href="/ui/assets/{{ file.asset_id }}">Asset</a>{% endif %}{% if file.error %}<span class="text-danger">{{ file.error }}</span>{% endif %}</td></tr>{% endfor %}</tbody></table></div></section>
+{% endif %}
+{% if acquisition.can_cancel %}<form method="post" action="/ui/acquisitions/{{ acquisition.id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button danger" type="submit">Annulla acquisizione</button></form>{% endif %}
+{% endblock %}

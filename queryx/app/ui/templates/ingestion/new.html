@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="page-heading"><div><p class="eyebrow">Passaggio 1</p><h1>Importa dataset</h1><p>CSV o Parquet, massimo {{ max_upload }} byte.</p></div></div>
+<nav class="tabs" aria-label="Modalità importazione"><strong>Upload locale</strong><a href="/ui/acquisitions/kaggle">Kaggle</a></nav>
 <form class="card form" action="/ui/ingestions" method="post" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>File CSV o Parquet<input type="file" name="file" accept=".csv,.parquet,text/csv,application/vnd.apache.parquet" required></label>
@@ -9,4 +10,3 @@
   <button class="button" type="submit">Carica e avvia</button>
 </form>
 {% endblock %}
-
