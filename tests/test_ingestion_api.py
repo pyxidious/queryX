@@ -141,5 +141,51 @@ def test_assets_list_and_existing_sources_contract_do_not_regress(
     assert "sources" in routes.list_sources()
 
 
+def test_asset_version_and_diff_endpoints_and_optional_asset_id(
+    ingestion_client: tuple[FastAPI, IngestionService, Path],
+) -> None:
+    app, _, _ = ingestion_client
+
+    async def exercise() -> tuple[httpx.Response, ...]:
+        async with _client(app) as client:
+            first = await client.post(
+                "/ingestions/uploads",
+                files={"file": ("data.csv", b"id\n1\n", "text/csv")},
+            )
+            second = await client.post(
+                "/ingestions/uploads",
+                data={"asset_id": first.json()["asset_id"]},
+                files={"file": ("data.csv", b"id,name\n2,Ada\n", "text/csv")},
+            )
+            asset_id = first.json()["asset_id"]
+            version_id = second.json()["asset_version_id"]
+            return (
+                first,
+                second,
+                await client.get(f"/assets/{asset_id}"),
+                await client.get(f"/assets/{asset_id}/versions"),
+                await client.get(f"/assets/{asset_id}/versions/{version_id}"),
+                await client.get(f"/assets/{asset_id}/diff"),
+                await client.get(f"/assets/{asset_id}/versions/{version_id}/diff"),
+                await client.post(
+                    "/ingestions/uploads",
+                    data={"asset_id": "missing"},
+                    files={"file": ("data.csv", b"id\n3\n", "text/csv")},
+                ),
+            )
+
+    first, second, asset, versions, version, latest_diff, version_diff, missing = asyncio.run(exercise())
+
+    assert first.status_code == second.status_code == 201
+    assert second.json()["asset_id"] == first.json()["asset_id"]
+    assert asset.json()["latest_version_id"] == second.json()["asset_version_id"]
+    assert [item["version_number"] for item in versions.json()["versions"]] == [2, 1]
+    assert version.json()["version_number"] == 2
+    assert latest_diff.json() == version_diff.json()
+    assert latest_diff.json()["fields_added"] == ["name"]
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["error"]["code"] == "asset_not_found"
+
+
 def _client(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
@@ -236,9 +236,12 @@ def get_enrichment_run(run_id: int) -> dict[str, Any]:
 
 
 @router.post("/ingestions/uploads", status_code=status.HTTP_201_CREATED)
-async def upload_ingestion(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_ingestion(
+    file: UploadFile = File(...),
+    asset_id: str | None = Form(default=None),
+) -> dict[str, Any]:
     try:
-        result = await _ingestion_service().ingest_upload(file)
+        result = await _ingestion_service().ingest_upload(file, asset_id=asset_id)
         return result.model_dump(mode="json")
     except IngestionServiceError as exc:
         raise HTTPException(
@@ -284,3 +287,41 @@ async def get_asset(asset_id: str) -> dict[str, Any]:
     if asset is None:
         raise _not_found("asset", asset_id)
     return asset.model_dump(mode="json")
+
+
+@router.get("/assets/{asset_id}/versions")
+async def list_asset_versions(asset_id: str) -> dict[str, Any]:
+    versions = _ingestion_service().list_versions(asset_id)
+    if versions is None:
+        raise _not_found("asset", asset_id)
+    return {"asset_id": asset_id, "versions": [version.model_dump(mode="json") for version in versions]}
+
+
+@router.get("/assets/{asset_id}/versions/{version_id}")
+async def get_asset_version(asset_id: str, version_id: str) -> dict[str, Any]:
+    version = _ingestion_service().get_version(asset_id, version_id)
+    if version is None:
+        if _ingestion_service().get_asset(asset_id) is None:
+            raise _not_found("asset", asset_id)
+        raise _not_found("asset_version", version_id)
+    return version.model_dump(mode="json")
+
+
+@router.get("/assets/{asset_id}/diff")
+async def get_asset_diff(asset_id: str) -> dict[str, Any]:
+    if _ingestion_service().get_asset(asset_id) is None:
+        raise _not_found("asset", asset_id)
+    diff = _ingestion_service().get_latest_diff(asset_id)
+    if diff is None:
+        raise _not_found("asset_diff", asset_id)
+    return diff.model_dump(mode="json")
+
+
+@router.get("/assets/{asset_id}/versions/{version_id}/diff")
+async def get_asset_version_diff(asset_id: str, version_id: str) -> dict[str, Any]:
+    if _ingestion_service().get_asset(asset_id) is None:
+        raise _not_found("asset", asset_id)
+    diff = _ingestion_service().get_version_diff(asset_id, version_id)
+    if diff is None:
+        raise _not_found("asset_version", version_id)
+    return diff.model_dump(mode="json")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -26,6 +26,7 @@ class AssetKind(StrEnum):
 
 
 class AssetVersionStatus(StrEnum):
+    PREPARING = "preparing"
     READY = "ready"
     COMPLETED = "completed"
     PARTIAL = "partial"
@@ -54,6 +55,8 @@ class DataAsset(BaseModel):
     description: str | None = None
     created_at: datetime
     updated_at: datetime
+    latest_version_id: str | None = None
+    latest_version_number: int | None = None
     versions: list[AssetVersion] = Field(default_factory=list)
 
 
@@ -68,6 +71,8 @@ class AssetVersion(BaseModel):
     recipe_fingerprint: str | None = None
     status: AssetVersionStatus
     created_at: datetime
+    technical_metadata: dict[str, Any] = Field(default_factory=dict)
+    schema_diff: AssetSchemaDiff | None = None
     storage_bindings: list[StorageBinding] = Field(default_factory=list)
 
 
@@ -104,6 +109,31 @@ class InspectionResult(BaseModel):
     records_detected: int | None = None
     records_estimated: bool = False
 
+    def without_preview(self) -> InspectionResult:
+        return self.model_copy(update={"preview": []})
+
+
+class SchemaTypeChange(BaseModel):
+    field: str
+    previous: str
+    current: str
+
+
+class SchemaNullabilityChange(BaseModel):
+    field: str
+    previous: bool
+    current: bool
+
+
+class AssetSchemaDiff(BaseModel):
+    has_drift: bool
+    previous_version_id: str | None = None
+    current_version_id: str
+    fields_added: list[str] = Field(default_factory=list)
+    fields_removed: list[str] = Field(default_factory=list)
+    type_changes: list[SchemaTypeChange] = Field(default_factory=list)
+    nullability_changes: list[SchemaNullabilityChange] = Field(default_factory=list)
+
 
 class IngestionJob(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -125,6 +155,8 @@ class IngestionJob(BaseModel):
     asset_version_id: str | None = None
     inspection: InspectionResult | None = None
     created_at: datetime
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    heartbeat_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
@@ -134,3 +166,13 @@ class UploadResult(BaseModel):
     status: IngestionStatus
     asset_id: str | None = None
     asset_version_id: str | None = None
+    reused: bool = False
+
+
+class ReconciliationReport(BaseModel):
+    interrupted_jobs: list[str] = Field(default_factory=list)
+    recovered_jobs: list[str] = Field(default_factory=list)
+    failed_jobs: list[str] = Field(default_factory=list)
+    missing_bindings: list[str] = Field(default_factory=list)
+    orphan_staging_files: list[str] = Field(default_factory=list)
+    orphan_raw_files: list[str] = Field(default_factory=list)

@@ -47,6 +47,19 @@ class ParquetReader:
             records_estimated=False,
         )
 
+    def preview(self, path: Path, limit: int) -> list[dict[str, Any]]:
+        try:
+            parquet_file = parquet.ParquetFile(path)
+            batch = next(parquet_file.iter_batches(batch_size=limit), None)
+            if batch is None:
+                return []
+            return [
+                {key: _json_value(value) for key, value in row.items()}
+                for row in batch.to_pylist()[:limit]
+            ]
+        except Exception as exc:
+            raise IngestionValidationError("invalid_parquet", "Parquet content could not be previewed") from exc
+
 
 def _json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):

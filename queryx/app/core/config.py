@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     ingestion_preview_rows: int = Field(default=10, ge=1, le=100)
     ingestion_inspection_rows: int = Field(default=100, ge=1, le=10_000)
     ingestion_csv_count_rows: int = Field(default=10_000, ge=1)
+    ingestion_stale_job_seconds: int = Field(default=300, ge=1)
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 

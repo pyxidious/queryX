@@ -61,6 +61,21 @@ class CSVReader:
             records_estimated=not exhausted,
         )
 
+    def preview(self, path: Path, limit: int) -> list[dict[str, Any]]:
+        delimiter = self._delimiter(path)
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream, delimiter=delimiter)
+                self._validate_headers(reader.fieldnames)
+                rows: list[dict[str, Any]] = []
+                for row in reader:
+                    rows.append({key: value for key, value in row.items() if key is not None})
+                    if len(rows) >= limit:
+                        break
+                return rows
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise IngestionValidationError("invalid_csv", "CSV content could not be previewed") from exc
+
     @staticmethod
     def _delimiter(path: Path) -> str:
         try:
