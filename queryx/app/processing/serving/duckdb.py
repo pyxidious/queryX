@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import threading
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -9,29 +8,39 @@ from typing import Any
 
 import duckdb
 
+from queryx.app.worker.coordination import SharedFileLock, SharedLockTimeout
+
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_DDL_LOCK = threading.RLock()
-
-
 class DuckDBServingError(RuntimeError):
     pass
 
 
+DuckDBLockTimeout = SharedLockTimeout
+
+
 class DuckDBServingAdapter:
-    def __init__(self, database_path: Path, schema: str) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        schema: str,
+        lock_path: Path | None = None,
+        lock_timeout_seconds: float = 5.0,
+    ) -> None:
         if not _SAFE_IDENTIFIER.fullmatch(schema):
             raise ValueError("Unsafe DuckDB schema identifier")
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.schema = schema
+        self.lock_path = lock_path or database_path.with_suffix(database_path.suffix + ".lock")
+        self.lock_timeout_seconds = lock_timeout_seconds
 
     def register_view(self, relation_name: str, parquet_path: Path) -> list[dict[str, Any]]:
         relation = self._identifier(relation_name)
         quoted_schema = self._quote_identifier(self.schema)
         quoted_relation = self._quote_identifier(relation)
         escaped_path = str(parquet_path.resolve()).replace("'", "''")
-        with _DDL_LOCK, duckdb.connect(str(self.database_path)) as connection:
+        with self._lock(), duckdb.connect(str(self.database_path)) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
                 connection.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
@@ -43,11 +52,11 @@ class DuckDBServingAdapter:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
-        return self.get_schema(relation)
+            return self._schema(connection, relation)
 
     def drop_view(self, relation_name: str) -> None:
         relation = self._identifier(relation_name)
-        with _DDL_LOCK, duckdb.connect(str(self.database_path)) as connection:
+        with self._lock(), duckdb.connect(str(self.database_path)) as connection:
             connection.execute(
                 f"DROP VIEW IF EXISTS {self._quote_identifier(self.schema)}.{self._quote_identifier(relation)}"
             )
@@ -56,7 +65,7 @@ class DuckDBServingAdapter:
         relation = self._identifier(relation_name)
         if not self.database_path.exists():
             return False
-        with duckdb.connect(str(self.database_path), read_only=True) as connection:
+        with self._lock(), duckdb.connect(str(self.database_path), read_only=True) as connection:
             row = connection.execute(
                 """SELECT 1 FROM information_schema.views
                    WHERE table_schema = ? AND table_name = ? LIMIT 1""",
@@ -66,18 +75,12 @@ class DuckDBServingAdapter:
 
     def get_schema(self, relation_name: str) -> list[dict[str, Any]]:
         relation = self._identifier(relation_name)
-        with duckdb.connect(str(self.database_path), read_only=True) as connection:
-            rows = connection.execute(
-                f"DESCRIBE SELECT * FROM {self._quote_identifier(self.schema)}.{self._quote_identifier(relation)}"
-            ).fetchall()
-        return [
-            {"name": row[0], "data_type": row[1], "nullable": str(row[2]).upper() == "YES"}
-            for row in rows
-        ]
+        with self._lock(), duckdb.connect(str(self.database_path), read_only=True) as connection:
+            return self._schema(connection, relation)
 
     def preview(self, relation_name: str, limit: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         relation = self._identifier(relation_name)
-        with duckdb.connect(str(self.database_path), read_only=True) as connection:
+        with self._lock(), duckdb.connect(str(self.database_path), read_only=True) as connection:
             cursor = connection.execute(
                 f"SELECT * FROM {self._quote_identifier(self.schema)}.{self._quote_identifier(relation)} LIMIT ?",
                 [limit],
@@ -87,17 +90,30 @@ class DuckDBServingAdapter:
                 {name: _json_value(value) for name, value in zip(names, row, strict=True)}
                 for row in cursor.fetchall()
             ]
-        return self.get_schema(relation), rows
+            schema = self._schema(connection, relation)
+        return schema, rows
 
     def list_views(self) -> list[str]:
         if not self.database_path.exists():
             return []
-        with duckdb.connect(str(self.database_path), read_only=True) as connection:
+        with self._lock(), duckdb.connect(str(self.database_path), read_only=True) as connection:
             rows = connection.execute(
                 "SELECT table_name FROM information_schema.views WHERE table_schema = ? ORDER BY table_name",
                 [self.schema],
             ).fetchall()
         return [row[0] for row in rows]
+
+    def _lock(self) -> SharedFileLock:
+        return SharedFileLock(self.lock_path, self.lock_timeout_seconds)
+
+    def _schema(self, connection: duckdb.DuckDBPyConnection, relation: str) -> list[dict[str, Any]]:
+        rows = connection.execute(
+            f"DESCRIBE SELECT * FROM {self._quote_identifier(self.schema)}.{self._quote_identifier(relation)}"
+        ).fetchall()
+        return [
+            {"name": row[0], "data_type": row[1], "nullable": str(row[2]).upper() == "YES"}
+            for row in rows
+        ]
 
     @staticmethod
     def _identifier(value: str) -> str:

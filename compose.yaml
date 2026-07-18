@@ -3,6 +3,8 @@ services:
     build: .
     env_file:
       - .env
+    environment:
+      QUERYX_EXECUTION_MODE: worker
     ports:
       - "8000:8000"
     extra_hosts:
@@ -14,6 +16,17 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
+
+  queryx-worker:
+    build: .
+    command: ["python", "-m", "queryx.app.worker"]
+    env_file:
+      - .env
+    environment:
+      QUERYX_EXECUTION_MODE: worker
+    volumes:
+      - queryx_catalog:/app/data
+    restart: unless-stopped
 
   mysql:
     image: mysql:8.4

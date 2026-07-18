@@ -35,6 +35,7 @@ _TRANSITIONS: dict[ProcessingStatus, set[ProcessingStatus]] = {
         ProcessingStatus.COMPLETED,
         ProcessingStatus.PARTIAL,
         ProcessingStatus.FAILED,
+        ProcessingStatus.CANCELLED,
     },
     ProcessingStatus.PARTIAL: {ProcessingStatus.REGISTERING, ProcessingStatus.CANCELLED},
     ProcessingStatus.COMPLETED: set(),
@@ -76,6 +77,7 @@ class ProcessingStorage:
                     recipe_name TEXT NOT NULL,
                     recipe_version TEXT NOT NULL,
                     recipe_fingerprint TEXT NOT NULL,
+                    recipe_json TEXT NOT NULL DEFAULT '{}',
                     normalized_binding_id TEXT,
                     serving_binding_id TEXT,
                     records_read INTEGER NOT NULL DEFAULT 0,
@@ -109,9 +111,18 @@ class ProcessingStorage:
                     WHERE status IN ('created', 'normalizing', 'registering', 'validating', 'partial', 'completed');
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(processing_runs)")}
+            if "recipe_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE processing_runs ADD COLUMN recipe_json TEXT NOT NULL DEFAULT '{}'"
+                )
             connection.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (7, _now().isoformat()),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (9, _now().isoformat()),
             )
 
     def create_or_reuse_run(
@@ -122,6 +133,7 @@ class ProcessingStorage:
         recipe_version: str,
         recipe_fingerprint: str,
         observed_schema: list[dict[str, Any]],
+        recipe: dict[str, Any] | None = None,
     ) -> tuple[ProcessingRun, str]:
         connection = self._connect()
         try:
@@ -157,6 +169,7 @@ class ProcessingStorage:
                 recipe_name=recipe_name,
                 recipe_version=recipe_version,
                 recipe_fingerprint=recipe_fingerprint,
+                recipe=recipe or {},
                 observed_schema=observed_schema,
                 created_at=now,
                 updated_at=now,
@@ -164,11 +177,11 @@ class ProcessingStorage:
             connection.execute(
                 """INSERT INTO processing_runs (
                     id, asset_version_id, operation, status, input_binding_id,
-                    recipe_name, recipe_version, recipe_fingerprint,
+                    recipe_name, recipe_version, recipe_fingerprint, recipe_json,
                     records_read, records_written, records_rejected, bytes_written,
                     observed_schema_json, canonical_schema_json, serving_schema_json,
                     warnings_json, errors_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, '[]', '[]', '[]', '[]', ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, '[]', '[]', '[]', '[]', ?, ?)""",
                 (
                     run.id,
                     asset_version_id,
@@ -178,6 +191,7 @@ class ProcessingStorage:
                     recipe_name,
                     recipe_version,
                     recipe_fingerprint,
+                    _dumps(recipe or {}),
                     _dumps(observed_schema),
                     now.isoformat(),
                     now.isoformat(),
@@ -412,6 +426,16 @@ class ProcessingStorage:
                 (status.value, _dumps(errors), now, now, run_id),
             )
 
+    def reset_interrupted_run(self, run_id: str) -> None:
+        now = _now().isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE processing_runs SET status = 'created', started_at = NULL,
+                   updated_at = ?, finished_at = NULL
+                   WHERE id = ? AND status = 'normalizing' AND normalized_binding_id IS NULL""",
+                (now, run_id),
+            )
+
     @staticmethod
     def _row_to_binding(row: sqlite3.Row) -> StorageBinding:
         values = dict(row)
@@ -422,6 +446,7 @@ class ProcessingStorage:
     def _row_to_run(row: sqlite3.Row) -> ProcessingRun:
         values = dict(row)
         values["observed_schema"] = _loads(values.pop("observed_schema_json"), [])
+        values["recipe"] = _loads(values.pop("recipe_json", None), {})
         values["canonical_schema"] = _loads(values.pop("canonical_schema_json"), [])
         values["serving_schema"] = _loads(values.pop("serving_schema_json"), [])
         values["warnings"] = _loads(values.pop("warnings_json"), [])

@@ -5,6 +5,7 @@ import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from fastapi import UploadFile
@@ -34,6 +35,7 @@ from queryx.app.ingestion.storage import (
     PreparedVersion,
 )
 from queryx.app.ingestion.validation import IngestionValidationError, validate_filename, validate_size
+from queryx.app.worker.coordination import ExecutionInterruptedError
 
 
 class IngestionServiceError(RuntimeError):
@@ -43,6 +45,10 @@ class IngestionServiceError(RuntimeError):
         self.message = message
         self.status_code = status_code
         self.job_id = job_id
+
+
+class IngestionCancelledError(RuntimeError):
+    pass
 
 
 class IngestionService:
@@ -61,12 +67,18 @@ class IngestionService:
         self._finalization_lock = threading.RLock()
 
     async def ingest_upload(self, upload: UploadFile, asset_id: str | None = None) -> UploadResult:
+        accepted = await self.accept_upload(upload, asset_id=asset_id, enqueue=False)
+        return self.execute_ingestion_job(accepted.job_id)
+
+    async def accept_upload(
+        self,
+        upload: UploadFile,
+        asset_id: str | None = None,
+        enqueue: bool = True,
+    ) -> UploadResult:
         original_filename = upload.filename or ""
-        job = self.storage.create_job(original_filename=original_filename)
+        job = self.storage.create_job(original_filename=original_filename, asset_id=asset_id)
         staged_path: Path | None = None
-        raw_path: Path | None = None
-        prepared: PreparedVersion | None = None
-        promoted = False
         try:
             safe_name, data_format = validate_filename(original_filename)
             if asset_id is not None and self.storage.get_asset(asset_id) is None:
@@ -76,25 +88,113 @@ class IngestionService:
             internal_name = f"{uuid4().hex}{suffix}"
             staged_path = self._controlled_path(self.staging_dir, internal_name)
             staging_reference = f"staging/{internal_name}"
-            raw_reference = f"raw/{internal_name}"
-            raw_path = self._controlled_path(self.raw_dir, internal_name)
             self.storage.transition_job(
                 job.id,
                 IngestionStatus.ACQUIRING,
                 source_reference=staging_reference,
             )
             bytes_received = await self._save_bounded(upload, staged_path)
-            self.storage.transition_job(
-                job.id,
-                IngestionStatus.INSPECTING,
-                bytes_received=bytes_received,
+            self.storage.update_job(job.id, bytes_received=bytes_received)
+            work_item_id: str | None = None
+            if enqueue:
+                try:
+                    from queryx.app.worker.models import TaskType
+                    from queryx.app.worker.storage import WorkerStorage
+
+                    item, _ = WorkerStorage(self.settings.catalog_db_path).enqueue(
+                        TaskType.INGESTION,
+                        job.id,
+                        self.settings.worker_max_attempts,
+                    )
+                    work_item_id = item.id
+                except Exception as exc:
+                    self._cleanup(staged_path)
+                    self._fail_job(job.id, "work_item_creation_failed", "Ingestion could not be queued")
+                    raise IngestionServiceError(
+                        "work_item_creation_failed",
+                        "Ingestion could not be queued",
+                        500,
+                        job.id,
+                    ) from exc
+            return UploadResult(
+                job_id=job.id,
+                work_item_id=work_item_id,
+                status=IngestionStatus.ACQUIRING,
+                asset_id=asset_id,
             )
+        except IngestionValidationError as exc:
+            self._cleanup(staged_path)
+            self._fail_job(job.id, exc.code, exc.message)
+            status_code = 413 if exc.code == "upload_too_large" else 415 if exc.code == "unsupported_format" else 400
+            raise IngestionServiceError(exc.code, exc.message, status_code, job.id) from exc
+        except IngestionServiceError:
+            self._cleanup(staged_path)
+            current = self.storage.get_job(job.id)
+            if current is not None and current.status not in {IngestionStatus.FAILED, IngestionStatus.CANCELLED}:
+                self._fail_job(job.id, "upload_acceptance_failed", "Upload could not be accepted")
+            raise
+        except Exception as exc:
+            self._cleanup(staged_path)
+            self._fail_job(job.id, "upload_acceptance_failed", "Upload could not be accepted")
+            raise IngestionServiceError("upload_acceptance_failed", "Upload could not be accepted", 500, job.id) from exc
+        finally:
+            await upload.close()
+
+    def execute_ingestion_job(
+        self,
+        job_id: str,
+        checkpoint: Callable[[], None] | None = None,
+        allow_retry: bool = False,
+    ) -> UploadResult:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise IngestionServiceError("ingestion_job_not_found", "Ingestion job not found", 404, job_id)
+        if job.status == IngestionStatus.READY:
+            return UploadResult(
+                job_id=job.id,
+                status=job.status,
+                asset_id=job.asset_id,
+                asset_version_id=job.asset_version_id,
+                reused=any(item.get("code") == "idempotent_retry" for item in job.warnings),
+            )
+        if job.status == IngestionStatus.CANCELLED:
+            raise IngestionCancelledError("Ingestion was cancelled")
+        if job.status not in {IngestionStatus.ACQUIRING, IngestionStatus.INSPECTING}:
+            raise IngestionServiceError("ingestion_not_executable", "Ingestion job is not executable", 409, job_id)
+
+        safe_name, data_format = validate_filename(job.original_filename)
+        if not job.source_reference:
+            raise IngestionServiceError("staged_file_missing", "Staged upload is unavailable", 409, job_id)
+        staged_path = self._path_from_reference(job.source_reference, self.staging_dir, "staging")
+        internal_name = staged_path.name
+        raw_reference = f"raw/{internal_name}"
+        raw_path = self._controlled_path(self.raw_dir, internal_name)
+        prepared: PreparedVersion | None = None
+        promoted = False
+        try:
+            self._checkpoint(checkpoint)
+            if job.status == IngestionStatus.INSPECTING and job.asset_version_id and not staged_path.is_file():
+                if self._recover_job(job):
+                    recovered = self.storage.get_job(job.id)
+                    assert recovered is not None
+                    return UploadResult(
+                        job_id=job.id,
+                        status=recovered.status,
+                        asset_id=recovered.asset_id,
+                        asset_version_id=recovered.asset_version_id,
+                    )
+            if not staged_path.is_file():
+                raise IngestionServiceError("staged_file_missing", "Staged upload is unavailable", 409, job.id)
+            if job.status == IngestionStatus.ACQUIRING:
+                job = self.storage.transition_job(job.id, IngestionStatus.INSPECTING)
             source_fingerprint = file_fingerprint(staged_path)
+            self._checkpoint(checkpoint)
             inspection = self.readers[data_format].inspect(
                 staged_path,
                 preview_limit=self.settings.ingestion_preview_rows,
                 sample_limit=self.settings.ingestion_inspection_rows,
             )
+            self._checkpoint(checkpoint)
             technical_metadata = inspection_to_technical_metadata(inspection)
             schema_fingerprint = technical_schema_fingerprint(technical_metadata["fields"])
             recipe_fingerprint = self._recipe_fingerprint(data_format)
@@ -104,7 +204,7 @@ class IngestionService:
                     prepared = self.storage.prepare_version(
                         job_id=job.id,
                         name=Path(safe_name).stem,
-                        requested_asset_id=asset_id,
+                        requested_asset_id=job.requested_asset_id or job.asset_id,
                         raw_reference=raw_reference,
                         data_format=data_format,
                         source_fingerprint=source_fingerprint,
@@ -114,7 +214,12 @@ class IngestionService:
                         technical_metadata=technical_metadata,
                     )
                 except AssetNotFoundError as exc:
-                    raise IngestionServiceError("asset_not_found", f"asset '{asset_id}' not found", 404, job.id) from exc
+                    raise IngestionServiceError(
+                        "asset_not_found",
+                        f"asset '{job.requested_asset_id}' not found",
+                        404,
+                        job.id,
+                    ) from exc
                 except IngestionInProgressError as exc:
                     raise IngestionServiceError("ingestion_in_progress", str(exc), 409, job.id) from exc
                 except sqlite3.IntegrityError as exc:
@@ -155,6 +260,7 @@ class IngestionService:
                         reused=True,
                     )
 
+                self._checkpoint(checkpoint)
                 self._promote(staged_path, raw_path)
                 promoted = True
                 self.storage.finalize_version(job.id, prepared.version.id, raw_reference, data_format)
@@ -165,12 +271,29 @@ class IngestionService:
                 asset_id=prepared.asset.id,
                 asset_version_id=prepared.version.id,
             )
+        except ExecutionInterruptedError:
+            raise
+        except IngestionCancelledError:
+            self._cleanup(staged_path, raw_path if promoted else None)
+            self._fail_prepared(prepared)
+            current = self.storage.get_job(job.id)
+            if current and current.status in {IngestionStatus.ACQUIRING, IngestionStatus.INSPECTING}:
+                self.storage.transition_job(job.id, IngestionStatus.CANCELLED)
+            raise
         except IngestionValidationError as exc:
             self._cleanup(staged_path, raw_path if promoted else None)
             self._fail_prepared(prepared)
             self._fail_job(job.id, exc.code, exc.message)
             status_code = 413 if exc.code == "upload_too_large" else 415 if exc.code == "unsupported_format" else 400
             raise IngestionServiceError(exc.code, exc.message, status_code, job.id) from exc
+        except (sqlite3.OperationalError, OSError) as exc:
+            if allow_retry:
+                self._fail_prepared(prepared if not promoted else None)
+                raise
+            self._cleanup(staged_path, raw_path if promoted else None)
+            self._fail_prepared(prepared)
+            self._fail_job(job.id, "ingestion_failed", "Ingestion failed")
+            raise IngestionServiceError("ingestion_failed", "Ingestion failed", 500, job.id) from exc
         except IngestionServiceError as exc:
             self._cleanup(staged_path, raw_path if promoted else None)
             self._fail_prepared(prepared)
@@ -181,10 +304,32 @@ class IngestionService:
             self._fail_prepared(prepared)
             self._fail_job(job.id, "ingestion_failed", "Ingestion failed")
             raise IngestionServiceError("ingestion_failed", "Ingestion failed", 500, job.id) from exc
-        finally:
-            await upload.close()
 
     def get_job(self, job_id: str) -> IngestionJob | None:
+        return self.storage.get_job(job_id)
+
+    def cancel(self, job_id: str) -> IngestionJob:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise IngestionServiceError("ingestion_job_not_found", "Ingestion job not found", 404, job_id)
+        if job.status in {
+            IngestionStatus.READY,
+            IngestionStatus.COMPLETED,
+            IngestionStatus.PARTIAL,
+            IngestionStatus.FAILED,
+            IngestionStatus.CANCELLED,
+        }:
+            raise IngestionServiceError("ingestion_not_cancellable", "Ingestion job is terminal", 409, job_id)
+        cancelled = self.storage.transition_job(job.id, IngestionStatus.CANCELLED)
+        if job.source_reference and job.source_reference.startswith("staging/"):
+            try:
+                self._cleanup(self._path_from_reference(job.source_reference, self.staging_dir, "staging"))
+            except IngestionServiceError:
+                pass
+        return cancelled
+
+    def fail_execution(self, job_id: str, code: str, message: str) -> IngestionJob | None:
+        self._fail_job(job_id, code, message)
         return self.storage.get_job(job_id)
 
     def get_preview(self, job_id: str) -> dict[str, object] | None:
@@ -418,3 +563,8 @@ class IngestionService:
         for path in paths:
             if path is not None and path.is_file():
                 path.unlink()
+
+    @staticmethod
+    def _checkpoint(checkpoint: Callable[[], None] | None) -> None:
+        if checkpoint is not None:
+            checkpoint()

@@ -105,7 +105,7 @@ class IngestionStorage:
                     bytes_received INTEGER NOT NULL DEFAULT 0, records_detected INTEGER,
                     records_loaded INTEGER, records_rejected INTEGER, warnings_json TEXT NOT NULL,
                     error_json TEXT, source_fingerprint TEXT, asset_id TEXT, asset_version_id TEXT,
-                    inspection_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    requested_asset_id TEXT, inspection_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     heartbeat_at TEXT, started_at TEXT, finished_at TEXT,
                     FOREIGN KEY(asset_id) REFERENCES data_assets(id),
                     FOREIGN KEY(asset_version_id) REFERENCES asset_versions(id)
@@ -130,6 +130,7 @@ class IngestionStorage:
                 self._ensure_column(connection, "asset_versions", column, definition)
             self._ensure_column(connection, "ingestion_jobs", "updated_at", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "heartbeat_at", "TEXT")
+            self._ensure_column(connection, "ingestion_jobs", "requested_asset_id", "TEXT")
             for column, definition in (
                 ("binding_role", "TEXT NOT NULL DEFAULT 'raw'"),
                 ("status", "TEXT NOT NULL DEFAULT 'ready'"),
@@ -203,7 +204,8 @@ class IngestionStorage:
             source_type=source_type,
             original_filename=original_filename,
             target_backend="file",
-            asset_id=asset_id,
+            asset_id=None,
+            requested_asset_id=asset_id,
             created_at=now,
             updated_at=now,
         )
@@ -211,7 +213,7 @@ class IngestionStorage:
             connection.execute(
                 """INSERT INTO ingestion_jobs (
                     id, status, source_type, original_filename, target_backend, bytes_received,
-                    warnings_json, asset_id, created_at, updated_at
+                    warnings_json, requested_asset_id, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.id,
@@ -274,6 +276,23 @@ class IngestionStorage:
             )
             if cursor.rowcount != 1:
                 raise InvalidJobTransition("Ingestion job changed concurrently")
+        job = self.get_job(job_id)
+        assert job is not None
+        return job
+
+    def update_job(self, job_id: str, **updates: Any) -> IngestionJob:
+        allowed = {"bytes_received", "heartbeat_at"}
+        if not updates.keys() <= allowed:
+            raise ValueError("Unsupported ingestion job update")
+        values = {**updates, "updated_at": _now().isoformat()}
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE ingestion_jobs SET {assignments} WHERE id = ?",
+                (*values.values(), job_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(job_id)
         job = self.get_job(job_id)
         assert job is not None
         return job

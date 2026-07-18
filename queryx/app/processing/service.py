@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from queryx.app.core.config import Settings
@@ -23,13 +24,14 @@ from queryx.app.processing.models import (
 )
 from queryx.app.processing.normalizers.parquet import CanonicalParquetNormalizer, NormalizationError
 from queryx.app.processing.recipe import CanonicalParquetRecipe, canonical_parquet_recipe
-from queryx.app.processing.serving.duckdb import DuckDBServingAdapter
+from queryx.app.processing.serving.duckdb import DuckDBLockTimeout, DuckDBServingAdapter
 from queryx.app.processing.storage import ProcessingInProgressError, ProcessingStorage
 from queryx.app.processing.validation import (
     ProcessingValidationError,
     schemas_compatible,
     validate_normalized_file,
 )
+from queryx.app.worker.coordination import ExecutionInterruptedError
 
 
 class ProcessingServiceError(RuntimeError):
@@ -39,6 +41,10 @@ class ProcessingServiceError(RuntimeError):
         self.message = message
         self.status_code = status_code
         self.run_id = run_id
+
+
+class ProcessingCancelledError(RuntimeError):
+    pass
 
 
 class ProcessingService:
@@ -54,11 +60,24 @@ class ProcessingService:
         self.storage = storage or ProcessingStorage(settings.catalog_db_path)
         self.ingestion_storage = ingestion_storage or IngestionStorage(settings.catalog_db_path)
         self.normalizer = normalizer or CanonicalParquetNormalizer()
-        self.serving = serving or DuckDBServingAdapter(settings.duckdb_path, settings.duckdb_schema)
+        lock_path = settings.duckdb_lock_path
+        if (
+            lock_path == Path("data/queryx.duckdb.lock")
+            and settings.duckdb_path != Path("data/queryx.duckdb")
+        ):
+            lock_path = settings.duckdb_path.parent / "queryx.duckdb.lock"
+        self.serving = serving or DuckDBServingAdapter(
+            settings.duckdb_path,
+            settings.duckdb_schema,
+            lock_path,
+            settings.duckdb_lock_timeout_seconds,
+        )
         self.raw_dir = settings.data_raw_dir
         self.normalized_dir = settings.data_normalized_dir
         if settings.duckdb_path.resolve().parent != self.normalized_dir.resolve().parent:
             raise ValueError("DuckDB and normalized storage must share the managed data volume")
+        if lock_path.resolve().parent != self.normalized_dir.resolve().parent:
+            raise ValueError("DuckDB lock and normalized storage must share the managed data volume")
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.normalized_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +87,17 @@ class ProcessingService:
         version_id: str,
         recipe: CanonicalParquetRecipe | None = None,
     ) -> ProcessingRun:
+        run, _, resolved_recipe = self.create_processing_run(asset_id, version_id, recipe)
+        if run.status == ProcessingStatus.COMPLETED:
+            return run
+        return self.execute_processing_run(run.id, resolved_recipe)
+
+    def create_processing_run(
+        self,
+        asset_id: str,
+        version_id: str,
+        recipe: CanonicalParquetRecipe | None = None,
+    ) -> tuple[ProcessingRun, str, CanonicalParquetRecipe]:
         version = self.ingestion_storage.get_version(asset_id, version_id)
         if version is None:
             if self.ingestion_storage.get_asset(asset_id) is None:
@@ -99,22 +129,63 @@ class ProcessingService:
                 resolved_recipe.version,
                 resolved_recipe.fingerprint,
                 [field.model_dump(mode="json") for field in inspection.fields],
+                resolved_recipe.model_dump(mode="json"),
             )
         except ProcessingInProgressError as exc:
             raise ProcessingServiceError("processing_in_progress", str(exc), 409) from exc
         if mode == "completed":
             self._assert_completed_outputs(run)
-            return run
-        if mode == "partial":
-            return self._resume_partial(run, version, resolved_recipe)
+        return run, mode, resolved_recipe
 
+    def execute_processing_run(
+        self,
+        run_id: str,
+        recipe: CanonicalParquetRecipe | None = None,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> ProcessingRun:
+        run = self.storage.get_run(run_id)
+        if run is None:
+            raise ProcessingServiceError("processing_run_not_found", "Processing run not found", 404, run_id)
+        if run.status == ProcessingStatus.COMPLETED:
+            self._assert_completed_outputs(run)
+            return run
+        version = self.ingestion_storage.get_version_by_id(run.asset_version_id)
+        if version is None:
+            raise ProcessingServiceError("asset_version_not_found", "Asset version not found", 404, run.id)
+        inspection = self.ingestion_storage.get_version_inspection(version.id)
+        if inspection is None:
+            raise ProcessingServiceError("observed_schema_missing", "Observed raw schema is unavailable", 409, run.id)
+        resolved_recipe = recipe
+        if resolved_recipe is None and run.recipe:
+            resolved_recipe = CanonicalParquetRecipe.model_validate(run.recipe)
+        if resolved_recipe is None:
+            resolved_recipe = canonical_parquet_recipe(
+                inspection,
+                self.settings.parquet_compression,
+                self.settings.parquet_batch_rows,
+            )
+        if resolved_recipe.fingerprint != run.recipe_fingerprint:
+            raise ProcessingServiceError("recipe_mismatch", "Processing recipe does not match the run", 409, run.id)
+        if run.status == ProcessingStatus.PARTIAL:
+            self._checkpoint(checkpoint)
+            return self._resume_partial(run, version, resolved_recipe, checkpoint)
+        if run.status != ProcessingStatus.CREATED:
+            raise ProcessingServiceError("processing_in_progress", "Processing run is already active", 409, run.id)
+        raw_binding = self.storage.get_binding(run.input_binding_id)
+        if raw_binding is None or raw_binding.status != BindingStatus.READY:
+            raise ProcessingServiceError("raw_binding_missing", "Ready raw binding is unavailable", 409, run.id)
+        raw_path = self._path_from_reference(raw_binding.physical_location, self.raw_dir, "raw")
+        if not raw_path.is_file():
+            raise ProcessingServiceError("raw_file_missing", "Raw file is unavailable", 409, run.id)
+
+        self._checkpoint(checkpoint)
         run = self.storage.transition_run(run.id, ProcessingStatus.NORMALIZING)
         temp_path = self.normalized_dir / f".tmp-{uuid4().hex}.parquet"
         normalized_name = f"{uuid4().hex}.parquet"
         normalized_reference = f"normalized/{normalized_name}"
         normalized_path = self._path_from_reference(normalized_reference, self.normalized_dir, "normalized")
         normalized_binding, already_ready = self.storage.prepare_binding(
-            version_id,
+            version.id,
             BindingRole.NORMALIZED,
             BackendType.FILE,
             normalized_reference,
@@ -146,6 +217,7 @@ class ProcessingService:
                     inspection,
                     resolved_recipe,
                     resolved_recipe.batch_rows,
+                    checkpoint,
                 )
                 validate_normalized_file(temp_path, result.content_fingerprint, result.canonical_schema)
                 self._promote(temp_path, normalized_path)
@@ -177,6 +249,31 @@ class ProcessingService:
                 bytes_written=bytes_written,
                 canonical_schema_json=json.dumps(canonical_schema, sort_keys=True),
             )
+            self._checkpoint(checkpoint)
+        except ExecutionInterruptedError:
+            current = self.storage.get_run(run.id) or run
+            current_binding = self.storage.get_binding(normalized_binding.id)
+            if current.status == ProcessingStatus.REGISTERING and current_binding and current_binding.status == "ready":
+                self._cleanup(temp_path)
+                self.storage.transition_run(current.id, ProcessingStatus.PARTIAL)
+            else:
+                self._cleanup(temp_path, normalized_path if promoted else None)
+                if promoted:
+                    self.storage.force_fail_ready_binding(normalized_binding.id)
+                elif not already_ready:
+                    self.storage.fail_binding(normalized_binding.id)
+                self.storage.reset_interrupted_run(run.id)
+            raise
+        except ProcessingCancelledError:
+            self._cleanup(temp_path, normalized_path if promoted else None)
+            if promoted:
+                self.storage.force_fail_ready_binding(normalized_binding.id)
+            elif not already_ready:
+                self.storage.fail_binding(normalized_binding.id)
+            current = self.storage.get_run(run.id) or run
+            if current.status in {ProcessingStatus.NORMALIZING, ProcessingStatus.REGISTERING}:
+                self.storage.transition_run(current.id, ProcessingStatus.CANCELLED)
+            raise
         except (NormalizationError, ProcessingValidationError) as exc:
             self._cleanup(temp_path, normalized_path if promoted else None)
             if promoted:
@@ -193,13 +290,21 @@ class ProcessingService:
             return self._fail_run(run, "normalization_failed", "Canonical normalization failed")
         finally:
             self._cleanup(temp_path)
-        return self._register(run, version.asset_id, version.version_number, resolved_recipe, normalized_binding)
+        return self._register(
+            run,
+            version.asset_id,
+            version.version_number,
+            resolved_recipe,
+            normalized_binding,
+            checkpoint,
+        )
 
     def _resume_partial(
         self,
         run: ProcessingRun,
         version: AssetVersion,
         recipe: CanonicalParquetRecipe,
+        checkpoint: Callable[[], None] | None = None,
     ) -> ProcessingRun:
         if run.normalized_binding_id is None:
             raise ProcessingServiceError("partial_run_not_resumable", "Partial run has no normalized binding", 409, run.id)
@@ -213,6 +318,7 @@ class ProcessingService:
             version.version_number,
             recipe,
             binding,
+            checkpoint,
         )
 
     def _register(
@@ -222,6 +328,7 @@ class ProcessingService:
         version_number: int,
         recipe: CanonicalParquetRecipe,
         normalized_binding: StorageBinding,
+        checkpoint: Callable[[], None] | None = None,
     ) -> ProcessingRun:
         normalized_path = self._path_from_reference(
             normalized_binding.physical_location, self.normalized_dir, "normalized"
@@ -235,6 +342,7 @@ class ProcessingService:
         serving_binding: StorageBinding | None = None
         view_created = False
         try:
+            self._checkpoint(checkpoint)
             serving_binding, _ = self.storage.prepare_binding(
                 run.asset_version_id,
                 BindingRole.SERVING,
@@ -254,6 +362,7 @@ class ProcessingService:
                 canonical_schema,
             )
             serving_schema = self.serving.register_view(relation, normalized_path)
+            self._checkpoint(checkpoint)
             view_created = True
             serving_binding = self.storage.ready_binding(
                 serving_binding.id,
@@ -275,9 +384,34 @@ class ProcessingService:
             if not self.serving.view_exists(relation):
                 raise ProcessingValidationError("duckdb_view_missing", "DuckDB view was not created")
             self.serving.preview(relation, 1)
+            self._checkpoint(checkpoint)
             if not schemas_compatible(canonical_schema, serving_schema):
                 raise ProcessingValidationError("serving_schema_mismatch", "Serving schema is incompatible")
             return self.storage.transition_run(run.id, ProcessingStatus.COMPLETED)
+        except ExecutionInterruptedError:
+            current_binding = self.storage.get_binding(serving_binding.id) if serving_binding else None
+            if view_created and (current_binding is None or current_binding.status != BindingStatus.READY):
+                self.serving.drop_view(relation)
+                if serving_binding is not None:
+                    self.storage.force_fail_ready_binding(serving_binding.id)
+            current = self.storage.get_run(run.id) or run
+            if current.status in {ProcessingStatus.REGISTERING, ProcessingStatus.VALIDATING}:
+                self.storage.transition_run(current.id, ProcessingStatus.PARTIAL)
+            raise
+        except ProcessingCancelledError:
+            current_binding = self.storage.get_binding(serving_binding.id) if serving_binding else None
+            if view_created and (current_binding is None or current_binding.status != BindingStatus.READY):
+                self.serving.drop_view(relation)
+                if serving_binding is not None:
+                    self.storage.force_fail_ready_binding(serving_binding.id)
+            current = self.storage.get_run(run.id) or run
+            if current.status in {
+                ProcessingStatus.REGISTERING,
+                ProcessingStatus.VALIDATING,
+                ProcessingStatus.PARTIAL,
+            }:
+                self.storage.transition_run(current.id, ProcessingStatus.CANCELLED)
+            raise
         except Exception as exc:
             if view_created:
                 self.serving.drop_view(relation)
@@ -294,6 +428,34 @@ class ProcessingService:
             raise
 
     def get_run(self, run_id: str) -> ProcessingRun | None:
+        return self.storage.get_run(run_id)
+
+    def cancel(self, run_id: str) -> ProcessingRun:
+        run = self.storage.get_run(run_id)
+        if run is None:
+            raise ProcessingServiceError("processing_run_not_found", "Processing run not found", 404, run_id)
+        if run.status in {
+            ProcessingStatus.COMPLETED,
+            ProcessingStatus.FAILED,
+            ProcessingStatus.CANCELLED,
+        }:
+            raise ProcessingServiceError("processing_not_cancellable", "Processing run is terminal", 409, run_id)
+        return self.storage.transition_run(run.id, ProcessingStatus.CANCELLED)
+
+    def fail_execution(self, run_id: str, code: str, message: str) -> ProcessingRun | None:
+        run = self.storage.get_run(run_id)
+        if run is None:
+            return None
+        if run.status not in {
+            ProcessingStatus.COMPLETED,
+            ProcessingStatus.FAILED,
+            ProcessingStatus.CANCELLED,
+        }:
+            self.storage.force_run_status(
+                run.id,
+                ProcessingStatus.FAILED,
+                {"code": code, "message": message},
+            )
         return self.storage.get_run(run_id)
 
     def list_bindings(self, asset_id: str, version_id: str) -> list[StorageBinding] | None:
@@ -322,7 +484,14 @@ class ProcessingService:
         relation = self._binding_relation(binding)
         if not self.serving.view_exists(relation):
             raise ProcessingServiceError("duckdb_view_missing", "DuckDB serving view is unavailable", 409)
-        schema, rows = self.serving.preview(relation, limit)
+        try:
+            schema, rows = self.serving.preview(relation, limit)
+        except DuckDBLockTimeout as exc:
+            raise ProcessingServiceError(
+                "duckdb_lock_timeout",
+                "DuckDB is temporarily busy",
+                503,
+            ) from exc
         return {
             "asset_id": asset_id,
             "asset_version_id": version_id,
@@ -490,3 +659,8 @@ class ProcessingService:
         for path in paths:
             if path is not None and path.is_file():
                 path.unlink()
+
+    @staticmethod
+    def _checkpoint(checkpoint: Callable[[], None] | None) -> None:
+        if checkpoint is not None:
+            checkpoint()

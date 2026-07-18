@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -29,6 +29,7 @@ class CanonicalParquetNormalizer:
         inspection: InspectionResult,
         recipe: CanonicalParquetRecipe,
         batch_rows: int | None = None,
+        checkpoint: Callable[[], None] | None = None,
     ) -> NormalizationResult:
         if destination.exists():
             raise NormalizationError("output_exists", "Temporary normalization output already exists")
@@ -55,6 +56,8 @@ class CanonicalParquetNormalizer:
                 write_statistics=recipe.write_statistics,
             ) as writer:
                 for batch in batches:
+                    if checkpoint is not None:
+                        checkpoint()
                     canonical = _cast_batch(batch, target_schema)
                     writer.write_batch(canonical)
                     records += canonical.num_rows

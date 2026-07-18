@@ -170,6 +170,7 @@ class IngestionJob(BaseModel):
     warnings: list[dict[str, Any]] = Field(default_factory=list)
     error: dict[str, Any] | None = None
     source_fingerprint: str | None = None
+    requested_asset_id: str | None = None
     asset_id: str | None = None
     asset_version_id: str | None = None
     inspection: InspectionResult | None = None

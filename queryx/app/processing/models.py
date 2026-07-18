@@ -31,6 +31,7 @@ class ProcessingRun(BaseModel):
     recipe_name: str
     recipe_version: str
     recipe_fingerprint: str
+    recipe: dict[str, Any] = Field(default_factory=dict)
     normalized_binding_id: str | None = None
     serving_binding_id: str | None = None
     records_read: int = Field(default=0, ge=0)

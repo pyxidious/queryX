@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
@@ -15,6 +15,9 @@ from queryx.app.llm.semantic_enrichment import SemanticEnrichmentService
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
 from queryx.app.sources.registry import SourceRegistry
+from queryx.app.worker.models import TaskType, WorkStatus
+from queryx.app.worker.service import WorkerService
+from queryx.app.worker.storage import WorkItemConflictError, WorkerStorage
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -64,6 +67,10 @@ def _processing_service(settings: Settings | None = None) -> ProcessingService:
     return ProcessingService(settings or get_settings())
 
 
+def _worker_service(settings: Settings | None = None) -> WorkerService:
+    return WorkerService(settings or get_settings())
+
+
 def _not_found(resource: str, identifier: str) -> HTTPException:
     return HTTPException(
         status_code=404,
@@ -71,14 +78,30 @@ def _not_found(resource: str, identifier: str) -> HTTPException:
     )
 
 
-@router.get("/health")
 def health() -> dict[str, Any]:
-    orchestrator = _build_orchestrator()
+    settings = get_settings()
+    orchestrator = _build_orchestrator(settings)
     checks = orchestrator.health_checks()
+    worker_status: dict[str, object] | None = None
+    worker_ok = True
+    if settings.queryx_execution_mode == "worker":
+        worker_status = _worker_service(settings).status()
+        worker_ok = worker_status["status"] == "online"
+        checks["worker"] = {"ok": worker_ok, "status": worker_status["status"]}
     return {
-        "status": "ok" if checks and all(check["ok"] for check in checks.values()) else "degraded",
+        "status": "ok" if checks and all(check["ok"] for check in checks.values()) and worker_ok else "degraded",
         "checks": checks,
     }
+
+
+@router.get("/health")
+async def health_endpoint() -> dict[str, Any]:
+    return health()
+
+
+@router.get("/worker/status")
+async def worker_status() -> dict[str, object]:
+    return _worker_service().status()
 
 
 @router.get("/llm/health")
@@ -242,11 +265,18 @@ def get_enrichment_run(run_id: int) -> dict[str, Any]:
 
 @router.post("/ingestions/uploads", status_code=status.HTTP_201_CREATED)
 async def upload_ingestion(
+    response: Response,
     file: UploadFile = File(...),
     asset_id: str | None = Form(default=None),
 ) -> dict[str, Any]:
     try:
-        result = await _ingestion_service().ingest_upload(file, asset_id=asset_id)
+        settings = get_settings()
+        service = _ingestion_service(settings)
+        if settings.queryx_execution_mode == "worker":
+            result = await service.accept_upload(file, asset_id=asset_id, enqueue=True)
+            response.status_code = status.HTTP_202_ACCEPTED
+        else:
+            result = await service.ingest_upload(file, asset_id=asset_id)
         return result.model_dump(mode="json")
     except IngestionServiceError as exc:
         raise HTTPException(
@@ -278,6 +308,30 @@ async def get_ingestion_preview(job_id: str) -> dict[str, Any]:
     if preview is None:
         raise _not_found("ingestion_job", job_id)
     return preview
+
+
+@router.post("/ingestions/{job_id}/cancel")
+async def cancel_ingestion(job_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    service = _ingestion_service(settings)
+    item = WorkerStorage(settings.catalog_db_path).active_for(TaskType.INGESTION, job_id)
+    try:
+        if item is None:
+            job = service.cancel(job_id)
+            return {"job": job.model_dump(mode="json"), "work_item": None}
+        cancelled_item = WorkerStorage(settings.catalog_db_path).request_cancel(item.id)
+        job = service.get_job(job_id)
+        if cancelled_item.status == WorkStatus.CANCELLED:
+            job = service.cancel(job_id)
+        return {
+            "job": job.model_dump(mode="json") if job else None,
+            "work_item": cancelled_item.model_dump(mode="json"),
+        }
+    except (IngestionServiceError, WorkItemConflictError) as exc:
+        code = getattr(exc, "code", "ingestion_not_cancellable")
+        message = getattr(exc, "message", str(exc))
+        status_code = getattr(exc, "status_code", 409)
+        raise HTTPException(status_code=status_code, detail={"error": {"code": code, "message": message}}) from exc
 
 
 @router.get("/assets")
@@ -333,10 +387,23 @@ async def get_asset_version_diff(asset_id: str, version_id: str) -> dict[str, An
 
 
 @router.post("/assets/{asset_id}/versions/{version_id}/prepare")
-async def prepare_asset_version(asset_id: str, version_id: str) -> dict[str, Any]:
+async def prepare_asset_version(asset_id: str, version_id: str, response: Response) -> dict[str, Any]:
     try:
-        run = _processing_service().prepare(asset_id, version_id)
-        return run.model_dump(mode="json")
+        settings = get_settings()
+        service = _processing_service(settings)
+        if settings.queryx_execution_mode == "inline":
+            return service.prepare(asset_id, version_id).model_dump(mode="json")
+        run, _, _ = service.create_processing_run(asset_id, version_id)
+        payload = run.model_dump(mode="json")
+        if run.status == "completed":
+            return payload
+        item, _ = WorkerStorage(settings.catalog_db_path).enqueue(
+            TaskType.PROCESSING,
+            run.id,
+            settings.worker_max_attempts,
+        )
+        response.status_code = status.HTTP_202_ACCEPTED
+        return {**payload, "work_item_id": item.id}
     except ProcessingServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,
@@ -350,6 +417,31 @@ async def get_processing_run(run_id: str) -> dict[str, Any]:
     if run is None:
         raise _not_found("processing_run", run_id)
     return run.model_dump(mode="json")
+
+
+@router.post("/processing/runs/{run_id}/cancel")
+async def cancel_processing_run(run_id: str) -> dict[str, Any]:
+    settings = get_settings()
+    service = _processing_service(settings)
+    storage = WorkerStorage(settings.catalog_db_path)
+    item = storage.active_for(TaskType.PROCESSING, run_id)
+    try:
+        if item is None:
+            run = service.cancel(run_id)
+            return {"run": run.model_dump(mode="json"), "work_item": None}
+        cancelled_item = storage.request_cancel(item.id)
+        run = service.get_run(run_id)
+        if cancelled_item.status == WorkStatus.CANCELLED:
+            run = service.cancel(run_id)
+        return {
+            "run": run.model_dump(mode="json") if run else None,
+            "work_item": cancelled_item.model_dump(mode="json"),
+        }
+    except (ProcessingServiceError, WorkItemConflictError) as exc:
+        code = getattr(exc, "code", "processing_not_cancellable")
+        message = getattr(exc, "message", str(exc))
+        status_code = getattr(exc, "status_code", 409)
+        raise HTTPException(status_code=status_code, detail={"error": {"code": code, "message": message}}) from exc
 
 
 @router.get("/assets/{asset_id}/versions/{version_id}/bindings")
