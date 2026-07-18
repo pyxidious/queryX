@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,6 +52,17 @@ class Settings(BaseSettings):
     processing_stale_run_seconds: int = Field(default=300, ge=1)
     parquet_compression: str = Field(default="zstd", pattern=r"^(zstd|snappy|gzip|none)$")
     parquet_batch_rows: int = Field(default=10_000, ge=1, le=1_000_000)
+    queryx_execution_mode: Literal["inline", "worker"] = "inline"
+    worker_poll_seconds: float = Field(default=1.0, gt=0, le=60)
+    worker_lease_seconds: int = Field(default=60, ge=2, le=3600)
+    worker_heartbeat_seconds: int = Field(default=10, ge=1, le=600)
+    worker_max_attempts: int = Field(default=3, ge=1, le=100)
+    worker_retry_base_seconds: int = Field(default=2, ge=1, le=3600)
+    worker_reconcile_seconds: int = Field(default=60, ge=1, le=86_400)
+    worker_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,128}$")
+    worker_shutdown_seconds: int = Field(default=30, ge=1, le=600)
+    duckdb_lock_path: Path = Path("data/queryx.duckdb.lock")
+    duckdb_lock_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 

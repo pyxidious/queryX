@@ -183,6 +183,7 @@ class IngestionJob(BaseModel):
 class UploadResult(BaseModel):
     job_id: str
     status: IngestionStatus
+    work_item_id: str | None = None
     asset_id: str | None = None
     asset_version_id: str | None = None
     reused: bool = False
