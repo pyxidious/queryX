@@ -41,6 +41,18 @@ class BackendType(StrEnum):
     GRAPHDB = "graphdb"
 
 
+class BindingRole(StrEnum):
+    RAW = "raw"
+    NORMALIZED = "normalized"
+    SERVING = "serving"
+
+
+class BindingStatus(StrEnum):
+    PREPARING = "preparing"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class DataFormat(StrEnum):
     CSV = "csv"
     PARQUET = "parquet"
@@ -80,9 +92,16 @@ class StorageBinding(BaseModel):
     id: str
     asset_version_id: str
     backend_type: BackendType
+    binding_role: BindingRole = BindingRole.RAW
+    status: BindingStatus = BindingStatus.READY
     physical_location: str
-    format: DataFormat
+    format: DataFormat | None = None
+    recipe_fingerprint: str | None = None
+    content_fingerprint: str | None = None
+    schema_fingerprint: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    updated_at: datetime | None = None
 
 
 class LineageEdge(BaseModel):

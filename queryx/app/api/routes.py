@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, status
 
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
@@ -13,6 +13,7 @@ from queryx.app.core.config import Settings, get_settings
 from queryx.app.llm.ollama_client import OllamaClient
 from queryx.app.llm.semantic_enrichment import SemanticEnrichmentService
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
+from queryx.app.processing.service import ProcessingService, ProcessingServiceError
 from queryx.app.sources.registry import SourceRegistry
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ def _semantic_service(settings: Settings | None = None) -> SemanticEnrichmentSer
 
 def _ingestion_service(settings: Settings | None = None) -> IngestionService:
     return IngestionService(settings or get_settings())
+
+
+def _processing_service(settings: Settings | None = None) -> ProcessingService:
+    return ProcessingService(settings or get_settings())
 
 
 def _not_found(resource: str, identifier: str) -> HTTPException:
@@ -325,3 +330,62 @@ async def get_asset_version_diff(asset_id: str, version_id: str) -> dict[str, An
     if diff is None:
         raise _not_found("asset_version", version_id)
     return diff.model_dump(mode="json")
+
+
+@router.post("/assets/{asset_id}/versions/{version_id}/prepare")
+async def prepare_asset_version(asset_id: str, version_id: str) -> dict[str, Any]:
+    try:
+        run = _processing_service().prepare(asset_id, version_id)
+        return run.model_dump(mode="json")
+    except ProcessingServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}, "run_id": exc.run_id},
+        ) from exc
+
+
+@router.get("/processing/runs/{run_id}")
+async def get_processing_run(run_id: str) -> dict[str, Any]:
+    run = _processing_service().get_run(run_id)
+    if run is None:
+        raise _not_found("processing_run", run_id)
+    return run.model_dump(mode="json")
+
+
+@router.get("/assets/{asset_id}/versions/{version_id}/bindings")
+async def get_asset_version_bindings(asset_id: str, version_id: str) -> dict[str, Any]:
+    bindings = _processing_service().list_bindings(asset_id, version_id)
+    if bindings is None:
+        raise _not_found("asset_version", version_id)
+    return {
+        "asset_id": asset_id,
+        "asset_version_id": version_id,
+        "bindings": [binding.model_dump(mode="json") for binding in bindings],
+    }
+
+
+@router.get("/assets/{asset_id}/versions/{version_id}/data-preview")
+async def get_asset_version_data_preview(
+    asset_id: str,
+    version_id: str,
+    request: Request,
+    limit: int = 10,
+) -> dict[str, Any]:
+    unsupported = set(request.query_params.keys()) - {"limit"}
+    if unsupported:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "unsupported_preview_parameter",
+                    "message": "Only the bounded 'limit' parameter is supported",
+                }
+            },
+        )
+    try:
+        return _processing_service().data_preview(asset_id, version_id, limit)
+    except ProcessingServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}},
+        ) from exc

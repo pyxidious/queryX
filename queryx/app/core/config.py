@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     ingestion_inspection_rows: int = Field(default=100, ge=1, le=10_000)
     ingestion_csv_count_rows: int = Field(default=10_000, ge=1)
     ingestion_stale_job_seconds: int = Field(default=300, ge=1)
+    duckdb_path: Path = Path("data/queryx.duckdb")
+    duckdb_schema: str = Field(default="queryx_managed", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    processing_preview_rows: int = Field(default=10, ge=1, le=100)
+    processing_stale_run_seconds: int = Field(default=300, ge=1)
+    parquet_compression: str = Field(default="zstd", pattern=r"^(zstd|snappy|gzip|none)$")
+    parquet_batch_rows: int = Field(default=10_000, ge=1, le=1_000_000)
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 

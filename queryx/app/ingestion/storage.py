@@ -92,7 +92,10 @@ class IngestionStorage:
                 );
                 CREATE TABLE IF NOT EXISTS storage_bindings (
                     id TEXT PRIMARY KEY, asset_version_id TEXT NOT NULL, backend_type TEXT NOT NULL,
-                    physical_location TEXT NOT NULL, format TEXT NOT NULL, created_at TEXT NOT NULL,
+                    binding_role TEXT NOT NULL DEFAULT 'raw', status TEXT NOT NULL DEFAULT 'ready',
+                    physical_location TEXT NOT NULL, format TEXT, recipe_fingerprint TEXT,
+                    content_fingerprint TEXT, schema_fingerprint TEXT,
+                    metadata_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT,
                     UNIQUE(backend_type, physical_location),
                     FOREIGN KEY(asset_version_id) REFERENCES asset_versions(id)
                 );
@@ -127,7 +130,22 @@ class IngestionStorage:
                 self._ensure_column(connection, "asset_versions", column, definition)
             self._ensure_column(connection, "ingestion_jobs", "updated_at", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "heartbeat_at", "TEXT")
+            for column, definition in (
+                ("binding_role", "TEXT NOT NULL DEFAULT 'raw'"),
+                ("status", "TEXT NOT NULL DEFAULT 'ready'"),
+                ("recipe_fingerprint", "TEXT"),
+                ("content_fingerprint", "TEXT"),
+                ("schema_fingerprint", "TEXT"),
+                ("metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("updated_at", "TEXT"),
+            ):
+                self._ensure_column(connection, "storage_bindings", column, definition)
             connection.execute("UPDATE ingestion_jobs SET updated_at = COALESCE(updated_at, created_at)")
+            connection.execute(
+                """UPDATE storage_bindings SET binding_role = COALESCE(binding_role, 'raw'),
+                   status = COALESCE(status, 'ready'), updated_at = COALESCE(updated_at, created_at),
+                   metadata_json = COALESCE(metadata_json, '{}')"""
+            )
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_status_updated
@@ -139,6 +157,12 @@ class IngestionStorage:
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_asset_version_idempotency
                     ON asset_versions(asset_id, source_fingerprint, recipe_fingerprint)
                     WHERE status IN ('preparing', 'ready');
+                CREATE INDEX IF NOT EXISTS idx_storage_bindings_version_role
+                    ON storage_bindings(asset_version_id, binding_role, status);
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_storage_binding_equivalent
+                    ON storage_bindings(
+                        asset_version_id, binding_role, backend_type, COALESCE(recipe_fingerprint, '')
+                    ) WHERE status IN ('preparing', 'ready');
                 """
             )
             applied_at = _now().isoformat()
@@ -149,6 +173,10 @@ class IngestionStorage:
             connection.execute(
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (5, applied_at),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (6, applied_at),
             )
 
     @staticmethod
@@ -288,7 +316,8 @@ class IngestionStorage:
                     if reusable["status"] == "preparing":
                         raise IngestionInProgressError("An equivalent ingestion is still preparing")
                     binding = connection.execute(
-                        "SELECT * FROM storage_bindings WHERE asset_version_id = ? AND backend_type = 'file'",
+                        """SELECT * FROM storage_bindings WHERE asset_version_id = ?
+                           AND backend_type = 'file' AND binding_role = 'raw' AND status = 'ready'""",
                         (reusable["id"],),
                     ).fetchone()
                     if binding is None:
@@ -443,7 +472,9 @@ class IngestionStorage:
         try:
             connection.execute("BEGIN IMMEDIATE")
             version = connection.execute(
-                "SELECT asset_id, status FROM asset_versions WHERE id = ?", (version_id,)
+                """SELECT asset_id, status, source_fingerprint, schema_fingerprint
+                   FROM asset_versions WHERE id = ?""",
+                (version_id,),
             ).fetchone()
             job = connection.execute("SELECT status FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()
             if version is None or version["status"] != "preparing":
@@ -451,8 +482,20 @@ class IngestionStorage:
             if job is None or job["status"] != "inspecting":
                 raise InvalidJobTransition("Job is not inspecting")
             connection.execute(
-                "INSERT INTO storage_bindings VALUES (?, ?, 'file', ?, ?, ?)",
-                (str(uuid4()), version_id, raw_reference, data_format.value, now),
+                """INSERT INTO storage_bindings (
+                    id, asset_version_id, backend_type, binding_role, status, physical_location,
+                    format, content_fingerprint, schema_fingerprint, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, 'file', 'raw', 'ready', ?, ?, ?, ?, '{}', ?, ?)""",
+                (
+                    str(uuid4()),
+                    version_id,
+                    raw_reference,
+                    data_format.value,
+                    version["source_fingerprint"],
+                    version["schema_fingerprint"],
+                    now,
+                    now,
+                ),
             )
             connection.execute(
                 "INSERT INTO lineage_edges VALUES (?, ?, ?, 'upload', ?)",
@@ -561,6 +604,16 @@ class IngestionStorage:
             row = connection.execute("SELECT * FROM asset_versions WHERE id = ?", (version_id,)).fetchone()
             return self._row_to_version(connection, row) if row is not None else None
 
+    def get_version_inspection(self, version_id: str) -> InspectionResult | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT inspection_json FROM asset_versions WHERE id = ?", (version_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _loads(row["inspection_json"], None)
+        return InspectionResult.model_validate(payload) if payload else None
+
     def get_version_diff(self, asset_id: str, version_id: str) -> AssetSchemaDiff | None:
         version = self.get_version(asset_id, version_id)
         return version.schema_diff if version is not None else None
@@ -575,10 +628,11 @@ class IngestionStorage:
     def get_binding(self, version_id: str) -> StorageBinding | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM storage_bindings WHERE asset_version_id = ? AND backend_type = 'file'",
+                """SELECT * FROM storage_bindings WHERE asset_version_id = ?
+                   AND backend_type = 'file' AND binding_role = 'raw' AND status = 'ready'""",
                 (version_id,),
             ).fetchone()
-        return StorageBinding(**dict(row)) if row is not None else None
+        return self._row_to_binding(row) if row is not None else None
 
     def get_prepared_details(self, version_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -612,7 +666,7 @@ class IngestionStorage:
     def list_bindings(self) -> list[StorageBinding]:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM storage_bindings ORDER BY created_at").fetchall()
-        return [StorageBinding(**dict(row)) for row in rows]
+        return [self._row_to_binding(row) for row in rows]
 
     def get_lineage(self, asset_version_id: str) -> list[LineageEdge]:
         with self._connect() as connection:
@@ -671,8 +725,14 @@ class IngestionStorage:
             **values,
             technical_metadata=technical_metadata,
             schema_diff=AssetSchemaDiff.model_validate(diff_payload) if diff_payload else None,
-            storage_bindings=[StorageBinding(**dict(item)) for item in binding_rows],
+            storage_bindings=[IngestionStorage._row_to_binding(item) for item in binding_rows],
         )
+
+    @staticmethod
+    def _row_to_binding(row: sqlite3.Row) -> StorageBinding:
+        values = dict(row)
+        values["metadata"] = _loads(values.pop("metadata_json", None), {})
+        return StorageBinding.model_validate(values)
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> IngestionJob:

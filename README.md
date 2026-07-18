@@ -15,10 +15,13 @@ Sono disponibili:
 - job di ingestion persistenti e asset stabili con versioni incrementali, storage binding e lineage di upload;
 - retry idempotenti per asset target, segnalazione dei contenuti duplicati e drift tra versioni;
 - preview on demand dal file raw e reconciliation invocabile dal service layer;
+- normalizzazione deterministica CSV/Parquet in Parquet canonico tramite PyArrow;
+- serving analitico tramite viste persistenti DuckDB sui file normalized;
+- ProcessingRun persistenti, retry partial e reconciliation degli output fisici;
 - API per stato job, preview limitata e consultazione degli asset;
 - test automatici offline.
 
-L'ingestion termina oggi nello stato `ready`: il file è stato validato, ispezionato e promosso in `raw`, e sono stati creati asset/versione/binding. Normalizzazione e caricamento in un backend analitico non sono ancora implementati, quindi il job non viene dichiarato `completed`.
+L'ingestion termina nello stato `ready`: il raw e la versione logica sono pronti. La preparazione analitica è un flusso separato; il relativo `ProcessingRun` diventa `completed` soltanto quando Parquet normalizzato e vista DuckDB sono entrambi pronti e validati.
 
 ## Concetti principali
 
@@ -28,7 +31,8 @@ L'ingestion termina oggi nello stato `ready`: il file è stato validato, ispezio
 | Managed dataset | Dataset acquisito da QueryX tramite ingestion, con file controllato, job e lineage. |
 | Data asset | Identità logica stabile del dataset. Nuovi upload possono aggiungere versioni senza cambiare l'`asset_id`. |
 | Asset version | Versione immutabile dell'asset, legata ai fingerprint di sorgente, schema e recipe. |
-| Storage binding | Associazione tra una versione e una collocazione fisica. Oggi il backend è `file`; i valori validati preparano DuckDB, SQL, MongoDB e GraphDB futuri. |
+| Storage binding | Rappresentazione fisica della stessa AssetVersion: `raw/file`, `normalized/file` oppure `serving/duckdb`. |
+| Processing run | Esecuzione versionata della recipe che produce normalized e serving binding senza creare una nuova AssetVersion. |
 
 Una sorgente esterna non è un dataset importato. Analogamente, origine, versione del file, schema tecnico, annotazioni semantiche e storage fisico rimangono concetti e record separati.
 
@@ -56,6 +60,12 @@ flowchart LR
     Ingestion --> Readers[CSV / Parquet readers]
     Ingestion --> Files[(staging / raw)]
     Ingestion --> CatalogDB[(SQLite)]
+    API --> Processing[Processing service]
+    Processing --> Normalizer[PyArrow normalizer]
+    Normalizer --> Normalized[(canonical Parquet)]
+    Processing --> DuckDB[(DuckDB views)]
+    Normalized --> DuckDB
+    Processing --> CatalogDB
     Catalog --> CatalogDB
     API --> Semantic[Semantic enrichment]
     Semantic --> Ollama[Ollama optional]
@@ -69,7 +79,9 @@ Componenti:
 - **source registry**: costruisce le sorgenti configurate senza persistere credenziali nel catalogo;
 - **connectors**: estraggono metadata da MySQL e MongoDB entro budget configurati;
 - **catalog**: salva scansioni, snapshot, fingerprint, drift e stato current/stale;
-- **ingestion**: valida upload, scrive staging, calcola hash, esegue inspection e crea asset;
+- **ingestion**: valida upload, scrive staging, calcola hash, esegue inspection e crea asset/versione con raw binding;
+- **processing**: applica `canonical-parquet-v1`, registra binding normalized e serving e valida gli output;
+- **DuckDB**: espone viste persistenti sui Parquet senza duplicare i dati in tabelle;
 - **semantic enrichment**: produce annotazioni opzionali senza modificare i metadata tecnici;
 - **worker boundary**: storage e service permettono di spostare l'orchestrazione dietro polling SQLite; in questa fase non è avviato un worker separato;
 - **SQLite**: persiste catalogo, job, asset, versioni, binding e lineage, mai i file binari;
@@ -117,6 +129,57 @@ Le nuove ingestion non persistono righe di preview in SQLite. `GET /ingestions/{
 ### Drift tra versioni
 
 Il `catalog_adapter` converte ogni inspection in metadata tecnici neutrali. Quando esiste una versione pronta precedente dello stesso asset, QueryX salva un diff deterministico con campi aggiunti/rimossi, cambi di tipo e cambi di nullability. Il confronto non usa Ollama. Il diff della prima versione ha `has_drift=false` perché non esiste una baseline precedente.
+
+### Processing: raw → normalized → serving
+
+Raw, normalized e DuckDB non sono versioni logiche differenti. Sono binding fisici della medesima `AssetVersion`, distinti da ruolo, backend, stato e recipe fingerprint.
+
+```mermaid
+sequenceDiagram
+    participant A as API
+    participant P as Processing service
+    participant S as SQLite
+    participant N as PyArrow normalizer
+    participant F as normalized storage
+    participant D as DuckDB
+    A->>P: POST version/prepare
+    P->>S: ProcessingRun created → normalizing
+    P->>S: normalized binding preparing
+    P->>N: raw CSV/Parquet in batch
+    N->>F: temporary canonical Parquet
+    P->>F: validate + promote
+    P->>S: normalized binding ready
+    P->>S: run registering
+    P->>D: persistent view on Parquet
+    P->>S: serving binding ready
+    P->>S: run validating
+    P->>D: bounded query + schema check
+    P->>S: run completed
+```
+
+`canonical-parquet-v1` contiene formato sorgente, conversioni, ordine colonne, formato output, compressione, dimensione dei batch, opzioni del writer, policy CSV e versione logica del normalizer. Il fingerprint esclude timestamp, path e identificatori di esecuzione. La compressione predefinita è **Zstandard (`zstd`)**, supportata stabilmente da PyArrow e adatta a un formato canonico compatto.
+
+CSV viene convertito usando esclusivamente lo schema osservato durante ingestion. La policy `strict` fallisce quando valori successivi al campione non sono convertibili o violano la nullability. Parquet viene letto in batch e riscritto: non viene copiato, lo schema nativo compatibile viene preservato e i metadata di schema non deterministici vengono rimossi.
+
+Gli schema restano separati:
+
+- `observed_schema`: risultato immutabile dell'inspection raw;
+- `canonical_schema`: schema realmente scritto nel Parquet;
+- `serving_schema`: schema osservato sulla vista DuckDB.
+
+Il run confronta nomi, ordine e famiglie di tipo canonical/serving. La nullability DuckDB sulle viste non viene usata come vincolo perché DuckDB la espone in modo conservativo. Non viene eseguito un `COUNT(*)`: il numero righe proviene dal footer Parquet.
+
+### Idempotenza e failure del processing
+
+- un run `completed` con stessa versione e recipe viene riusato dopo aver riverificato file, vista e schema;
+- un run equivalente attivo produce `409 processing_in_progress`;
+- un run `partial` con normalized binding valido ripete soltanto la registrazione DuckDB;
+- una recipe differente crea nuovi run e binding, non una nuova AssetVersion;
+- binding equivalenti `preparing`/`ready` sono protetti da indici univoci SQLite.
+
+Prima della promozione normalized, una failure rimuove il temporaneo e porta il run a `failed`. Dopo un normalized pronto, una failure DuckDB conserva il Parquet e porta il run a `partial`. Se la finalizzazione del serving fallisce dopo la DDL, la vista deterministica creata dal run viene rimossa e il binding viene marcato `failed`. Il raw e la AssetVersion non vengono mai cancellati o invalidati da una failure di processing.
+
+`ProcessingService.reconcile()` rileva run stale, normalized mancanti, file normalized orfani, viste mancanti, viste senza binding e run partial riprendibili. Non esiste polling automatico.
 
 ### Consistenza e recovery
 
@@ -177,6 +240,10 @@ Endpoint principali già presenti:
 - `GET /assets` e `GET /assets/{asset_id}`;
 - `GET /assets/{asset_id}/versions` e `GET /assets/{asset_id}/versions/{version_id}`;
 - `GET /assets/{asset_id}/diff` e `GET /assets/{asset_id}/versions/{version_id}/diff`.
+- `POST /assets/{asset_id}/versions/{version_id}/prepare`;
+- `GET /processing/runs/{run_id}`;
+- `GET /assets/{asset_id}/versions/{version_id}/bindings`;
+- `GET /assets/{asset_id}/versions/{version_id}/data-preview?limit=10`.
 
 Upload CSV:
 
@@ -213,6 +280,18 @@ curl -sS http://localhost:8000/assets/ASSET_ID/diff
 curl -sS http://localhost:8000/assets/ASSET_ID/versions/VERSION_ID/diff
 ```
 
+Preparazione canonica e serving:
+
+```bash
+curl -sS -X POST \
+  http://localhost:8000/assets/ASSET_ID/versions/VERSION_ID/prepare
+curl -sS http://localhost:8000/processing/runs/RUN_ID
+curl -sS http://localhost:8000/assets/ASSET_ID/versions/VERSION_ID/bindings
+curl -sS 'http://localhost:8000/assets/ASSET_ID/versions/VERSION_ID/data-preview?limit=10'
+```
+
+La data preview accetta soltanto `limit` entro il massimo configurato. Non accetta SQL, filtri o nomi di relazione e legge esclusivamente dalla vista associata al serving binding.
+
 Gli errori hanno forma strutturata, per esempio `detail.error.code` e `detail.error.message`; non includono stack trace o percorsi assoluti.
 
 ## Directory dati
@@ -222,23 +301,30 @@ data/
 ├── queryx_catalog.sqlite3  # catalogo e stato applicativo
 ├── staging/                # file temporanei durante acquisition/inspection
 ├── raw/                    # upload validati, immutati
-└── normalized/             # predisposta, non ancora popolata
+├── normalized/             # Parquet canonici per recipe
+└── queryx.duckdb           # catalogo viste serving, dati non duplicati
 ```
 
 I file sono nel filesystem/volume, non in SQLite. `data/` è esclusa dal repository Git e dal build context Docker.
 
-## Configurazione ingestion
+## Configurazione ingestion e processing
 
 | Variabile | Default container | Uso |
 |---|---:|---|
 | `DATA_RAW_DIR` | `/app/data/raw` | File validati promossi da staging. |
 | `DATA_STAGING_DIR` | `/app/data/staging` | Scrittura temporanea controllata. |
-| `DATA_NORMALIZED_DIR` | `/app/data/normalized` | Directory riservata alla normalizzazione futura. |
+| `DATA_NORMALIZED_DIR` | `/app/data/normalized` | Parquet canonici prodotti dalle recipe di processing. |
 | `INGESTION_MAX_UPLOAD_BYTES` | `26214400` | Dimensione massima, verificata durante lo streaming. |
 | `INGESTION_PREVIEW_ROWS` | `10` | Massimo righe lette on demand dal raw e restituite per preview. |
 | `INGESTION_INSPECTION_ROWS` | `100` | Campione massimo per inferenza CSV. |
 | `INGESTION_CSV_COUNT_ROWS` | `10000` | Limite del conteggio righe CSV. |
 | `INGESTION_STALE_JOB_SECONDS` | `300` | Età dopo la quale reconciliation considera interrotto un job attivo. |
+| `DUCKDB_PATH` | `/app/data/queryx.duckdb` | Database persistente che contiene le viste serving. |
+| `DUCKDB_SCHEMA` | `queryx_managed` | Schema controllato delle viste QueryX. |
+| `PROCESSING_PREVIEW_ROWS` | `10` | Limite massimo della preview DuckDB. |
+| `PROCESSING_STALE_RUN_SECONDS` | `300` | Età oltre la quale un run attivo è considerato stale. |
+| `PARQUET_COMPRESSION` | `zstd` | Compressione canonica validata (`zstd`, `snappy`, `gzip`, `none`). |
+| `PARQUET_BATCH_ROWS` | `10000` | Dimensione massima dei batch Parquet. |
 
 Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, SQLite e Ollama. Non inserire credenziali reali nel repository.
 
@@ -247,21 +333,19 @@ Le altre variabili in `.env.example` configurano sorgenti, budget di profiling, 
 - un solo processo API; ingestion sincrona e limitata, adatta soltanto a file piccoli entro il limite configurato;
 - reconciliation disponibile soltanto tramite service layer: nessun polling automatico e nessun worker Compose;
 - nessuna fusione o deduplicazione fisica automatica tra asset differenti;
-- nessuna normalizzazione o materializzazione; `normalized/` resta vuota;
 - CSV supporta UTF-8 e schema inferito su campione, senza policy avanzate per locale o encoding;
-- nessuna UI di importazione, Kaggle, DuckDB o GraphDB;
+- serving limitato a viste DuckDB e preview bounded; nessuna API per SQL arbitrario;
+- nessuna UI di importazione, Kaggle o GraphDB;
 - nessuna query generation.
 
 ## Roadmap
 
 Funzionalità pianificate, **non ancora implementate**:
 
-1. normalizzazione canonica in Parquet e recipe versionate;
-2. catalogo/materializzazione analitica in DuckDB;
-3. acquisizione Kaggle dietro un source adapter;
-4. UI server-rendered per upload, stato e preview;
-5. worker single-process con claim atomico e polling SQLite;
-6. materializzazione controllata in MySQL e MongoDB;
-7. storage e lineage GraphDB;
-8. logical query plan indipendente dai backend;
-9. compilatori SQL, MQL e Cypher.
+1. acquisizione Kaggle dietro un source adapter;
+2. UI server-rendered per upload, stato e preview;
+3. worker single-process con claim atomico e polling SQLite;
+4. materializzazione controllata in MySQL e MongoDB;
+5. storage e lineage GraphDB;
+6. logical query plan indipendente dai backend;
+7. compilatori SQL, MQL e Cypher.
