@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "queryx"
 version = "0.1.0"
-description = "AI data engineering agent metadata scanner."
+description = "Deterministic metadata catalog and managed dataset ingestion service."
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
@@ -15,6 +15,8 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "pymysql>=1.1.0",
     "pymongo>=4.8.0",
+    "python-multipart>=0.0.9",
+    "pyarrow>=17.0.0",
 ]
 
 [project.optional-dependencies]

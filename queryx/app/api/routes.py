@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
@@ -12,6 +12,7 @@ from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.core.config import Settings, get_settings
 from queryx.app.llm.ollama_client import OllamaClient
 from queryx.app.llm.semantic_enrichment import SemanticEnrichmentService
+from queryx.app.ingestion.service import IngestionService, IngestionServiceError
 from queryx.app.sources.registry import SourceRegistry
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,10 @@ def _ollama_client(settings: Settings | None = None) -> OllamaClient:
 def _semantic_service(settings: Settings | None = None) -> SemanticEnrichmentService:
     resolved = settings or get_settings()
     return SemanticEnrichmentService(_catalog_service(resolved), _ollama_client(resolved), resolved)
+
+
+def _ingestion_service(settings: Settings | None = None) -> IngestionService:
+    return IngestionService(settings or get_settings())
 
 
 def _not_found(resource: str, identifier: str) -> HTTPException:
@@ -228,3 +233,54 @@ def get_enrichment_run(run_id: int) -> dict[str, Any]:
     if run is None:
         raise _not_found("enrichment_run", str(run_id))
     return run.model_dump(mode="json")
+
+
+@router.post("/ingestions/uploads", status_code=status.HTTP_201_CREATED)
+async def upload_ingestion(file: UploadFile = File(...)) -> dict[str, Any]:
+    try:
+        result = await _ingestion_service().ingest_upload(file)
+        return result.model_dump(mode="json")
+    except IngestionServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "error": {"code": exc.code, "message": exc.message},
+                "job_id": exc.job_id,
+            },
+        ) from exc
+
+
+@router.get("/ingestions/{job_id}")
+async def get_ingestion(job_id: str) -> dict[str, Any]:
+    job = _ingestion_service().get_job(job_id)
+    if job is None:
+        raise _not_found("ingestion_job", job_id)
+    return job.model_dump(mode="json")
+
+
+@router.get("/ingestions/{job_id}/preview")
+async def get_ingestion_preview(job_id: str) -> dict[str, Any]:
+    try:
+        preview = _ingestion_service().get_preview(job_id)
+    except IngestionServiceError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": {"code": exc.code, "message": exc.message}},
+        ) from exc
+    if preview is None:
+        raise _not_found("ingestion_job", job_id)
+    return preview
+
+
+@router.get("/assets")
+async def list_assets() -> dict[str, Any]:
+    assets = _ingestion_service().list_assets()
+    return {"assets": [asset.model_dump(mode="json") for asset in assets]}
+
+
+@router.get("/assets/{asset_id}")
+async def get_asset(asset_id: str) -> dict[str, Any]:
+    asset = _ingestion_service().get_asset(asset_id)
+    if asset is None:
+        raise _not_found("asset", asset_id)
+    return asset.model_dump(mode="json")

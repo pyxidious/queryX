@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     mongodb_enabled: bool = True
 
     catalog_db_path: Path = Path("data/queryx_catalog.sqlite3")
+    data_raw_dir: Path = Path("data/raw")
+    data_staging_dir: Path = Path("data/staging")
+    data_normalized_dir: Path = Path("data/normalized")
+    ingestion_max_upload_bytes: int = Field(default=25 * 1024 * 1024, ge=1)
+    ingestion_preview_rows: int = Field(default=10, ge=1, le=100)
+    ingestion_inspection_rows: int = Field(default=100, ge=1, le=10_000)
+    ingestion_csv_count_rows: int = Field(default=10_000, ge=1)
     mongo_sample_size: int = Field(default=25, ge=1, le=1000)
     connection_timeout_seconds: int = Field(default=3, ge=1, le=30)
 
