@@ -22,7 +22,11 @@ from queryx.app.llm.ollama_client import (
 )
 from queryx.app.main import create_app
 from queryx.app.processing.service import ProcessingService
-from queryx.app.query.models import AssetRelationshipCreate, NaturalLanguageQueryRequest
+from queryx.app.query.models import (
+    AssetRelationshipCreate,
+    NaturalLanguageQueryRequest,
+    QueryExecutionResult,
+)
 from queryx.app.query.natural_language import (
     NaturalLanguageQueryError,
     NaturalLanguageQueryService,
@@ -405,7 +409,14 @@ def test_execute_false_does_not_execute_and_true_uses_existing_service(
         NaturalLanguageQueryRequest(question="orders by status", execute=False)
     ).result is None
 
-    execute = NaturalLanguageQueryService(settings, client=StubOllamaClient(_single_plan(assets)))  # type: ignore[arg-type]
+    client = StubOllamaClient(
+        _single_plan(assets),
+        {
+            "answer": "Delivered has two orders and shipped has one.",
+            "thinking": "must not propagate",
+        },
+    )
+    execute = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
     original_execute = execute.query_service.execute
     called = 0
 
@@ -420,6 +431,91 @@ def test_execute_false_does_not_execute_and_true_uses_existing_service(
     )
     assert called == 1 and response.result is not None
     assert response.result.columns == ["status", "orders"]
+    assert response.answer == "Delivered has two orders and shipped has one."
+    assert response.planning_time_ms >= 0
+    assert response.execution_time_ms == response.result.execution_time_ms
+    assert response.explanation_time_ms is not None
+    explanation_payload = json.loads(client.calls[1][0][1]["content"])
+    assert set(explanation_payload) == {
+        "question", "columns", "rows", "row_count", "truncated"
+    }
+    assert explanation_payload["question"] == "orders by status"
+    assert "thinking" not in response.model_dump(mode="json")
+
+
+def test_explanation_failure_does_not_fail_successful_query(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(
+        _single_plan(assets), OllamaUnavailableError("offline")
+    )
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="orders by status", execute=True)
+    )
+
+    assert response.result is not None and response.result.row_count == 2
+    assert response.answer is None
+    assert response.explanation_time_ms is not None
+
+
+def test_explanation_uses_bounded_rows_and_marks_truncation(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(
+        _single_plan(assets),
+        {"answer": "Prima frase. Seconda frase. Terza frase. Quarta frase."},
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    result = QueryExecutionResult(
+        columns=["status", "orders"],
+        rows=[[f"status-{index}", index] for index in range(15)],
+        row_count=15,
+        truncated=True,
+        execution_time_ms=1.5,
+        plan_fingerprint="fingerprint",
+    )
+    monkeypatch.setattr(service.query_service, "execute", lambda plan: result)
+
+    response = service.translate(
+        NaturalLanguageQueryRequest(question="orders by status", execute=True)
+    )
+
+    explanation_payload = json.loads(client.calls[1][0][1]["content"])
+    assert len(explanation_payload["rows"]) == 10
+    assert response.answer == (
+        "Prima frase. Seconda frase. Il risultato mostrato è troncato."
+    )
+    assert len(re.split(r"(?<=[.!?])\s+", response.answer)) == 3
+
+
+def test_empty_result_has_a_clear_answer_without_an_llm_call(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(_single_plan(assets))
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        service.query_service,
+        "execute",
+        lambda plan: QueryExecutionResult(
+            columns=["status", "orders"],
+            rows=[],
+            row_count=0,
+            truncated=False,
+            execution_time_ms=0.5,
+            plan_fingerprint="fingerprint",
+        ),
+    )
+
+    response = service.translate(
+        NaturalLanguageQueryRequest(question="orders by status", execute=True)
+    )
+
+    assert response.answer == "La query non ha restituito risultati."
+    assert len(client.calls) == 1
 
 
 def test_query_language_and_candidate_sql_are_never_accepted(
@@ -463,7 +559,11 @@ def test_api_and_ui_natural_language_flow(
     assert "normalized_plan" in api_response.json() and "result" not in api_response.json()
 
     ui_service = NaturalLanguageQueryService(
-        settings, client=StubOllamaClient(_single_plan(assets))  # type: ignore[arg-type]
+        settings,
+        client=StubOllamaClient(  # type: ignore[arg-type]
+            _single_plan(assets),
+            {"answer": "Delivered ha due ordini; shipped ne ha uno."},
+        ),
     )
     monkeypatch.setattr(ui_routes, "NaturalLanguageQueryService", lambda settings: ui_service)
 
@@ -489,6 +589,10 @@ def test_api_and_ui_natural_language_flow(
     assert "Genera piano" in page.text and "Genera ed esegui" in page.text
     assert "Piano generato e validato" in generated.text
     assert "order_status" in generated.text and "Risultato" in generated.text
+    assert "Risposta" in generated.text
+    assert "Delivered ha due ordini" in generated.text
+    assert "Planning" in generated.text
+    assert "Execution" in generated.text and "Explanation" in generated.text
 
 
 def test_invalid_generated_plan_remains_visible_in_ui(

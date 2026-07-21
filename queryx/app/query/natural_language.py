@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from time import monotonic
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,6 +28,7 @@ from queryx.app.query.validation import QueryValidationError
 
 
 _MAX_CONTEXT_ASSETS = 12
+_MAX_EXPLANATION_ROWS = 10
 _QUERY_LANGUAGE = re.compile(
     r"\b(select|insert|update|delete|drop|alter|create|pragma|attach|detach|copy|call)\b",
     re.IGNORECASE,
@@ -89,6 +91,7 @@ class NaturalLanguageQueryService:
     def translate(
         self, request: NaturalLanguageQueryRequest
     ) -> NaturalLanguageQueryResponse:
+        planning_started = monotonic()
         question = " ".join(request.question.split())
         if not question:
             raise NaturalLanguageQueryError(
@@ -203,13 +206,75 @@ class NaturalLanguageQueryService:
                 validation = self._validate_candidate(candidate)
             except QueryValidationError as retry_exc:
                 raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
+        planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
+        answer: str | None = None
+        explanation_time_ms: float | None = None
+        if result is not None:
+            explanation_started = monotonic()
+            answer = self._explain(question, result)
+            explanation_time_ms = (monotonic() - explanation_started) * 1000
         return NaturalLanguageQueryResponse(
             normalized_plan=validation.normalized_plan,
             output_schema=validation.output_schema,
             warnings=validation.warnings,
             result=result,
+            answer=answer,
+            planning_time_ms=planning_time_ms,
+            execution_time_ms=result.execution_time_ms if result is not None else None,
+            explanation_time_ms=explanation_time_ms,
         )
+
+    def _explain(self, question: str, result: Any) -> str | None:
+        if result.row_count == 0:
+            return "La query non ha restituito risultati."
+        serialized = result.model_dump(mode="json")
+        payload = {
+            "question": question,
+            "columns": serialized["columns"],
+            "rows": serialized["rows"][:_MAX_EXPLANATION_ROWS],
+            "row_count": serialized["row_count"],
+            "truncated": serialized["truncated"],
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Write a concise natural-language answer of at most three sentences, based "
+                    "exclusively on the supplied result values. Do not perform or request new "
+                    "calculations. Do not include reasoning or hidden analysis. If truncated is "
+                    "true, clearly state that the displayed result is truncated. Return only a "
+                    "JSON object with the answer field."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            },
+        ]
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string", "maxLength": 2000}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        }
+        try:
+            generated = self.client.chat_json(messages, schema).content
+        except OllamaError:
+            return None
+        raw_answer = generated.get("answer")
+        if not isinstance(raw_answer, str) or not raw_answer.strip():
+            return None
+        answer = self._limit_sentences(raw_answer, 2 if result.truncated else 3)
+        if result.truncated:
+            answer = f"{answer} Il risultato mostrato è troncato."
+        return answer
+
+    @staticmethod
+    def _limit_sentences(answer: str, maximum: int) -> str:
+        normalized = " ".join(answer.split())
+        sentences = re.split(r"(?<=[.!?])\s+", normalized)
+        return " ".join(sentences[:maximum])
 
     def _validate_candidate(self, candidate: dict[str, Any]) -> Any:
         try:

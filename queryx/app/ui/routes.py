@@ -94,12 +94,17 @@ def _relationship_context(request: Request, error: dict[str, Any] | None = None)
 def _query_context(
     plan_json: str = "", *, result: Any | None = None,
     validation: Any | None = None, error: dict[str, Any] | None = None,
-    question: str = "", generated: bool = False,
+    question: str = "", generated: bool = False, answer: str | None = None,
+    planning_time_ms: float | None = None, execution_time_ms: float | None = None,
+    explanation_time_ms: float | None = None,
 ) -> dict[str, Any]:
     return {
         "title": "Query tecnica", "plan_json": plan_json,
         "result": result, "validation": validation, "error": error,
-        "question": question, "generated": generated,
+        "question": question, "generated": generated, "answer": answer,
+        "planning_time_ms": planning_time_ms,
+        "execution_time_ms": execution_time_ms,
+        "explanation_time_ms": explanation_time_ms,
     }
 
 
@@ -596,6 +601,10 @@ async def natural_language_query_ui(
                 result=response.result,
                 question=question,
                 generated=True,
+                answer=response.answer,
+                planning_time_ms=response.planning_time_ms,
+                execution_time_ms=response.execution_time_ms,
+                explanation_time_ms=response.explanation_time_ms,
             ),
         )
     except ValidationError:

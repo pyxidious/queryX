@@ -202,3 +202,7 @@ class NaturalLanguageQueryResponse(StrictModel):
     output_schema: list[OutputField]
     warnings: list[str] = Field(default_factory=list)
     result: QueryExecutionResult | None = None
+    answer: str | None = None
+    planning_time_ms: float = Field(ge=0)
+    execution_time_ms: float | None = Field(default=None, ge=0)
+    explanation_time_ms: float | None = Field(default=None, ge=0)
