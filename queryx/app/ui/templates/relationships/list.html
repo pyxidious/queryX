@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Catalogo</p><h1>Relazioni tra asset</h1><p class="muted">Le relazioni sono dichiarate manualmente sui campi osservati.</p></div></div>
+{% if error %}<div class="alert alert-danger"><strong>{{ error.code }}</strong>: {{ error.message }}</div>{% endif %}
+<section class="card"><h2>Crea relazione</h2><form class="form" method="post" action="/ui/relationships">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Nome opzionale<input name="name" maxlength="256"></label>
+  <label>Asset sinistro<select name="left_asset_id" required><option value="">Seleziona</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.id }}</option>{% endfor %}</select></label>
+  <label>Campo sinistro<input name="left_field" maxlength="256" required></label>
+  <label>Asset destro<select name="right_asset_id" required><option value="">Seleziona</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.id }}</option>{% endfor %}</select></label>
+  <label>Campo destro<input name="right_field" maxlength="256" required></label>
+  <label>Cardinalità<select name="relationship_type"><option>one_to_one</option><option>one_to_many</option><option>many_to_one</option><option>many_to_many</option></select></label>
+  <label>Join predefinito<select name="join_type_default"><option>inner</option><option>left</option></select></label>
+  <button class="button" type="submit">Registra relazione</button>
+</form></section>
+<section><h2>Relazioni registrate</h2>{% if relationships %}<div class="table-wrap"><table><thead><tr><th>Nome</th><th>Sinistra</th><th>Destra</th><th>Tipo</th><th>Stato</th></tr></thead><tbody>{% for relationship in relationships %}<tr><td>{{ relationship.name or "—" }}</td><td><code>{{ relationship.left_asset_id }}</code>.{{ relationship.left_field }}</td><td><code>{{ relationship.right_asset_id }}</code>.{{ relationship.right_field }}</td><td>{{ relationship.relationship_type }}</td><td>{{ relationship.status }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessuna relazione dichiarata.</p>{% endif %}</section>
+{% endblock %}

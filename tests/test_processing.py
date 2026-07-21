@@ -4,7 +4,7 @@ import asyncio
 import io
 import sqlite3
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -179,6 +179,49 @@ def test_sampled_csv_optional_timestamps_normalize_empty_fields_as_null(tmp_path
     assert table.column("order_approved_at").to_pylist()[2] is None
 
 
+def test_csv_date_target_accepts_date_datetime_variants_and_null(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, ingestion_inspection_rows=1)
+    uploaded = _upload(
+        settings,
+        b"estimated_date,marker\n"
+        b"2017-10-18,a\n"
+        b"2017-10-19 00:00:00,b\n"
+        b"2017-10-20T12:30:45,c\n"
+        b",d\n",
+    )
+    service = ProcessingService(settings)
+
+    run = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    binding = service.storage.get_binding(run.normalized_binding_id or "")
+    assert binding is not None
+    values = pq.read_table(
+        settings.data_normalized_dir / Path(binding.physical_location).name
+    ).column("estimated_date").to_pylist()
+
+    assert run.status == ProcessingStatus.COMPLETED
+    assert values == [date(2017, 10, 18), date(2017, 10, 19), date(2017, 10, 20), None]
+
+
+@pytest.mark.parametrize("invalid_date", ["2017-02-30", "18/10/2017"])
+def test_csv_date_target_rejects_invalid_or_ambiguous_formats_without_value(
+    tmp_path: Path, invalid_date: str
+) -> None:
+    settings = _settings(tmp_path, ingestion_inspection_rows=1)
+    uploaded = _upload(
+        settings,
+        f"estimated_date\n2017-10-18\n{invalid_date}\n".encode(),
+    )
+
+    run = ProcessingService(settings).prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    error = run.errors[0]
+
+    assert run.status == ProcessingStatus.FAILED
+    assert error["column_name"] == "estimated_date"
+    assert error["expected_type"] == "date32[day]"
+    assert error["reason"] == "type_conversion_failed"
+    assert invalid_date not in str(error)
+
+
 @pytest.mark.parametrize(
     ("content", "column_name", "expected_type", "secret_value"),
     [
@@ -304,12 +347,47 @@ def test_failed_processing_run_can_retry_same_recipe_without_temporary_conflict(
 
     failed = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
     retried = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    normalized = service.storage.list_bindings(
+        uploaded.asset_version_id or "", role=BindingRole.NORMALIZED
+    )
 
     assert failed.status == ProcessingStatus.FAILED
     assert retried.status == ProcessingStatus.COMPLETED
     assert retried.id != failed.id
     assert retried.recipe_fingerprint == failed.recipe_fingerprint
+    assert [binding.status for binding in normalized] == ["failed", "ready"]
+    assert len({binding.id for binding in normalized}) == 2
+    assert [run.id for run in service.list_runs_for_version(uploaded.asset_version_id or "")] == [
+        retried.id,
+        failed.id,
+    ]
+    version = service.ingestion_storage.get_version(
+        uploaded.asset_id or "", uploaded.asset_version_id or ""
+    )
+    assert version is not None and version.status == "ready"
     assert not list(settings.data_normalized_dir.glob(".tmp-*.parquet"))
+
+
+def test_reconciliation_repairs_legacy_failed_version_with_intact_raw(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    uploaded = _upload(settings, b"id\n1\n")
+    service = ProcessingService(settings, normalizer=_FailOnceNormalizer())  # type: ignore[arg-type]
+    failed = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    assert failed.status == ProcessingStatus.FAILED
+    with sqlite3.connect(settings.catalog_db_path) as connection:
+        connection.execute(
+            "UPDATE asset_versions SET status = 'failed' WHERE id = ?",
+            (uploaded.asset_version_id,),
+        )
+
+    service.reconcile()
+
+    version = service.ingestion_storage.get_version(
+        uploaded.asset_id or "", uploaded.asset_version_id or ""
+    )
+    raw = service.ingestion_storage.get_binding(uploaded.asset_version_id or "")
+    assert version is not None and version.status == "ready"
+    assert raw is not None and raw.status == "ready"
 
 
 class _FailOnceServing:

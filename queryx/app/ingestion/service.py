@@ -11,6 +11,7 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 from queryx.app.core.config import Settings
+from queryx.app.core.storage_paths import StorageReferenceError, resolve_storage_reference
 from queryx.app.ingestion.catalog_adapter import inspection_to_technical_metadata
 from queryx.app.ingestion.fingerprint import (
     configuration_fingerprint,
@@ -20,6 +21,7 @@ from queryx.app.ingestion.fingerprint import (
 from queryx.app.ingestion.models import (
     AssetSchemaDiff,
     AssetVersion,
+    BindingRole,
     DataAsset,
     DataFormat,
     DatasetProvenance,
@@ -436,8 +438,9 @@ class IngestionService:
             else:
                 report.failed_jobs.append(job.id)
 
+        valid_raw_versions: set[str] = set()
         for binding in self.storage.list_bindings():
-            if binding.backend_type != "file":
+            if binding.backend_type != "file" or binding.binding_role != BindingRole.RAW:
                 continue
             try:
                 path = self._path_from_reference(binding.physical_location, self.raw_dir, "raw")
@@ -453,6 +456,13 @@ class IngestionService:
                     )
                     if job_id not in report.failed_jobs
                 )
+            else:
+                valid_raw_versions.add(binding.asset_version_id)
+
+        for version_id in valid_raw_versions:
+            for job_id in self.storage.restore_false_raw_missing(version_id):
+                if job_id not in report.recovered_jobs:
+                    report.recovered_jobs.append(job_id)
 
         active_references = {
             job.source_reference
@@ -467,15 +477,22 @@ class IngestionService:
                 report.orphan_staging_files.append(reference)
                 path.unlink()
 
-        bound_raw = {
-            binding.physical_location
-            for binding in self.storage.list_bindings()
-            if binding.backend_type == "file"
-        }
-        planned_raw = self.storage.list_planned_locations()
+        bound_raw: set[Path] = set()
+        for binding in self.storage.list_bindings():
+            if binding.backend_type == "file" and binding.binding_role == BindingRole.RAW:
+                try:
+                    bound_raw.add(self._path_from_reference(binding.physical_location, self.raw_dir, "raw"))
+                except IngestionServiceError:
+                    pass
+        planned_raw: set[Path] = set()
+        for reference in self.storage.list_planned_locations():
+            try:
+                planned_raw.add(self._path_from_reference(reference, self.raw_dir, "raw"))
+            except IngestionServiceError:
+                pass
         for path in self.raw_dir.iterdir():
             reference = f"raw/{path.name}"
-            if path.is_file() and reference not in bound_raw and reference not in planned_raw:
+            if path.is_file() and path.resolve() not in bound_raw and path.resolve() not in planned_raw:
                 report.orphan_raw_files.append(reference)
         return report
 
@@ -563,11 +580,13 @@ class IngestionService:
 
     @classmethod
     def _path_from_reference(cls, reference: str, root: Path, prefix: str) -> Path:
-        expected = f"{prefix}/"
-        if not reference.startswith(expected):
-            raise IngestionServiceError("unsafe_storage_path", "Stored file reference is invalid", 500)
-        internal_name = reference[len(expected) :]
-        return cls._controlled_path(root, internal_name)
+        try:
+            return resolve_storage_reference(reference, root, prefix)
+        except StorageReferenceError as exc:
+            raise IngestionServiceError(
+                "unsafe_storage_path", "Stored file reference is invalid", 500
+            ) from exc
+
 
     def _fail_prepared(self, prepared: PreparedVersion | None) -> None:
         if prepared is not None and not prepared.reused:

@@ -12,6 +12,7 @@ QueryX è un modular monolith Python/FastAPI per trasformare domande in linguagg
 - `DataAsset`, `AssetVersion`, storage binding e lineage;
 - normalizzazione canonica Parquet tramite PyArrow;
 - viste persistenti DuckDB e preview limitate;
+- relazioni dichiarate tra asset e query logiche deterministiche bounded;
 - coda SQLite con claim atomico, lease, heartbeat, retry e cancellazione;
 - API FastAPI e UI Jinja offline con CSRF e autoescape.
 
@@ -33,6 +34,10 @@ flowchart LR
     Catalog --> Processing[Processing service]
     Processing --> Parquet[(normalized Parquet)]
     Parquet --> DuckDB[(DuckDB view)]
+    Catalog --> Relationships[(AssetRelationship)]
+    Relationships --> Plan[LogicalQueryPlan validato]
+    DuckDB --> Plan
+    Plan --> Result[risultato strutturato bounded]
     API --> Sources[MySQL / MongoDB metadata]
     API --> Ollama[Ollama opzionale]
 ```
@@ -131,6 +136,11 @@ La provenance è metadata descrittivo dell’origine dichiarata. I metadata tecn
 - `GET /assets/{asset_id}`
 - `GET /assets/{asset_id}/versions/{version_id}`
 - `POST /assets/{asset_id}/versions/{version_id}/prepare`
+- `POST /relationships`, `GET /relationships`, `GET /relationships/{id}`
+- `DELETE /relationships/{id}`
+- `POST /query/validate`
+- `POST /query/execute`
+- `POST /query/natural-language`
 
 I campi JSON preesistenti restano invariati; `provenance` è additivo nelle risposte di job e versione.
 
@@ -147,6 +157,67 @@ Idempotenza:
 - stesso contenuto su asset diversi: asset separati e warning di duplicazione;
 - stessa provenance sul riuso: nessun lineage equivalente duplicato;
 - provenance diversa sul riuso: edge descrittivo aggiuntivo.
+
+## Relazioni e query deterministiche
+
+`AssetRelationship` descrive un join ammesso tra due `DataAsset`: campi sinistro e destro, cardinalità, join predefinito (`inner` o `left`), origine e stato. In questa milestone le relazioni sono soltanto dichiarate manualmente; QueryX verifica che gli asset e i campi esistano nell'`observed_schema` corrente e impedisce duplicati attivi equivalenti. `DELETE /relationships/{id}` disabilita il record senza cancellarlo.
+
+Esempio:
+
+```bash
+curl -X POST http://localhost:8000/relationships \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "orders-products",
+    "left_asset_id": "<order-items-asset-id>",
+    "left_field": "product_id",
+    "right_asset_id": "<products-asset-id>",
+    "right_field": "product_id",
+    "relationship_type": "many_to_one",
+    "join_type_default": "inner"
+  }'
+```
+
+Il `LogicalQueryPlan` contiene esclusivamente sorgenti catalogate, join tramite relationship ID, proiezioni, filtri, aggregazioni, group by, ordinamento e limite. Il client non invia SQL, nomi di viste DuckDB o path. La validazione risolve una versione `ready`, il relativo serving binding DuckDB `ready`, gli schemi e le relazioni attive. Controlla inoltre alias, tipi, aggregazioni, group by e limite.
+
+Esempio “numero ordini per stato”:
+
+```json
+{
+  "sources": [{"alias": "o", "asset_id": "<orders-asset-id>"}],
+  "projections": [
+    {"source_alias": "o", "field": "order_status", "alias": "status"}
+  ],
+  "aggregations": [
+    {"function": "count", "source_alias": "o", "field": "order_id", "alias": "orders"}
+  ],
+  "group_by": [{"source_alias": "o", "field": "order_status"}],
+  "order_by": [{"field": "orders", "direction": "desc"}],
+  "limit": 100
+}
+```
+
+Per raggruppare temporalmente è disponibile la sola trasformazione controllata `date_trunc_month`, applicabile a campi date/timestamp nelle proiezioni e nel corrispondente `group_by`. I join usano sempre un `relationship_id` dichiarato; i casi orders/customer, orders/order_items e products/order_items non sono hardcoded e vanno registrati con gli ID reali del catalogo.
+
+`POST /query/validate` normalizza il limite e restituisce lo schema di output previsto senza eseguire. `POST /query/execute` compila internamente una sola `SELECT` DuckDB con identificatori quoted, valori parametrizzati e `LIMIT`, quindi restituisce colonne, righe bounded, conteggio, indicazione di troncamento, tempo, fingerprint e warning. Il piano logico è quindi il contratto pubblico; il SQL fisico resta un dettaglio interno e non compare nelle risposte standard.
+
+Ogni esecuzione crea un `QueryRun` di audit con piano normalizzato, fingerprint, versioni sorgente, stato e metriche. Le righe del risultato e il SQL completo non vengono persistiti; i valori dei filtri non vengono loggati. Timeout, limite predefinito e massimo sono configurati con `QUERY_TIMEOUT_SECONDS`, `QUERY_DEFAULT_LIMIT` e `QUERY_MAX_LIMIT`. La UI temporanea `/ui/query` accetta JSON e offre Validate/Execute; `/ui/relationships` permette di elencare e dichiarare relazioni.
+
+## Linguaggio naturale → piano logico
+
+`POST /query/natural-language` usa Ollama esclusivamente per produrre un candidato `LogicalQueryPlan`. Il prompt è limitato agli asset rilevanti che hanno versione e serving binding `ready`, ai relativi campi/tipi, alle relazioni attive e allo schema JSON del piano. Non contiene righe campione, path fisici, nomi di relation DuckDB o query fisiche.
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Quanti ordini ci sono per stato?","execute":false}'
+```
+
+La risposta contiene `normalized_plan`, `output_schema` e `warnings`; con `execute=true` contiene anche il risultato bounded. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. È ammesso un solo retry, esclusivamente quando la risposta non è JSON valido.
+
+Il modello non è un'autorità: il JSON viene parsato con modelli strict e passa sempre dal validatore deterministico esistente. Solo un piano valido può raggiungere il normale `QueryService`; compiler ed executor non ricevono testo libero. Input che tenta di fornire query fisiche viene rifiutato. Gli errori applicativi sono `llm_unavailable`, `invalid_llm_json`, `invalid_logical_plan` e `ambiguous_question`.
+
+Nella pagina `/ui/query` sono disponibili “Genera piano” e “Genera ed esegui”. Il piano prodotto resta visibile nell'editor JSON e il risultato riusa la stessa tabella bounded dell'esecuzione manuale.
 
 ## Worker
 
@@ -185,6 +256,7 @@ La configurazione è documentata in `.env.example`. Le aree principali sono:
 - MySQL e MongoDB (`MYSQL_*`, `MONGODB_*`);
 - storage (`CATALOG_DB_PATH`, `DATA_RAW_DIR`, `DATA_STAGING_DIR`, `DATA_NORMALIZED_DIR`);
 - ingestion e processing (`INGESTION_*`, `PARQUET_*`, `DUCKDB_*`);
+- query bounded (`QUERY_DEFAULT_LIMIT`, `QUERY_MAX_LIMIT`, `QUERY_TIMEOUT_SECONDS`);
 - worker (`QUERYX_EXECUTION_MODE`, `WORKER_*`);
 - UI (`QUERYX_UI_*`);
 - enrichment semantico (`OLLAMA_*`, `QUERYX_ENRICHMENT_*`).
@@ -203,6 +275,8 @@ Queste tabelle possono essere eliminate soltanto ricreando volontariamente il ca
 - nessun download, URL fetching o richiesta browser esterna;
 - niente autenticazione/autorizzazione applicativa integrata;
 - CSRF HMAC double-submit per POST UI, autoescape Jinja e asset locali;
+- nessun SQL arbitrario, DDL/DML, subquery o funzione non prevista dal piano;
+- query sempre bounded (default 100, massimo 1000) e timeout default 10 secondi;
 - SQLite e worker singolo sono adatti allo stadio corrente, non a un cluster distribuito;
 - la licenza è una dichiarazione dell’utente, non una valutazione legale;
 - GraphDB non è ancora supportato.
@@ -220,11 +294,8 @@ git diff --check
 
 ## Roadmap
 
-1. logical query plan;
-2. interpretazione delle domande tramite Ollama;
-3. generazione controllata di query;
-4. validazione dei risultati;
-5. risposta finale spiegata;
-6. benchmark tra modelli;
-7. test di robustezza, consistenza e incertezza;
-8. eventuale supporto GraphDB.
+1. richiesta interattiva di chiarimento per domande ambigue;
+2. spiegazione del risultato;
+3. benchmark tra modelli;
+4. test di robustezza, consistenza e incertezza;
+5. GraphDB.

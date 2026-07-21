@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     worker_shutdown_seconds: int = Field(default=30, ge=1, le=600)
     duckdb_lock_path: Path = Path("data/queryx.duckdb.lock")
     duckdb_lock_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
+    query_default_limit: int = Field(default=100, ge=1)
+    query_max_limit: int = Field(default=1000, ge=1)
+    query_timeout_seconds: float = Field(default=10, gt=0, le=300)
     queryx_ui_enabled: bool = True
     queryx_ui_secret_key: str = Field(
         default="queryx-ui-development-key-change-me",
@@ -95,6 +98,10 @@ class Settings(BaseSettings):
     queryx_enrichment_max_fields_per_request: int = Field(default=40, ge=1)
     queryx_enrichment_max_retries: int = Field(default=1, ge=0)
     queryx_enrichment_max_prompt_chars: int = Field(default=12000, ge=1000)
+
+    def model_post_init(self, __context: object) -> None:
+        if self.query_default_limit > self.query_max_limit:
+            raise ValueError("QUERY_DEFAULT_LIMIT cannot exceed QUERY_MAX_LIMIT")
 
 
 @lru_cache

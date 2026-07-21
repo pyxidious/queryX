@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,15 @@ from queryx.app.core.config import Settings
 from queryx.app.ingestion.models import DatasetProvenance, SourceProvider
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
+from queryx.app.query.executor import QueryExecutionError
+from queryx.app.query.models import AssetRelationshipCreate
+from queryx.app.query.models import NaturalLanguageQueryRequest
+from queryx.app.query.natural_language import (
+    NaturalLanguageQueryError,
+    NaturalLanguageQueryService,
+)
+from queryx.app.query.service import QueryService, RelationshipService
+from queryx.app.query.validation import QueryValidationError
 from queryx.app.sources.registry import SourceRegistry
 from queryx.app.ui.view_models import (
     AlertVM,
@@ -35,6 +45,7 @@ from queryx.app.ui.view_models import (
     source_vm,
     version_vm,
 )
+from queryx.app.ui.formatting import format_query_result_value
 from queryx.app.worker.facade import TaskCoordinator
 from queryx.app.worker.models import TaskType
 from queryx.app.worker.service import WorkerService
@@ -43,6 +54,7 @@ from queryx.app.worker.storage import WorkItemConflictError, WorkerStorage
 
 router = APIRouter(prefix="/ui", include_in_schema=False)
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+templates.env.filters["query_value"] = format_query_result_value
 _CSRF_COOKIE = "queryx_ui_csrf"
 _STATIC_FILES = {
     "queryx.css": "text/css; charset=utf-8",
@@ -67,6 +79,28 @@ def _coordinator(request: Request) -> TaskCoordinator:
     settings = _settings(request)
     ingestion, processing, storage = _services(request)
     return TaskCoordinator(settings, ingestion, processing, storage)
+
+
+def _relationship_context(request: Request, error: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = _settings(request)
+    return {
+        "title": "Relazioni tra asset",
+        "relationships": RelationshipService(settings).list(),
+        "assets": IngestionService(settings).list_assets(),
+        "error": error,
+    }
+
+
+def _query_context(
+    plan_json: str = "", *, result: Any | None = None,
+    validation: Any | None = None, error: dict[str, Any] | None = None,
+    question: str = "", generated: bool = False,
+) -> dict[str, Any]:
+    return {
+        "title": "Query tecnica", "plan_json": plan_json,
+        "result": result, "validation": validation, "error": error,
+        "question": question, "generated": generated,
+    }
 
 
 def _signed_csrf(secret: str) -> str:
@@ -362,6 +396,20 @@ async def version_detail(request: Request, asset_id: str, version_id: str) -> HT
         if exc.code not in {"serving_binding_missing", "duckdb_view_missing"}:
             alerts.append(AlertVM("warning", exc.message))
     latest_run = runs[0] if runs else None
+    active_processing = latest_run is not None and str(latest_run.status) in {
+        "created", "normalizing", "registering", "validating"
+    }
+    raw_ready = any(
+        str(binding.binding_role) == "raw"
+        and str(binding.status) == "ready"
+        and str(binding.backend_type) == "file"
+        for binding in bindings
+    )
+    prepare_label = "Prepara analytics"
+    if latest_run is not None and str(latest_run.status) == "failed":
+        prepare_label = "Riprova preparazione"
+    elif latest_run is not None and str(latest_run.status) == "partial":
+        prepare_label = "Riprendi preparazione"
     binding_models = [binding_vm(binding) for binding in bindings]
     bindings_by_role = {
         role: [binding for binding in binding_models if binding.role == role]
@@ -385,7 +433,8 @@ async def version_detail(request: Request, asset_id: str, version_id: str) -> HT
             "raw_preview": raw_preview,
             "serving_preview": serving_preview,
             "alerts": alerts,
-            "can_prepare": str(version.status) == "ready",
+            "can_prepare": raw_ready and not active_processing,
+            "prepare_label": prepare_label,
         },
     )
 
@@ -433,8 +482,132 @@ async def processing_run_status(request: Request, run_id: str) -> HTMLResponse:
         return _error(request, 404, "Run non trovato", "Il ProcessingRun richiesto non esiste.")
     return _render(
         request,
-        "components/job_status.html",
-        {"run": processing_run_vm(run, storage.latest_for(TaskType.PROCESSING, run.id)), "fragment": True},
+        "processing/run_details.html",
+        {
+            "run": processing_run_vm(run, storage.latest_for(TaskType.PROCESSING, run.id)),
+            "canonical_schema": schema_vm(run.canonical_schema),
+            "serving_schema": schema_vm(run.serving_schema),
+            "fragment": True,
+        },
+    )
+
+
+@router.get("/relationships", response_class=HTMLResponse)
+async def relationships_page(request: Request) -> HTMLResponse:
+    return _render(request, "relationships/list.html", _relationship_context(request))
+
+
+@router.post("/relationships", response_class=HTMLResponse)
+async def create_relationship_ui(
+    request: Request,
+    left_asset_id: str = Form(...), left_field: str = Form(...),
+    right_asset_id: str = Form(...), right_field: str = Form(...),
+    relationship_type: str = Form(...), join_type_default: str = Form(default="inner"),
+    name: str | None = Form(default=None), csrf_token: str | None = Form(default=None),
+) -> Response:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        payload = AssetRelationshipCreate(
+            name=name, left_asset_id=left_asset_id, left_field=left_field,
+            right_asset_id=right_asset_id, right_field=right_field,
+            relationship_type=relationship_type, join_type_default=join_type_default,
+        )
+        RelationshipService(_settings(request)).create(payload)
+        return RedirectResponse("/ui/relationships", status_code=303)
+    except (ValidationError, QueryValidationError) as exc:
+        error = exc.payload() if isinstance(exc, QueryValidationError) else {
+            "code": "invalid_relationship", "message": "Controlla i campi della relazione."
+        }
+        return _render(
+            request, "relationships/list.html", _relationship_context(request, error), 422
+        )
+
+
+@router.get("/query", response_class=HTMLResponse)
+async def query_page(request: Request) -> HTMLResponse:
+    return _render(request, "query/index.html", _query_context())
+
+
+@router.post("/query/validate", response_class=HTMLResponse)
+async def validate_query_ui(
+    request: Request, plan_json: str = Form(...), csrf_token: str | None = Form(default=None),
+) -> HTMLResponse:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        validation = QueryService(_settings(request)).validate(json.loads(plan_json))
+        return _render(
+            request, "query/index.html", _query_context(plan_json, validation=validation)
+        )
+    except json.JSONDecodeError:
+        error = {"code": "invalid_json", "message": "Il piano non è JSON valido."}
+    except QueryValidationError as exc:
+        error = exc.payload()
+    return _render(request, "query/index.html", _query_context(plan_json, error=error), 422)
+
+
+@router.post("/query/execute", response_class=HTMLResponse)
+async def execute_query_ui(
+    request: Request, plan_json: str = Form(...), csrf_token: str | None = Form(default=None),
+) -> HTMLResponse:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        result = QueryService(_settings(request)).execute(json.loads(plan_json))
+        return _render(request, "query/index.html", _query_context(plan_json, result=result))
+    except json.JSONDecodeError:
+        error = {"code": "invalid_json", "message": "Il piano non è JSON valido."}
+    except (QueryValidationError, QueryExecutionError) as exc:
+        error = exc.payload() if isinstance(exc, QueryValidationError) else {
+            "code": exc.code, "message": exc.message
+        }
+    return _render(request, "query/index.html", _query_context(plan_json, error=error), 422)
+
+
+@router.post("/query/natural-language", response_class=HTMLResponse)
+async def natural_language_query_ui(
+    request: Request,
+    question: str = Form(...),
+    execute: bool = Form(default=False),
+    csrf_token: str | None = Form(default=None),
+) -> HTMLResponse:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    try:
+        response = NaturalLanguageQueryService(_settings(request)).translate(
+            NaturalLanguageQueryRequest(question=question, execute=execute)
+        )
+        plan_json = json.dumps(
+            response.normalized_plan.model_dump(mode="json", exclude_none=True),
+            indent=2,
+            ensure_ascii=False,
+        )
+        return _render(
+            request,
+            "query/index.html",
+            _query_context(
+                plan_json,
+                result=response.result,
+                question=question,
+                generated=True,
+            ),
+        )
+    except ValidationError:
+        error = {"code": "ambiguous_question", "message": "Inserisci una domanda valida."}
+    except NaturalLanguageQueryError as exc:
+        error = exc.payload()
+    except QueryExecutionError as exc:
+        error = {"code": exc.code, "message": exc.message}
+    return _render(
+        request,
+        "query/index.html",
+        _query_context(question=question, error=error),
+        422,
     )
 
 

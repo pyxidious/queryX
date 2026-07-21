@@ -710,6 +710,21 @@ class IngestionStorage:
             ).fetchone()
         return self._row_to_binding(row) if row is not None else None
 
+    def restore_failed_version_with_ready_raw(self, version_id: str) -> bool:
+        """Repair legacy processing-only failure state without touching any binding."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE asset_versions SET status = 'ready'
+                   WHERE id = ? AND status = 'failed'
+                     AND EXISTS (
+                         SELECT 1 FROM storage_bindings
+                         WHERE asset_version_id = asset_versions.id
+                           AND backend_type = 'file' AND binding_role = 'raw' AND status = 'ready'
+                     )""",
+                (version_id,),
+            )
+        return cursor.rowcount == 1
+
     def get_prepared_details(self, version_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -796,6 +811,47 @@ class IngestionStorage:
                 (version_id,),
             )
         return failed
+
+    def restore_false_raw_missing(self, version_id: str) -> list[str]:
+        """Restore only jobs failed by the historical false raw-file check."""
+        now = _now().isoformat()
+        restored: list[str] = []
+        with self._connect() as connection:
+            binding = connection.execute(
+                """SELECT 1 FROM storage_bindings WHERE asset_version_id = ?
+                   AND backend_type = 'file' AND binding_role = 'raw' AND status = 'ready'""",
+                (version_id,),
+            ).fetchone()
+            if binding is None:
+                return restored
+            rows = connection.execute(
+                """SELECT id, error_json, warnings_json FROM ingestion_jobs
+                   WHERE asset_version_id = ? AND status = 'failed'""",
+                (version_id,),
+            ).fetchall()
+            for row in rows:
+                error = _loads(row["error_json"], {})
+                if not isinstance(error, dict) or error.get("code") != "raw_file_missing":
+                    continue
+                warnings = _loads(row["warnings_json"], [])
+                warning = {
+                    "code": "false_raw_missing_recovered",
+                    "message": "Ready ingestion restored after storage path verification",
+                }
+                if warning not in warnings:
+                    warnings.append(warning)
+                connection.execute(
+                    """UPDATE ingestion_jobs SET status = 'ready', error_json = NULL,
+                       warnings_json = ?, updated_at = ?, finished_at = ? WHERE id = ?""",
+                    (_dumps(warnings), now, now, row["id"]),
+                )
+                restored.append(row["id"])
+            if restored:
+                connection.execute(
+                    "UPDATE asset_versions SET status = 'ready' WHERE id = ? AND status = 'failed'",
+                    (version_id,),
+                )
+        return restored
 
     def _row_to_asset(self, connection: sqlite3.Connection, row: sqlite3.Row) -> DataAsset:
         version_rows = connection.execute(

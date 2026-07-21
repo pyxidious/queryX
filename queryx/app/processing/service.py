@@ -7,7 +7,8 @@ from typing import Callable
 from uuid import uuid4
 
 from queryx.app.core.config import Settings
-from queryx.app.ingestion.fingerprint import technical_schema_fingerprint
+from queryx.app.core.storage_paths import StorageReferenceError, resolve_storage_reference
+from queryx.app.ingestion.fingerprint import file_fingerprint, technical_schema_fingerprint
 from queryx.app.ingestion.models import (
     BackendType,
     AssetVersion,
@@ -103,6 +104,8 @@ class ProcessingService:
             if self.ingestion_storage.get_asset(asset_id) is None:
                 raise ProcessingServiceError("asset_not_found", f"asset '{asset_id}' not found", 404)
             raise ProcessingServiceError("asset_version_not_found", f"asset_version '{version_id}' not found", 404)
+        if version.status == "failed":
+            version = self._recover_legacy_processing_failure(version)
         if version.status != "ready":
             raise ProcessingServiceError("asset_version_not_ready", "Asset version is not ready", 409)
         inspection = self.ingestion_storage.get_version_inspection(version_id)
@@ -515,6 +518,14 @@ class ProcessingService:
     def reconcile(self, now: datetime | None = None) -> ProcessingReconciliationReport:
         report = ProcessingReconciliationReport()
         resolved_now = now or datetime.now(timezone.utc)
+        recoverable_versions = {
+            run.asset_version_id
+            for run in self.storage.list_runs((ProcessingStatus.FAILED, ProcessingStatus.PARTIAL))
+        }
+        for version_id in recoverable_versions:
+            version = self.ingestion_storage.get_version_by_id(version_id)
+            if version is not None and version.status == "failed":
+                self._recover_legacy_processing_failure(version)
         cutoff = resolved_now - timedelta(seconds=self.settings.processing_stale_run_seconds)
         active = self.storage.list_runs(
             (
@@ -582,13 +593,19 @@ class ProcessingService:
                         )
                         report.resumable_partial_runs.append(run.id)
 
-        referenced_normalized = {
-            binding.physical_location
-            for binding in self.storage.list_bindings(role=BindingRole.NORMALIZED)
-        }
+        referenced_normalized: set[Path] = set()
+        for binding in self.storage.list_bindings(role=BindingRole.NORMALIZED):
+            try:
+                referenced_normalized.add(
+                    self._path_from_reference(
+                        binding.physical_location, self.normalized_dir, "normalized"
+                    )
+                )
+            except ProcessingServiceError:
+                pass
         for path in self.normalized_dir.iterdir():
             reference = f"normalized/{path.name}"
-            if path.is_file() and reference not in referenced_normalized:
+            if path.is_file() and path.resolve() not in referenced_normalized:
                 report.orphan_normalized_files.append(reference)
                 if path.name.startswith(".tmp-"):
                     path.unlink()
@@ -596,6 +613,24 @@ class ProcessingService:
             relation for relation in self.serving.list_views() if relation not in bound_relations
         ]
         return report
+
+    def _recover_legacy_processing_failure(self, version: AssetVersion) -> AssetVersion:
+        runs = self.storage.list_runs_for_version(version.id)
+        if not any(run.status in {ProcessingStatus.FAILED, ProcessingStatus.PARTIAL} for run in runs):
+            return version
+        raw_binding = self.ingestion_storage.get_binding(version.id)
+        if raw_binding is None:
+            return version
+        try:
+            raw_path = self._path_from_reference(raw_binding.physical_location, self.raw_dir, "raw")
+            if not raw_path.is_file() or file_fingerprint(raw_path) != version.source_fingerprint:
+                return version
+        except (OSError, ProcessingServiceError):
+            return version
+        if self.ingestion_storage.restore_failed_version_with_ready_raw(version.id):
+            recovered = self.ingestion_storage.get_version_by_id(version.id)
+            return recovered or version
+        return version
 
     def _assert_completed_outputs(self, run: ProcessingRun) -> None:
         if not run.normalized_binding_id or not run.serving_binding_id:
@@ -656,15 +691,12 @@ class ProcessingService:
 
     @staticmethod
     def _path_from_reference(reference: str, root: Path, prefix: str) -> Path:
-        expected = f"{prefix}/"
-        if not reference.startswith(expected):
-            raise ProcessingServiceError("unsafe_storage_path", "Stored file reference is invalid", 500)
-        name = reference[len(expected) :]
-        resolved_root = root.resolve()
-        candidate = (resolved_root / name).resolve()
-        if candidate.parent != resolved_root:
-            raise ProcessingServiceError("unsafe_storage_path", "Stored file reference is invalid", 500)
-        return candidate
+        try:
+            return resolve_storage_reference(reference, root, prefix)
+        except StorageReferenceError as exc:
+            raise ProcessingServiceError(
+                "unsafe_storage_path", "Stored file reference is invalid", 500
+            ) from exc
 
     @staticmethod
     def _promote(source: Path, destination: Path) -> None:

@@ -16,6 +16,18 @@ from queryx.app.llm.semantic_enrichment import SemanticEnrichmentService
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
 from queryx.app.ingestion.models import DatasetProvenance, SourceProvider
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
+from queryx.app.query.executor import QueryExecutionError
+from queryx.app.query.models import (
+    AssetRelationshipCreate,
+    LogicalQueryPlan,
+    NaturalLanguageQueryRequest,
+)
+from queryx.app.query.natural_language import (
+    NaturalLanguageQueryError,
+    NaturalLanguageQueryService,
+)
+from queryx.app.query.service import QueryService, RelationshipService
+from queryx.app.query.validation import QueryValidationError
 from queryx.app.sources.registry import SourceRegistry
 from queryx.app.worker.facade import TaskCoordinator
 from queryx.app.worker.service import WorkerService
@@ -73,6 +85,20 @@ def _worker_service(settings: Settings | None = None) -> WorkerService:
     return WorkerService(settings or get_settings())
 
 
+def _relationship_service(settings: Settings | None = None) -> RelationshipService:
+    return RelationshipService(settings or get_settings())
+
+
+def _query_service(settings: Settings | None = None) -> QueryService:
+    return QueryService(settings or get_settings())
+
+
+def _natural_language_query_service(
+    settings: Settings | None = None,
+) -> NaturalLanguageQueryService:
+    return NaturalLanguageQueryService(settings or get_settings())
+
+
 def _task_coordinator(settings: Settings | None = None) -> TaskCoordinator:
     ingestion = _ingestion_service()
     resolved = settings or ingestion.settings
@@ -97,6 +123,13 @@ def _not_found(resource: str, identifier: str) -> HTTPException:
         status_code=404,
         detail={"error": {"code": f"{resource}_not_found", "message": f"{resource} '{identifier}' not found"}},
     )
+
+
+def _query_error(exc: QueryValidationError | QueryExecutionError) -> HTTPException:
+    payload = exc.payload() if isinstance(exc, QueryValidationError) else {
+        "code": exc.code, "message": exc.message
+    }
+    return HTTPException(status_code=exc.status_code, detail={"error": payload})
 
 
 def health() -> dict[str, Any]:
@@ -503,3 +536,63 @@ async def get_asset_version_data_preview(
             status_code=exc.status_code,
             detail={"error": {"code": exc.code, "message": exc.message}},
         ) from exc
+
+
+@router.post("/relationships", status_code=status.HTTP_201_CREATED)
+async def create_relationship(payload: AssetRelationshipCreate) -> dict[str, Any]:
+    try:
+        return _relationship_service().create(payload).model_dump(mode="json")
+    except QueryValidationError as exc:
+        raise _query_error(exc) from exc
+
+
+@router.get("/relationships")
+async def list_relationships() -> dict[str, Any]:
+    relationships = _relationship_service().list()
+    return {"relationships": [item.model_dump(mode="json") for item in relationships]}
+
+
+@router.get("/relationships/{relationship_id}")
+async def get_relationship(relationship_id: str) -> dict[str, Any]:
+    relationship = _relationship_service().get(relationship_id)
+    if relationship is None:
+        raise _not_found("relationship", relationship_id)
+    return relationship.model_dump(mode="json")
+
+
+@router.delete("/relationships/{relationship_id}")
+async def disable_relationship(relationship_id: str) -> dict[str, Any]:
+    relationship = _relationship_service().disable(relationship_id)
+    if relationship is None:
+        raise _not_found("relationship", relationship_id)
+    return relationship.model_dump(mode="json")
+
+
+@router.post("/query/validate")
+async def validate_query(plan: LogicalQueryPlan) -> dict[str, Any]:
+    try:
+        return _query_service().validate(plan).model_dump(mode="json")
+    except QueryValidationError as exc:
+        raise _query_error(exc) from exc
+
+
+@router.post("/query/execute")
+async def execute_query(plan: LogicalQueryPlan) -> dict[str, Any]:
+    try:
+        return _query_service().execute(plan).model_dump(mode="json")
+    except (QueryValidationError, QueryExecutionError) as exc:
+        raise _query_error(exc) from exc
+
+
+@router.post("/query/natural-language")
+async def natural_language_query(request: NaturalLanguageQueryRequest) -> dict[str, Any]:
+    try:
+        return _natural_language_query_service().translate(request).model_dump(
+            mode="json", exclude_none=True
+        )
+    except NaturalLanguageQueryError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail={"error": exc.payload()}
+        ) from exc
+    except QueryExecutionError as exc:
+        raise _query_error(exc) from exc

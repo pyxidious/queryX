@@ -72,10 +72,17 @@ def format_value(value: Any, max_length: int = 160) -> str:
     return rendered
 
 
+def format_query_result_value(value: Any) -> Any:
+    """Format only floating-point cells at the query UI presentation boundary."""
+    if not isinstance(value, float):
+        return value
+    rendered = f"{value:.2f}".rstrip("0").rstrip(".")
+    return "0" if rendered == "-0" else rendered
+
+
 def structured_message(value: dict[str, Any] | None) -> str | None:
     if not value:
         return None
     code = value.get("code")
     message = value.get("message") or "Errore non specificato"
     return f"{code}: {message}" if code else str(message)
-

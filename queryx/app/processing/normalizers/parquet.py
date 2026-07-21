@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -152,7 +154,7 @@ def _cast_batch(
     for index, field in enumerate(schema):
         source = batch.column(index)
         try:
-            array = pc.cast(source, field.type, safe=True)
+            array = _cast_array(source, field.type)
         except Exception as exc:
             failed_index = _first_conversion_failure(source, field.type)
             raise NormalizationError(
@@ -189,10 +191,34 @@ def _first_conversion_failure(array: pa.Array, target_type: pa.DataType) -> int 
     for index in range(len(array)):
         if array[index].is_valid:
             try:
-                pc.cast(array.slice(index, 1), target_type, safe=True)
+                _cast_array(array.slice(index, 1), target_type)
             except Exception:
                 return index
     return None
+
+
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$")
+
+
+def _cast_array(array: pa.Array, target_type: pa.DataType) -> pa.Array:
+    if pa.types.is_date32(target_type) and pa.types.is_string(array.type):
+        converted: list[date | None] = []
+        for scalar in array:
+            if not scalar.is_valid:
+                converted.append(None)
+                continue
+            value = scalar.as_py()
+            if not isinstance(value, str):
+                raise ValueError("CSV date source must be textual")
+            if _DATE.fullmatch(value):
+                converted.append(date.fromisoformat(value))
+            elif _DATE_TIME.fullmatch(value):
+                converted.append(datetime.fromisoformat(value).date())
+            else:
+                raise ValueError("CSV date format is invalid")
+        return pa.array(converted, type=pa.date32())
+    return pc.cast(array, target_type, safe=True)
 
 
 def _conversion_details(

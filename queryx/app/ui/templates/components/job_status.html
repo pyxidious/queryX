@@ -8,7 +8,7 @@
   {% if job.error %}<div class="alert alert-danger">{{ job.error }}</div>{% endif %}
 </section>
 {% elif run %}
-<section id="run-status" class="card" {% if not run.terminal %}hx-get="/ui/processing/runs/{{ run.id }}/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+<section id="run-status" class="card" {% if not run.terminal and poll_run_status|default(true) %}hx-get="/ui/processing/runs/{{ run.id }}/status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
   <div class="card-heading"><h2>Stato processing</h2>{{ status_badge(run.status) }}</div>
   <p>Fase {{ run.status.label }} · aggiornato {{ run.updated_at }}</p>
   {% if run.partial %}<div class="alert alert-warning">Run partial: il Parquet normalizzato è recuperabile e la registrazione serving può essere ritentata.</div>{% endif %}
@@ -16,4 +16,3 @@
   {% if run.errors %}<div class="alert alert-danger">{{ run.errors|join(" · ") }}</div>{% endif %}
 </section>
 {% endif %}
-

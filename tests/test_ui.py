@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
+import sqlite3
 import tempfile
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 from fastapi import UploadFile
 
 from queryx.app.api import routes as api_routes
+from queryx.app.ui import routes as ui_routes
 from queryx.app.core.config import Settings
 from queryx.app.ingestion.service import IngestionService
 from queryx.app.main import create_app
@@ -227,6 +232,96 @@ def test_assets_version_prepare_processing_and_duckdb_preview(monkeypatch: objec
     assert str(tmp_path) not in version_page.text
 
 
+def test_processing_poll_refreshes_persisted_metrics_and_schemas(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path, "worker")
+    uploaded = _upload_service(settings)
+    processing = ProcessingService(settings)
+    run, _, _ = processing.create_processing_run(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    client = _client(monkeypatch, settings)
+
+    initial = client.get(f"/ui/processing/runs/{run.id}")
+    assert 'id="processing-run-details"' in initial.text
+    assert 'hx-trigger="every 2s"' in initial.text
+
+    canonical_schema = [{"name": "order_id", "data_type": "string", "nullable": False}]
+    serving_schema = [{"name": "order_id", "data_type": "VARCHAR", "nullable": True}]
+    run = processing.storage.transition_run(run.id, ProcessingStatus.NORMALIZING)
+    run = processing.storage.transition_run(run.id, ProcessingStatus.REGISTERING)
+    run = processing.storage.transition_run(run.id, ProcessingStatus.VALIDATING)
+    processing.storage.transition_run(
+        run.id,
+        ProcessingStatus.COMPLETED,
+        records_read=99441,
+        records_written=99441,
+        records_rejected=0,
+        bytes_written=7096147,
+        canonical_schema_json=json.dumps(canonical_schema),
+        serving_schema_json=json.dumps(serving_schema),
+    )
+
+    refreshed = client.get(f"/ui/processing/runs/{run.id}/status")
+    assert refreshed.status_code == 200
+    assert refreshed.text.count("99441") == 2
+    assert "6.8 MiB" in refreshed.text
+    assert "order_id" in refreshed.text
+    assert "string" in refreshed.text and "VARCHAR" in refreshed.text
+    assert "Schema non disponibile" not in refreshed.text
+    assert "hx-trigger" not in refreshed.text
+
+
+def test_processing_run_legacy_schema_fallback_is_rendered(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    uploaded = _upload_service(settings)
+    processing = ProcessingService(settings)
+    run, _, _ = processing.create_processing_run(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    page = _client(monkeypatch, settings).get(f"/ui/processing/runs/{run.id}")
+
+    assert page.status_code == 200
+    assert page.text.count("Schema non disponibile.") == 2
+    assert "Metriche" in page.text
+
+
+def test_version_ui_retries_failed_processing_and_keeps_run_history(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    uploaded = _upload_service(settings)
+    processing = ProcessingService(settings)
+    failed, _, _ = processing.create_processing_run(
+        uploaded.asset_id or "", uploaded.asset_version_id or ""
+    )
+    failed = processing.storage.transition_run(failed.id, ProcessingStatus.NORMALIZING)
+    failed = processing.storage.transition_run(failed.id, ProcessingStatus.FAILED)
+    with sqlite3.connect(settings.catalog_db_path) as connection:
+        connection.execute(
+            "UPDATE asset_versions SET status = 'failed' WHERE id = ?",
+            (uploaded.asset_version_id,),
+        )
+    version_url = f"/ui/assets/{uploaded.asset_id}/versions/{uploaded.asset_version_id}"
+    client = _client(monkeypatch, settings)
+
+    before = client.get(version_url)
+    token = _csrf(client, version_url)
+    retried = client.post(f"{version_url}/prepare", data={"csrf_token": token})
+    new_run_id = retried.headers["location"].rsplit("/", 1)[-1]
+    after = client.get(version_url)
+
+    assert "Riprova preparazione" in before.text
+    assert retried.status_code == 303 and new_run_id != failed.id
+    assert ProcessingService(settings).get_run(new_run_id).status == ProcessingStatus.COMPLETED  # type: ignore[union-attr]
+    assert [run.status for run in processing.list_runs_for_version(uploaded.asset_version_id or "")] == [
+        ProcessingStatus.COMPLETED,
+        ProcessingStatus.FAILED,
+    ]
+    assert failed.id[:8] in after.text and new_run_id[:8] in after.text
+    version = IngestionService(settings).get_version(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    assert version is not None and version.status == "ready"
+
+
 def test_worker_processing_202_polling_conflict_and_cancellation(monkeypatch: object, tmp_path: Path) -> None:
     settings = _settings(tmp_path, "worker")
     uploaded = _upload_service(settings)
@@ -237,7 +332,8 @@ def test_worker_processing_202_polling_conflict_and_cancellation(monkeypatch: ob
     assert prepared.status_code == 303
     run_id = prepared.headers["location"].rsplit("/", 1)[-1]
     assert 'hx-trigger="every 2s"' in client.get(f"/ui/processing/runs/{run_id}/status").text
-    token = _csrf(client, version_url)
+    active_version = client.get(version_url)
+    assert f'action="{version_url}/prepare"' not in active_version.text
     conflict = client.post(f"{version_url}/prepare", data={"csrf_token": token})
     assert conflict.status_code == 409 and "Preparazione non disponibile" in conflict.text
     token = _csrf(client, f"/ui/processing/runs/{run_id}")
@@ -256,9 +352,13 @@ def test_partial_run_is_presented_as_recoverable(monkeypatch: object, tmp_path: 
     run = storage.transition_run(run.id, ProcessingStatus.REGISTERING)
     storage.transition_run(run.id, ProcessingStatus.PARTIAL)
     client = _client(monkeypatch, settings)
+    version_page = client.get(
+        f"/ui/assets/{uploaded.asset_id}/versions/{uploaded.asset_version_id}"
+    )
     page = client.get(f"/ui/processing/runs/{run.id}")
     fragment = client.get(f"/ui/processing/runs/{run.id}/status")
     assert page.status_code == 200
+    assert "Riprendi preparazione" in version_page.text
     assert "recuperabile" in page.text.lower()
     assert 'hx-trigger="every 2s"' in fragment.text
 
@@ -286,3 +386,42 @@ def test_json_api_contract_is_unchanged(monkeypatch: object, tmp_path: Path) -> 
         assert "job_id" in response.json()
     finally:
         api_routes._ingestion_service = original_ingestion
+
+
+def test_query_result_ui_formats_only_float_cells(monkeypatch: object, tmp_path: Path) -> None:
+    class StubQueryService:
+        def __init__(self, settings: Settings) -> None:
+            pass
+
+        def execute(self, payload: dict[str, Any]) -> SimpleNamespace:
+            return SimpleNamespace(
+                columns=["first", "second", "whole", "integer", "text", "date", "nullable"],
+                rows=[[
+                    1258681.3399999992,
+                    1205005.6799999964,
+                    100.0,
+                    100,
+                    "100.0",
+                    date(2026, 7, 22),
+                    None,
+                ]],
+                row_count=1,
+                execution_time_ms=1.0,
+                truncated=False,
+            )
+
+    monkeypatch.setattr(ui_routes, "QueryService", StubQueryService)  # type: ignore[attr-defined]
+    client = _client(monkeypatch, _settings(tmp_path))
+    token = _csrf(client, "/ui/query")
+    response = client.post(
+        "/ui/query/execute",
+        data={"csrf_token": token, "plan_json": "{}"},
+    )
+
+    assert response.status_code == 200
+    assert "1258681.34" in response.text and "1258681.3399999992" not in response.text
+    assert "1205005.68" in response.text and "1205005.6799999964" not in response.text
+    assert "<td>100</td>" in response.text
+    assert "<td>100.0</td>" in response.text
+    assert "<td>2026-07-22</td>" in response.text
+    assert "<td>null</td>" in response.text
