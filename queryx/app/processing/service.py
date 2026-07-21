@@ -280,7 +280,12 @@ class ProcessingService:
                 self.storage.force_fail_ready_binding(normalized_binding.id)
             elif not already_ready:
                 self.storage.fail_binding(normalized_binding.id)
-            return self._fail_run(run, getattr(exc, "code", "normalization_failed"), str(exc))
+            return self._fail_run(
+                run,
+                getattr(exc, "code", "normalization_failed"),
+                str(exc),
+                getattr(exc, "details", None),
+            )
         except Exception:
             self._cleanup(temp_path, normalized_path if promoted else None)
             if promoted:
@@ -618,14 +623,21 @@ class ProcessingService:
         except Exception:
             return False
 
-    def _fail_run(self, run: ProcessingRun, code: str, message: str) -> ProcessingRun:
+    def _fail_run(
+        self,
+        run: ProcessingRun,
+        code: str,
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> ProcessingRun:
         current = self.storage.get_run(run.id) or run
         rejected = max(current.records_rejected, 1) if code == "strict_conversion_failed" else current.records_rejected
+        error = {"code": code, "message": message, **(details or {})}
         return self.storage.transition_run(
             run.id,
             ProcessingStatus.FAILED,
             records_rejected=rejected,
-            errors_json=json.dumps([*current.errors, {"code": code, "message": message}], sort_keys=True),
+            errors_json=json.dumps([*current.errors, error], sort_keys=True),
         )
 
     @staticmethod

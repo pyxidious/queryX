@@ -15,8 +15,13 @@ from starlette.datastructures import UploadFile
 
 from queryx.app.core.config import Settings
 from queryx.app.ingestion.service import IngestionService
-from queryx.app.ingestion.models import BindingRole
+from queryx.app.ingestion.models import BindingRole, DataFormat, InspectionResult, SchemaField
 from queryx.app.processing.models import ProcessingStatus
+from queryx.app.processing.normalizers.parquet import (
+    CanonicalParquetNormalizer,
+    NormalizationError,
+    _cast_batch,
+)
 from queryx.app.processing.recipe import canonical_parquet_recipe
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
 from queryx.app.processing.serving.duckdb import DuckDBServingAdapter
@@ -148,6 +153,163 @@ def test_strict_conversion_failure_removes_temporary_output(tmp_path: Path) -> N
     assert run.errors[0]["code"] == "strict_conversion_failed"
     assert not list(settings.data_normalized_dir.iterdir())
     assert service.ingestion_storage.get_version(uploaded.asset_id or "", uploaded.asset_version_id or "").status == "ready"  # type: ignore[union-attr]
+
+
+def test_sampled_csv_optional_timestamps_normalize_empty_fields_as_null(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, ingestion_inspection_rows=1, parquet_batch_rows=2)
+    uploaded = _upload(
+        settings,
+        b"order_id,order_approved_at,order_delivered_customer_date\n"
+        b"a1,2018-01-01 10:00:00,2018-01-03 12:00:00\n"
+        b"a2,2018-01-02 11:00:00,\n"
+        b"a3,,\n",
+        "olist_orders_dataset.csv",
+    )
+    service = ProcessingService(settings)
+
+    run = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    binding = service.storage.get_binding(run.normalized_binding_id or "")
+    assert binding is not None
+    table = pq.read_table(settings.data_normalized_dir / Path(binding.physical_location).name)
+
+    assert run.status == ProcessingStatus.COMPLETED
+    assert run.records_written == 3
+    assert all(field["nullable"] for field in run.canonical_schema)
+    assert table.column("order_delivered_customer_date").to_pylist()[1:] == [None, None]
+    assert table.column("order_approved_at").to_pylist()[2] is None
+
+
+@pytest.mark.parametrize(
+    ("content", "column_name", "expected_type", "secret_value"),
+    [
+        (
+            b"event_at\n2018-01-01 10:00:00\ndefinitely-secret-invalid-timestamp\n",
+            "event_at",
+            "timestamp[us]",
+            "definitely-secret-invalid-timestamp",
+        ),
+        (b"amount\n10\nsecret-number\n", "amount", "int64", "secret-number"),
+        (
+            b"amount\n10\n999999999999999999999999999999999\n",
+            "amount",
+            "int64",
+            "999999999999999999999999999999999",
+        ),
+    ],
+)
+def test_strict_conversion_error_is_structured_without_source_value(
+    tmp_path: Path,
+    content: bytes,
+    column_name: str,
+    expected_type: str,
+    secret_value: str,
+) -> None:
+    settings = _settings(tmp_path, ingestion_inspection_rows=1)
+    uploaded = _upload(settings, content)
+
+    run = ProcessingService(settings).prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    error = run.errors[0]
+
+    assert run.status == ProcessingStatus.FAILED
+    assert error["code"] == "strict_conversion_failed"
+    assert error["column_name"] == column_name
+    assert error["expected_type"] == expected_type
+    assert error["reason"] == "type_conversion_failed"
+    assert error["batch_number"] == 1
+    assert error["row_number"] == 2
+    assert secret_value not in str(error)
+    assert not list(settings.data_normalized_dir.glob(".tmp-*.parquet"))
+
+
+def test_strict_policy_rejects_incompatible_csv_structure_without_exposing_value(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, ingestion_inspection_rows=1)
+    uploaded = _upload(settings, b"id\n1\n2,secret-extra-field\n")
+
+    run = ProcessingService(settings).prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    error = run.errors[0]
+
+    assert run.status == ProcessingStatus.FAILED
+    assert error["code"] == "strict_conversion_failed"
+    assert error["reason"] == "type_conversion_failed"
+    assert "secret-extra-field" not in str(error)
+
+
+def test_legacy_sampled_csv_non_nullable_schema_is_treated_conservatively(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.csv"
+    destination = tmp_path / "normalized.parquet"
+    source.write_text("event_at,marker\n2018-01-01 10:00:00,a\n,b\n", encoding="utf-8")
+    inspection = InspectionResult(
+        format=DataFormat.CSV,
+        fields=[
+            SchemaField(name="event_at", data_type="datetime", nullable=False),
+            SchemaField(name="marker", data_type="string", nullable=False),
+        ],
+        metadata={"delimiter": ",", "sampled_rows": 1},
+    )
+
+    result = CanonicalParquetNormalizer().normalize(
+        source,
+        destination,
+        inspection,
+        canonical_parquet_recipe(inspection),
+    )
+
+    assert result.records_written == 2
+    assert result.canonical_schema[0]["nullable"] is True
+    assert pq.read_table(destination).column("event_at").to_pylist()[1] is None
+
+
+def test_declared_non_nullable_schema_still_rejects_null_with_structured_reason() -> None:
+    batch = pa.record_batch([pa.array([1, None], type=pa.int64())], names=["required_id"])
+    schema = pa.schema([pa.field("required_id", pa.int64(), nullable=False)])
+
+    with pytest.raises(NormalizationError) as exc:
+        _cast_batch(batch, schema, batch_number=1)
+
+    assert exc.value.code == "strict_conversion_failed"
+    assert exc.value.details == {
+        "column_name": "required_id",
+        "expected_type": "int64",
+        "reason": "nullability_violation",
+        "batch_number": 1,
+        "row_number": 2,
+    }
+
+
+class _FailOnceNormalizer:
+    def __init__(self) -> None:
+        self.delegate = CanonicalParquetNormalizer()
+        self.failures = 1
+
+    def normalize(self, *args: Any, **kwargs: Any):
+        if self.failures:
+            self.failures -= 1
+            raise NormalizationError(
+                "strict_conversion_failed",
+                "A source value is incompatible with the observed schema",
+                {
+                    "column_name": "id",
+                    "expected_type": "int64",
+                    "reason": "type_conversion_failed",
+                },
+            )
+        return self.delegate.normalize(*args, **kwargs)
+
+
+def test_failed_processing_run_can_retry_same_recipe_without_temporary_conflict(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    uploaded = _upload(settings, b"id\n1\n")
+    normalizer = _FailOnceNormalizer()
+    service = ProcessingService(settings, normalizer=normalizer)  # type: ignore[arg-type]
+
+    failed = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    retried = service.prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+
+    assert failed.status == ProcessingStatus.FAILED
+    assert retried.status == ProcessingStatus.COMPLETED
+    assert retried.id != failed.id
+    assert retried.recipe_fingerprint == failed.recipe_fingerprint
+    assert not list(settings.data_normalized_dir.glob(".tmp-*.parquet"))
 
 
 class _FailOnceServing:

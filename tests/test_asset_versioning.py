@@ -115,7 +115,7 @@ def test_schema_diff_no_drift_added_removed_and_type_change(tmp_path: Path) -> N
     assert drift.previous_version_id == second.asset_version_id
 
 
-def test_schema_diff_reports_nullability_change_when_observed(tmp_path: Path) -> None:
+def test_csv_schema_diff_does_not_claim_nullability_from_bounded_samples(tmp_path: Path) -> None:
     service = _service(tmp_path)
     first = _upload(service, b"id,name\n1,Ada\n")
     second = _upload(service, b"id,name\n2,\n", first.asset_id)
@@ -123,8 +123,9 @@ def test_schema_diff_reports_nullability_change_when_observed(tmp_path: Path) ->
     drift = service.get_version_diff(first.asset_id or "", second.asset_version_id or "")
 
     assert drift is not None
-    assert [change.model_dump() for change in drift.nullability_changes] == [
-        {"field": "name", "previous": False, "current": True}
+    assert drift.nullability_changes == []
+    assert [change.model_dump() for change in drift.type_changes] == [
+        {"field": "name", "previous": "string", "current": "null"}
     ]
 
 

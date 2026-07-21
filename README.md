@@ -136,7 +136,7 @@ I campi JSON preesistenti restano invariati; `provenance` è additivo nelle risp
 
 ## Ingestion e processing
 
-CSV richiede UTF-8 e intestazioni. L’inferenza usa un campione limitato; il conteggio può essere stimato. Parquet usa footer e schema nativi. Le preview vengono lette on demand dai binding controllati e non espongono path fisici.
+CSV richiede UTF-8 e intestazioni. L’inferenza del tipo usa un campione limitato; il conteggio può essere stimato. Poiché un campione non può dimostrare l’assenza di null nell’intero file, la nullability dei CSV inferiti è conservativa (`nullable=true`): i campi vuoti sono trattati come null durante inspection e normalizzazione. La policy strict continua a rifiutare valori non vuoti incompatibili con il tipo inferito, overflow e strutture non valide. Parquet conserva invece tipi e nullability dichiarati nel footer. Le preview vengono lette on demand dai binding controllati e non espongono path fisici.
 
 L’ingestion termina in `ready`, quando raw, asset e versione sono validi. Il processing è separato: applica `canonical-parquet-v1`, scrive un Parquet normalizzato, registra una vista DuckDB e valida schema e output. `observed_schema`, `canonical_schema` e `serving_schema` rimangono distinti.
 

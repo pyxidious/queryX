@@ -27,7 +27,9 @@ class CSVReader:
                 for row in reader:
                     rows_seen += 1
                     if rows_seen <= sample_limit:
-                        sampled.append({key: value for key, value in row.items() if key is not None})
+                        sampled.append(
+                            {key: _null_if_empty(value) for key, value in row.items() if key is not None}
+                        )
                     if rows_seen >= self.count_limit:
                         exhausted = next(reader, None) is None
                         break
@@ -41,7 +43,9 @@ class CSVReader:
             SchemaField(
                 name=header,
                 data_type=_infer_column_type([row.get(header) for row in sampled]),
-                nullable=any(_is_null(row.get(header)) for row in sampled),
+                # A bounded sample can infer a useful type, but cannot prove
+                # that the full CSV column contains no nulls.
+                nullable=True,
             )
             for header in headers
         ]
@@ -54,6 +58,7 @@ class CSVReader:
                 "has_header": True,
                 "columns": len(headers),
                 "sampled_rows": len(sampled),
+                "nullability_basis": "sampled_conservative",
                 "count_limit": self.count_limit,
             },
             preview=sampled[:preview_limit],
@@ -69,7 +74,9 @@ class CSVReader:
                 self._validate_headers(reader.fieldnames)
                 rows: list[dict[str, Any]] = []
                 for row in reader:
-                    rows.append({key: value for key, value in row.items() if key is not None})
+                    rows.append(
+                        {key: _null_if_empty(value) for key, value in row.items() if key is not None}
+                    )
                     if len(rows) >= limit:
                         break
                 return rows
@@ -140,4 +147,8 @@ def _value_type(value: str | None) -> str:
 
 
 def _is_null(value: Any) -> bool:
-    return value is None or (isinstance(value, str) and value.strip() == "")
+    return value is None or value == ""
+
+
+def _null_if_empty(value: str | None) -> str | None:
+    return None if _is_null(value) else value

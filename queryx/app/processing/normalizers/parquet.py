@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -15,10 +15,11 @@ from queryx.app.processing.recipe import CanonicalParquetRecipe
 
 
 class NormalizationError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.details = details or {}
 
 
 class CanonicalParquetNormalizer:
@@ -55,10 +56,15 @@ class CanonicalParquetNormalizer:
                 use_dictionary=recipe.use_dictionary,
                 write_statistics=recipe.write_statistics,
             ) as writer:
-                for batch in batches:
+                for batch_number, batch in enumerate(batches, start=1):
                     if checkpoint is not None:
                         checkpoint()
-                    canonical = _cast_batch(batch, target_schema)
+                    canonical = _cast_batch(
+                        batch,
+                        target_schema,
+                        batch_number=batch_number,
+                        row_offset=records,
+                    )
                     writer.write_batch(canonical)
                     records += canonical.num_rows
             canonical_schema = arrow_schema_payload(target_schema)
@@ -85,22 +91,40 @@ class CanonicalParquetNormalizer:
         target_schema: pa.Schema,
         batch_rows: int,
     ) -> Iterable[pa.RecordBatch]:
-        column_types = {field.name: field.type for field in target_schema}
-        reader = arrow_csv.open_csv(
-            source,
-            read_options=arrow_csv.ReadOptions(use_threads=False, encoding="utf8"),
-            parse_options=arrow_csv.ParseOptions(
-                delimiter=str(inspection.metadata.get("delimiter", ",")),
-            ),
-            convert_options=arrow_csv.ConvertOptions(
-                column_types=column_types,
-                strings_can_be_null=True,
-                null_values=[""],
-            ),
-        )
-        for batch in reader:
-            for offset in range(0, batch.num_rows, batch_rows):
-                yield batch.slice(offset, batch_rows)
+        # Read lexical CSV values first, then cast each column with the strict
+        # target type. This keeps conversion errors attributable to a column
+        # without ever including the source value in persisted diagnostics.
+        column_types = {field.name: pa.string() for field in target_schema}
+        try:
+            reader = arrow_csv.open_csv(
+                source,
+                read_options=arrow_csv.ReadOptions(use_threads=False, encoding="utf8"),
+                parse_options=arrow_csv.ParseOptions(
+                    delimiter=str(inspection.metadata.get("delimiter", ",")),
+                ),
+                convert_options=arrow_csv.ConvertOptions(
+                    column_types=column_types,
+                    null_values=[""],
+                    strings_can_be_null=True,
+                    quoted_strings_can_be_null=True,
+                    timestamp_parsers=[arrow_csv.ISO8601, "%Y-%m-%d %H:%M:%S"],
+                ),
+            )
+            for batch in reader:
+                for offset in range(0, batch.num_rows, batch_rows):
+                    yield batch.slice(offset, batch_rows)
+        except NormalizationError:
+            raise
+        except Exception as exc:
+            raise NormalizationError(
+                "strict_conversion_failed",
+                "A CSV row is incompatible with the observed schema",
+                {
+                    "column_name": None,
+                    "expected_type": "CSV row matching header",
+                    "reason": "type_conversion_failed",
+                },
+            ) from exc
 
     @staticmethod
     def _parquet_batches(
@@ -115,22 +139,91 @@ class CanonicalParquetNormalizer:
         yield from parquet_file.iter_batches(batch_size=batch_rows, use_threads=False)
 
 
-def _cast_batch(batch: pa.RecordBatch, schema: pa.Schema) -> pa.RecordBatch:
+def _cast_batch(
+    batch: pa.RecordBatch,
+    schema: pa.Schema,
+    *,
+    batch_number: int | None = None,
+    row_offset: int = 0,
+) -> pa.RecordBatch:
     if batch.schema.names != schema.names:
         raise NormalizationError("schema_mismatch", "Source columns differ from the canonical order")
-    arrays = [
-        pc.cast(batch.column(index), field.type, safe=True)
-        for index, field in enumerate(schema)
-    ]
-    for array, field in zip(arrays, schema, strict=True):
+    arrays: list[pa.Array] = []
+    for index, field in enumerate(schema):
+        source = batch.column(index)
+        try:
+            array = pc.cast(source, field.type, safe=True)
+        except Exception as exc:
+            failed_index = _first_conversion_failure(source, field.type)
+            raise NormalizationError(
+                "strict_conversion_failed",
+                "A source value is incompatible with the observed schema",
+                _conversion_details(
+                    field.name,
+                    field.type,
+                    "type_conversion_failed",
+                    batch_number,
+                    row_offset,
+                    failed_index,
+                ),
+            ) from exc
         if not field.nullable and array.null_count:
-            raise NormalizationError("strict_conversion_failed", f"Non-nullable field '{field.name}' contains null")
+            failed_index = array.is_null().to_pylist().index(True)
+            raise NormalizationError(
+                "strict_conversion_failed",
+                "A null violates the observed schema",
+                _conversion_details(
+                    field.name,
+                    field.type,
+                    "nullability_violation",
+                    batch_number,
+                    row_offset,
+                    failed_index,
+                ),
+            )
+        arrays.append(array)
     return pa.RecordBatch.from_arrays(arrays, schema=schema)
+
+
+def _first_conversion_failure(array: pa.Array, target_type: pa.DataType) -> int | None:
+    for index in range(len(array)):
+        if array[index].is_valid:
+            try:
+                pc.cast(array.slice(index, 1), target_type, safe=True)
+            except Exception:
+                return index
+    return None
+
+
+def _conversion_details(
+    column_name: str,
+    expected_type: pa.DataType,
+    reason: str,
+    batch_number: int | None,
+    row_offset: int,
+    failed_index: int | None,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "column_name": column_name,
+        "expected_type": str(expected_type),
+        "reason": reason,
+    }
+    if batch_number is not None:
+        details["batch_number"] = batch_number
+    if failed_index is not None:
+        details["row_number"] = row_offset + failed_index + 1
+    return details
 
 
 def _target_schema(inspection: InspectionResult) -> pa.Schema:
     fields = [
-        pa.field(field.name, _observed_type(field.data_type), nullable=field.nullable)
+        pa.field(
+            field.name,
+            _observed_type(field.data_type),
+            # CSV nullability is observed from a bounded sample and therefore
+            # cannot be enforced as non-null over the complete file.
+            nullable=True if inspection.format == DataFormat.CSV else field.nullable,
+        )
         for field in inspection.fields
     ]
     return pa.schema(fields, metadata=None)
