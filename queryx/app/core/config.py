@@ -87,7 +87,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OLLAMA_BASE_URL", "OLLAMA_URL"),
     )
     ollama_model: str = "qwen3.5:9b"
-    ollama_timeout_seconds: int = Field(default=120, ge=1)
+    ollama_timeout_seconds: int = Field(default=300, ge=1)
     ollama_num_ctx: int = Field(default=8192, ge=512)
     ollama_temperature: float = Field(default=0, ge=0)
     ollama_think: bool = False

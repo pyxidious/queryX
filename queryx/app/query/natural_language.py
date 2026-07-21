@@ -13,6 +13,7 @@ from queryx.app.llm.ollama_client import (
     OllamaClient,
     OllamaError,
     OllamaInvalidResponseError,
+    OllamaTimeoutError,
 )
 from queryx.app.processing.storage import ProcessingStorage
 from queryx.app.query.models import (
@@ -31,19 +32,33 @@ _QUERY_LANGUAGE = re.compile(
     re.IGNORECASE,
 )
 _SYSTEM_PROMPT = """You translate a user question into the supplied LogicalQueryPlan JSON schema.
-Return one JSON object only, without markdown or commentary.
+Return the LogicalQueryPlan object directly, without wrappers, markdown, commentary or additional top-level keys.
 Use only listed asset_id, asset_version_id, fields, transforms, operators and relationship_id values.
 Never invent assets, fields, functions or relationships.
+Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
+An aggregation is already an output column and must not be duplicated in projections.
+Aggregation aliases may be referenced by order_by, but must never be used as source_alias in projections.
+Every order_by field must exactly match an existing projection output name or aggregation alias.
+When aggregations are present, every non-aggregated projection must appear identically in group_by, with the same source_alias, field and transform.
+For product categories ranked by revenue, use only products and order_items, join them through their active catalog relationship, project product_category_name, sum order_items.price as revenue, group by product_category_name, and order by revenue descending. Do not include orders.
 If the question cannot be resolved unambiguously from the catalog, return {"error":"ambiguous_question"}.
 """
 
 
 class NaturalLanguageQueryError(RuntimeError):
-    def __init__(self, code: str, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status_code: int,
+        *,
+        candidate_plan: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.candidate_plan = candidate_plan
 
     def payload(self) -> dict[str, str]:
         return {"code": self.code, "message": self.message}
@@ -97,29 +112,97 @@ class NaturalLanguageQueryService:
                         "question": question,
                         "catalog": context,
                         "logical_query_plan_schema": LogicalQueryPlan.model_json_schema(),
+                        "correct_grouped_count_example": {
+                            "projections": [
+                                {
+                                    "source_alias": "o",
+                                    "field": "order_status",
+                                    "alias": "status",
+                                }
+                            ],
+                            "aggregations": [
+                                {
+                                    "function": "count",
+                                    "source_alias": "o",
+                                    "field": "order_id",
+                                    "alias": "orders",
+                                }
+                            ],
+                            "group_by": [
+                                {"source_alias": "o", "field": "order_status"}
+                            ],
+                        },
+                        "correct_multi_asset_revenue_example": {
+                            "sources": [
+                                {
+                                    "alias": "p",
+                                    "asset_id": "<products asset_id from catalog>",
+                                },
+                                {
+                                    "alias": "oi",
+                                    "asset_id": "<order_items asset_id from catalog>",
+                                },
+                            ],
+                            "joins": [
+                                {
+                                    "relationship_id": "<active products-order_items relationship_id from catalog>",
+                                    "left_alias": "p",
+                                    "right_alias": "oi",
+                                }
+                            ],
+                            "projections": [
+                                {
+                                    "source_alias": "p",
+                                    "field": "product_category_name",
+                                    "alias": "category",
+                                }
+                            ],
+                            "aggregations": [
+                                {
+                                    "function": "sum",
+                                    "source_alias": "oi",
+                                    "field": "price",
+                                    "alias": "revenue",
+                                }
+                            ],
+                            "group_by": [
+                                {
+                                    "source_alias": "p",
+                                    "field": "product_category_name",
+                                }
+                            ],
+                            "order_by": [
+                                {"field": "revenue", "direction": "desc"}
+                            ],
+                        },
                     },
                     sort_keys=True,
                     separators=(",", ":"),
                 ),
             },
         ]
-        candidate = self._generate(messages)
+        candidate, retry_used = self._generate(messages)
+        candidate = self._unwrap_logical_query_plan(candidate)
         if candidate.get("error") == "ambiguous_question":
             raise NaturalLanguageQueryError(
                 "ambiguous_question", "The question requires clarification", 422
             )
         try:
-            plan = LogicalQueryPlan.model_validate(candidate)
-        except ValidationError as exc:
-            raise NaturalLanguageQueryError(
-                "invalid_logical_plan", "Ollama returned an invalid LogicalQueryPlan", 422
-            ) from exc
-        try:
-            validation = self.query_service.validate(plan)
+            validation = self._validate_candidate(candidate)
         except QueryValidationError as exc:
-            raise NaturalLanguageQueryError(
-                "invalid_logical_plan", f"LogicalQueryPlan validation failed: {exc.code}", 422
-            ) from exc
+            if retry_used:
+                raise self._invalid_plan_error(exc, candidate) from exc
+            candidate = self._unwrap_logical_query_plan(
+                self._retry_invalid_plan(messages, candidate, exc.code)
+            )
+            if candidate.get("error") == "ambiguous_question":
+                raise NaturalLanguageQueryError(
+                    "ambiguous_question", "The question requires clarification", 422
+                )
+            try:
+                validation = self._validate_candidate(candidate)
+            except QueryValidationError as retry_exc:
+                raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
         return NaturalLanguageQueryResponse(
             normalized_plan=validation.normalized_plan,
@@ -128,7 +211,89 @@ class NaturalLanguageQueryService:
             result=result,
         )
 
-    def _generate(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    def _validate_candidate(self, candidate: dict[str, Any]) -> Any:
+        try:
+            plan = LogicalQueryPlan.model_validate(candidate)
+        except ValidationError as exc:
+            raise NaturalLanguageQueryError(
+                "invalid_logical_plan",
+                "Ollama returned an invalid LogicalQueryPlan",
+                422,
+                candidate_plan=self._safe_debug_candidate(candidate),
+            ) from exc
+        return self.query_service.validate(plan)
+
+    @staticmethod
+    def _unwrap_logical_query_plan(candidate: dict[str, Any]) -> dict[str, Any]:
+        if set(candidate) == {"logical_query_plan"}:
+            wrapped = candidate["logical_query_plan"]
+            if isinstance(wrapped, dict):
+                return wrapped
+        return candidate
+
+    def _invalid_plan_error(
+        self, error: QueryValidationError, candidate: dict[str, Any]
+    ) -> NaturalLanguageQueryError:
+        return NaturalLanguageQueryError(
+            "invalid_logical_plan",
+            f"LogicalQueryPlan validation failed: {error.code}",
+            422,
+            candidate_plan=self._safe_debug_candidate(candidate),
+        )
+
+    def _retry_invalid_plan(
+        self,
+        messages: list[dict[str, str]],
+        candidate: dict[str, Any],
+        validation_code: str,
+    ) -> dict[str, Any]:
+        retry_messages = [
+            *messages,
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "instruction": (
+                            "Correct only the LogicalQueryPlan: remove unnecessary assets, joins, "
+                            "and metrics; correct output aliases and join order; then return only "
+                            "the corrected plan object."
+                        ),
+                        "previous_plan": candidate,
+                        "validation_code": validation_code,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        try:
+            return self._request(retry_messages)
+        except OllamaInvalidResponseError as exc:
+            raise NaturalLanguageQueryError(
+                "invalid_llm_json", "Ollama returned invalid JSON after one retry", 502
+            ) from exc
+
+    def _generate(
+        self, messages: list[dict[str, str]]
+    ) -> tuple[dict[str, Any], bool]:
+        try:
+            return self._request(messages), False
+        except OllamaInvalidResponseError:
+            retry_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": "The previous response was not valid JSON. Return exactly one valid JSON object.",
+                },
+            ]
+            try:
+                return self._request(retry_messages), True
+            except OllamaInvalidResponseError as exc:
+                raise NaturalLanguageQueryError(
+                    "invalid_llm_json", "Ollama returned invalid JSON after one retry", 502
+                ) from exc
+
+    def _request(self, messages: list[dict[str, str]]) -> dict[str, Any]:
         schema = {
             "oneOf": [
                 LogicalQueryPlan.model_json_schema(),
@@ -143,27 +308,31 @@ class NaturalLanguageQueryService:
         try:
             return self.client.chat_json(messages, schema).content
         except OllamaInvalidResponseError:
-            retry_messages = [
-                *messages,
-                {
-                    "role": "user",
-                    "content": "The previous response was not valid JSON. Return exactly one valid JSON object.",
-                },
-            ]
-            try:
-                return self.client.chat_json(retry_messages, schema).content
-            except OllamaInvalidResponseError as exc:
-                raise NaturalLanguageQueryError(
-                    "invalid_llm_json", "Ollama returned invalid JSON after one retry", 502
-                ) from exc
-            except OllamaError as exc:
-                raise NaturalLanguageQueryError(
-                    "llm_unavailable", "Ollama is unavailable", 503
-                ) from exc
+            raise
+        except OllamaTimeoutError as exc:
+            raise NaturalLanguageQueryError(
+                "llm_timeout", "Ollama request timed out", 504
+            ) from exc
         except OllamaError as exc:
             raise NaturalLanguageQueryError(
                 "llm_unavailable", "Ollama is unavailable", 503
             ) from exc
+
+    @staticmethod
+    def _safe_debug_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+        forbidden = {"sql", "thinking", "physical_location", "relation_name", "path"}
+
+        def contains_forbidden(value: Any) -> bool:
+            if isinstance(value, dict):
+                return any(
+                    str(key).casefold() in forbidden or contains_forbidden(item)
+                    for key, item in value.items()
+                )
+            if isinstance(value, list):
+                return any(contains_forbidden(item) for item in value)
+            return False
+
+        return None if contains_forbidden(candidate) else candidate
 
     def _catalog_context(self, question: str) -> dict[str, Any]:
         candidates: list[dict[str, Any]] = []

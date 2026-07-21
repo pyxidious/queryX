@@ -213,9 +213,9 @@ curl -X POST http://localhost:8000/query/natural-language \
   -d '{"question":"Quanti ordini ci sono per stato?","execute":false}'
 ```
 
-La risposta contiene `normalized_plan`, `output_schema` e `warnings`; con `execute=true` contiene anche il risultato bounded. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. È ammesso un solo retry, esclusivamente quando la risposta non è JSON valido.
+La risposta contiene `normalized_plan`, `output_schema` e `warnings`; con `execute=true` contiene anche il risultato bounded. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. È ammesso un solo retry complessivo: per correggere JSON non valido oppure un piano semanticamente rifiutato. Nel secondo caso il modello riceve il piano precedente e il solo codice di validazione; il piano corretto passa nuovamente dal validatore deterministico prima di qualsiasi esecuzione.
 
-Il modello non è un'autorità: il JSON viene parsato con modelli strict e passa sempre dal validatore deterministico esistente. Solo un piano valido può raggiungere il normale `QueryService`; compiler ed executor non ricevono testo libero. Input che tenta di fornire query fisiche viene rifiutato. Gli errori applicativi sono `llm_unavailable`, `invalid_llm_json`, `invalid_logical_plan` e `ambiguous_question`.
+Il modello non è un'autorità: il JSON viene parsato con modelli strict e passa sempre dal validatore deterministico esistente. Solo un piano valido può raggiungere il normale `QueryService`; compiler ed executor non ricevono testo libero. Input che tenta di fornire query fisiche viene rifiutato. Gli errori applicativi sono `llm_unavailable`, `llm_timeout`, `invalid_llm_json`, `invalid_logical_plan` e `ambiguous_question`.
 
 Nella pagina `/ui/query` sono disponibili “Genera piano” e “Genera ed esegui”. Il piano prodotto resta visibile nell'editor JSON e il risultato riusa la stessa tabella bounded dell'esecuzione manuale.
 

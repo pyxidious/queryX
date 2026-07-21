@@ -578,6 +578,7 @@ async def natural_language_query_ui(
     invalid = _require_csrf(request, csrf_token)
     if invalid:
         return invalid
+    plan_json = ""
     try:
         response = NaturalLanguageQueryService(_settings(request)).translate(
             NaturalLanguageQueryRequest(question=question, execute=execute)
@@ -601,12 +602,16 @@ async def natural_language_query_ui(
         error = {"code": "ambiguous_question", "message": "Inserisci una domanda valida."}
     except NaturalLanguageQueryError as exc:
         error = exc.payload()
+        if exc.candidate_plan is not None:
+            plan_json = json.dumps(
+                exc.candidate_plan, indent=2, ensure_ascii=False
+            )
     except QueryExecutionError as exc:
         error = {"code": exc.code, "message": exc.message}
     return _render(
         request,
         "query/index.html",
-        _query_context(question=question, error=error),
+        _query_context(plan_json, question=question, error=error),
         422,
     )
 

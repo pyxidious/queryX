@@ -17,6 +17,7 @@ from queryx.app.ingestion.service import IngestionService
 from queryx.app.llm.ollama_client import (
     OllamaInvalidResponseError,
     OllamaResponse,
+    OllamaTimeoutError,
     OllamaUnavailableError,
 )
 from queryx.app.main import create_app
@@ -128,6 +129,12 @@ def _join_plan(assets: dict[str, Any], relationship_id: str) -> dict[str, Any]:
     }
 
 
+def _invalid_group_plan(assets: dict[str, Any]) -> dict[str, Any]:
+    plan = _single_plan(assets)
+    plan["group_by"] = []
+    return plan
+
+
 def test_valid_single_source_plan_and_safe_relevant_prompt(
     nl_env: tuple[Settings, dict[str, Any], str],
 ) -> None:
@@ -146,8 +153,65 @@ def test_valid_single_source_plan_and_safe_relevant_prompt(
     assert "queryx_managed" not in prompt and "/data/" not in prompt
     assert "sample" not in prompt.casefold() and '"rows"' not in prompt
     assert "sql" not in prompt.casefold()
+    assert "every non-aggregated projection must appear identically in group_by" in prompt
+    assert "without wrappers" in prompt
+    assert '"field":"order_status"' in prompt
+    assert '"function":"count"' in prompt
     assert service.client is client
     assert NaturalLanguageQueryService(settings).client.temperature == 0
+
+
+def test_exact_logical_query_plan_wrapper_is_unwrapped(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    plan = _single_plan(assets)
+    response = NaturalLanguageQueryService(
+        settings,
+        client=StubOllamaClient({"logical_query_plan": plan}),  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    assert response.normalized_plan.sources[0].asset_id == assets["orders"].asset_id
+    assert response.normalized_plan.group_by[0].field == "order_status"
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        {"logical_query_plan": {}, "comment": "extra"},
+        {"plan": {}},
+    ],
+)
+def test_non_exact_or_arbitrary_wrappers_are_rejected(
+    nl_env: tuple[Settings, dict[str, Any], str], candidate: dict[str, Any],
+) -> None:
+    settings, _, _ = nl_env
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(
+            settings, client=StubOllamaClient(candidate)  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    assert captured.value.code == "invalid_logical_plan"
+
+
+def test_unwrapped_plan_still_passes_semantic_validation(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    invalid = _invalid_group_plan(assets)
+    client = StubOllamaClient(
+        {"logical_query_plan": invalid},
+        {"logical_query_plan": invalid},
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+            NaturalLanguageQueryRequest(question="orders by status")
+        )
+
+    assert captured.value.code == "invalid_logical_plan"
+    assert captured.value.candidate_plan == invalid
+    assert "logical_query_plan" not in captured.value.candidate_plan
 
 
 def test_valid_join_plan_contains_only_active_declared_relationship(
@@ -162,6 +226,49 @@ def test_valid_join_plan_contains_only_active_declared_relationship(
     assert response.normalized_plan.joins[0].relationship_id == relationship_id
     assert relationship_id in prompt
     assert "product_category_name" in prompt
+
+    full_prompt = "\n".join(message["content"] for message in client.calls[0][0])
+    assert "minimum number of assets and joins" in full_prompt
+    assert "do not add unrequested metrics" in full_prompt
+    assert "must not be duplicated in projections" in full_prompt
+    assert "must never be used as source_alias" in full_prompt
+    assert "must exactly match an existing projection output name or aggregation alias" in full_prompt
+    prompt_payload = json.loads(client.calls[0][0][1]["content"])
+    example = prompt_payload["correct_multi_asset_revenue_example"]
+    assert [source["alias"] for source in example["sources"]] == ["p", "oi"]
+    assert example["aggregations"] == [{
+        "function": "sum", "source_alias": "oi", "field": "price", "alias": "revenue"
+    }]
+    assert example["order_by"] == [{"field": "revenue", "direction": "desc"}]
+    assert all("orders" not in source["asset_id"] for source in example["sources"])
+
+
+def test_invalid_join_order_retry_requests_a_minimal_correct_plan(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, relationship_id = nl_env
+    invalid = _join_plan(assets, relationship_id)
+    invalid["joins"][0]["left_alias"] = "p"
+    invalid["joins"][0]["right_alias"] = "oi"
+    corrected = _join_plan(assets, relationship_id)
+    client = StubOllamaClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quali categorie di prodotto hanno generato più ricavi?"
+        )
+    )
+
+    assert len(response.normalized_plan.sources) == 2
+    assert len(response.normalized_plan.joins) == 1
+    assert [item.alias for item in response.normalized_plan.aggregations] == ["revenue"]
+    assert response.normalized_plan.order_by[0].field == "revenue"
+    feedback = json.loads(client.calls[1][0][-1]["content"])
+    assert feedback["validation_code"] == "invalid_join_order"
+    instruction = feedback["instruction"]
+    assert "remove unnecessary assets, joins, and metrics" in instruction
+    assert "correct output aliases and join order" in instruction
+    assert "return only the corrected plan object" in instruction
 
 
 def test_invalid_json_gets_exactly_one_retry(
@@ -202,7 +309,9 @@ def test_invalid_plan_and_ambiguous_question_are_rejected(
     invalid = _single_plan(assets)
     invalid["projections"][0]["field"] = "invented_field"
     with pytest.raises(NaturalLanguageQueryError) as plan_error:
-        NaturalLanguageQueryService(settings, client=StubOllamaClient(invalid)).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryService(
+            settings, client=StubOllamaClient(invalid, invalid)  # type: ignore[arg-type]
+        ).translate(
             NaturalLanguageQueryRequest(question="orders by status")
         )
     assert plan_error.value.code == "invalid_logical_plan"
@@ -211,6 +320,52 @@ def test_invalid_plan_and_ambiguous_question_are_rejected(
             settings, client=StubOllamaClient({"error": "ambiguous_question"})  # type: ignore[arg-type]
         ).translate(NaturalLanguageQueryRequest(question="show me the data"))
     assert ambiguous.value.code == "ambiguous_question"
+
+
+def test_invalid_group_by_is_corrected_with_the_single_retry(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    invalid = _invalid_group_plan(assets)
+    corrected = _single_plan(assets)
+    client = StubOllamaClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Quanti ordini ci sono per stato?")
+    )
+
+    assert response.normalized_plan.group_by[0].field == "order_status"
+    assert len(client.calls) == 2
+    feedback = json.loads(client.calls[1][0][-1]["content"])
+    assert feedback["previous_plan"] == invalid
+    assert feedback["validation_code"] == "invalid_group_by"
+    assert "only the LogicalQueryPlan" in feedback["instruction"]
+
+
+def test_second_invalid_plan_is_rejected_before_execution(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, assets, _ = nl_env
+    first = _invalid_group_plan(assets)
+    second = _invalid_group_plan(assets)
+    client = StubOllamaClient(first, second)
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        service.query_service,
+        "execute",
+        lambda plan: (_ for _ in ()).throw(AssertionError("invalid plan was executed")),
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        service.translate(
+            NaturalLanguageQueryRequest(
+                question="Quanti ordini ci sono per stato?", execute=True
+            )
+        )
+
+    assert captured.value.code == "invalid_logical_plan"
+    assert captured.value.candidate_plan == second
+    assert len(client.calls) == 2
 
 
 def test_ollama_unavailable_is_structured(
@@ -222,6 +377,18 @@ def test_ollama_unavailable_is_structured(
             settings, client=StubOllamaClient(OllamaUnavailableError("offline"))  # type: ignore[arg-type]
         ).translate(NaturalLanguageQueryRequest(question="orders by status"))
     assert captured.value.code == "llm_unavailable"
+
+
+def test_ollama_timeout_is_distinct_from_unavailability(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, _, _ = nl_env
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(
+            settings, client=StubOllamaClient(OllamaTimeoutError("slow"))  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+    assert captured.value.code == "llm_timeout"
+    assert captured.value.status_code == 504
 
 
 def test_execute_false_does_not_execute_and_true_uses_existing_service(
@@ -322,3 +489,43 @@ def test_api_and_ui_natural_language_flow(
     assert "Genera piano" in page.text and "Genera ed esegui" in page.text
     assert "Piano generato e validato" in generated.text
     assert "order_status" in generated.text and "Risultato" in generated.text
+
+
+def test_invalid_generated_plan_remains_visible_in_ui(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, assets, _ = nl_env
+    invalid = _invalid_group_plan(assets)
+    service = NaturalLanguageQueryService(
+        settings,
+        client=StubOllamaClient(  # type: ignore[arg-type]
+            {"logical_query_plan": invalid},
+            {"logical_query_plan": invalid},
+        ),
+    )
+    monkeypatch.setattr(ui_routes, "NaturalLanguageQueryService", lambda settings: service)
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise_ui() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            page = await client.get("/ui/query")
+            token = re.search(
+                r'name="csrf_token" value="([^"]+)"', page.text
+            ).group(1)  # type: ignore[union-attr]
+            return await client.post(
+                "/ui/query/natural-language",
+                data={
+                    "csrf_token": token,
+                    "question": "Quanti ordini ci sono per stato?",
+                    "execute": "true",
+                },
+            )
+
+    response = asyncio.run(exercise_ui())
+    assert response.status_code == 422
+    assert "invalid_logical_plan" in response.text
+    assert "order_status" in response.text and "group_by" in response.text
+    assert "logical_query_plan" not in response.text

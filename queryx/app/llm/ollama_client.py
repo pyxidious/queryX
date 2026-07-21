@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -43,7 +44,7 @@ class OllamaResponse:
 class OllamaClient:
     base_url: str
     model: str
-    timeout_seconds: int = 120
+    timeout_seconds: int = 300
     num_ctx: int = 8192
     temperature: float = 0
     think: bool = False
@@ -98,10 +99,10 @@ class OllamaClient:
             "stream": False,
             "format": json_schema,
             "keep_alive": self.keep_alive,
+            "think": self.think,
             "options": {
                 "temperature": self.temperature,
                 "num_ctx": self.num_ctx,
-                "think": self.think,
             },
         }
         started = monotonic()
@@ -141,11 +142,17 @@ class OllamaClient:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
-        except TimeoutError as exc:
-            raise OllamaTimeoutError("Ollama request timed out") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise OllamaTimeoutError(
+                f"Ollama request timed out after {self.timeout_seconds} seconds"
+            ) from exc
         except HTTPError as exc:
             raise OllamaUnavailableError(f"Ollama HTTP error {exc.code}") from exc
         except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise OllamaTimeoutError(
+                    f"Ollama request timed out after {self.timeout_seconds} seconds"
+                ) from exc
             raise OllamaUnavailableError("Ollama is not reachable") from exc
         try:
             parsed = json.loads(body)
