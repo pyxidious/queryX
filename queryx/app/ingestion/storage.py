@@ -14,6 +14,7 @@ from queryx.app.ingestion.models import (
     AssetVersion,
     DataAsset,
     DataFormat,
+    DatasetProvenance,
     IngestionJob,
     IngestionStatus,
     InspectionResult,
@@ -107,12 +108,14 @@ class IngestionStorage:
                     error_json TEXT, source_fingerprint TEXT, asset_id TEXT, asset_version_id TEXT,
                     requested_asset_id TEXT, inspection_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     heartbeat_at TEXT, started_at TEXT, finished_at TEXT,
+                    provenance_json TEXT NOT NULL DEFAULT '{"source_provider":"manual"}',
                     FOREIGN KEY(asset_id) REFERENCES data_assets(id),
                     FOREIGN KEY(asset_version_id) REFERENCES asset_versions(id)
                 );
                 CREATE TABLE IF NOT EXISTS lineage_edges (
                     id TEXT PRIMARY KEY, source_reference TEXT NOT NULL,
                     target_asset_version_id TEXT NOT NULL, operation TEXT NOT NULL, created_at TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
                     FOREIGN KEY(target_asset_version_id) REFERENCES asset_versions(id)
                 );
                 CREATE TABLE IF NOT EXISTS schema_version (
@@ -132,6 +135,13 @@ class IngestionStorage:
             self._ensure_column(connection, "ingestion_jobs", "heartbeat_at", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "requested_asset_id", "TEXT")
             self._ensure_column(connection, "ingestion_jobs", "logical_name", "TEXT")
+            self._ensure_column(
+                connection,
+                "ingestion_jobs",
+                "provenance_json",
+                "TEXT NOT NULL DEFAULT '{\"source_provider\":\"manual\"}'",
+            )
+            self._ensure_column(connection, "lineage_edges", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
             for column, definition in (
                 ("binding_role", "TEXT NOT NULL DEFAULT 'raw'"),
                 ("status", "TEXT NOT NULL DEFAULT 'ready'"),
@@ -143,6 +153,10 @@ class IngestionStorage:
             ):
                 self._ensure_column(connection, "storage_bindings", column, definition)
             connection.execute("UPDATE ingestion_jobs SET updated_at = COALESCE(updated_at, created_at)")
+            connection.execute(
+                """UPDATE ingestion_jobs
+                   SET provenance_json = COALESCE(provenance_json, '{"source_provider":"manual"}')"""
+            )
             connection.execute(
                 """UPDATE storage_bindings SET binding_role = COALESCE(binding_role, 'raw'),
                    status = COALESCE(status, 'ready'), updated_at = COALESCE(updated_at, created_at),
@@ -165,6 +179,8 @@ class IngestionStorage:
                     ON storage_bindings(
                         asset_version_id, binding_role, backend_type, COALESCE(recipe_fingerprint, '')
                     ) WHERE status IN ('preparing', 'ready');
+                CREATE INDEX IF NOT EXISTS idx_lineage_edges_target
+                    ON lineage_edges(target_asset_version_id, operation);
                 """
             )
             applied_at = _now().isoformat()
@@ -184,6 +200,10 @@ class IngestionStorage:
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (10, applied_at),
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (11, applied_at),
+            )
 
     @staticmethod
     def _ensure_column(
@@ -202,8 +222,10 @@ class IngestionStorage:
         source_type: str = "upload",
         asset_id: str | None = None,
         logical_name: str | None = None,
+        provenance: DatasetProvenance | None = None,
     ) -> IngestionJob:
         now = _now()
+        resolved_provenance = provenance or DatasetProvenance()
         job = IngestionJob(
             id=str(uuid4()),
             status=IngestionStatus.CREATED,
@@ -215,13 +237,14 @@ class IngestionStorage:
             requested_asset_id=asset_id,
             created_at=now,
             updated_at=now,
+            provenance=resolved_provenance,
         )
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO ingestion_jobs (
                     id, status, source_type, original_filename, logical_name, target_backend, bytes_received,
-                    warnings_json, requested_asset_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    warnings_json, requested_asset_id, created_at, updated_at, provenance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     job.id,
                     job.status,
@@ -234,6 +257,7 @@ class IngestionStorage:
                     asset_id,
                     now.isoformat(),
                     now.isoformat(),
+                    _dumps(resolved_provenance.model_dump(mode="json", exclude_none=True)),
                 ),
             )
         return job
@@ -485,6 +509,18 @@ class IngestionStorage:
     def finalize_reused_job(self, job_id: str, version_id: str, raw_reference: str) -> None:
         now = _now().isoformat()
         with self._connect() as connection:
+            job = connection.execute(
+                "SELECT provenance_json FROM ingestion_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise KeyError(job_id)
+            self._insert_provenance_lineage(
+                connection,
+                raw_reference,
+                version_id,
+                DatasetProvenance.model_validate(_loads(job["provenance_json"], {})),
+                now,
+            )
             cursor = connection.execute(
                 """UPDATE ingestion_jobs SET status = 'ready', source_reference = ?, updated_at = ?, finished_at = ?
                    WHERE id = ? AND status = 'inspecting' AND asset_version_id = ?""",
@@ -503,7 +539,9 @@ class IngestionStorage:
                    FROM asset_versions WHERE id = ?""",
                 (version_id,),
             ).fetchone()
-            job = connection.execute("SELECT status FROM ingestion_jobs WHERE id = ?", (job_id,)).fetchone()
+            job = connection.execute(
+                "SELECT status, provenance_json FROM ingestion_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
             if version is None or version["status"] != "preparing":
                 raise InvalidJobTransition("Version is not preparing")
             if job is None or job["status"] != "inspecting":
@@ -524,9 +562,12 @@ class IngestionStorage:
                     now,
                 ),
             )
-            connection.execute(
-                "INSERT INTO lineage_edges VALUES (?, ?, ?, 'upload', ?)",
-                (str(uuid4()), raw_reference, version_id, now),
+            self._insert_provenance_lineage(
+                connection,
+                raw_reference,
+                version_id,
+                DatasetProvenance.model_validate(_loads(job["provenance_json"], {})),
+                now,
             )
             connection.execute("UPDATE asset_versions SET status = 'ready' WHERE id = ?", (version_id,))
             connection.execute(
@@ -709,21 +750,31 @@ class IngestionStorage:
                 "SELECT * FROM lineage_edges WHERE target_asset_version_id = ? ORDER BY created_at",
                 (asset_version_id,),
             ).fetchall()
-        return [LineageEdge(**dict(row)) for row in rows]
+        return [self._row_to_lineage(row) for row in rows]
 
-    def add_lineage(self, source_reference: str, asset_version_id: str, operation: str) -> None:
-        """Add provider provenance without changing the immutable asset version."""
-        with self._connect() as connection:
-            existing = connection.execute(
-                """SELECT id FROM lineage_edges WHERE source_reference = ?
-                   AND target_asset_version_id = ? AND operation = ? LIMIT 1""",
-                (source_reference, asset_version_id, operation),
-            ).fetchone()
-            if existing is None:
-                connection.execute(
-                    "INSERT INTO lineage_edges VALUES (?, ?, ?, ?, ?)",
-                    (str(uuid4()), source_reference, asset_version_id, operation, _now().isoformat()),
-                )
+    @staticmethod
+    def _insert_provenance_lineage(
+        connection: sqlite3.Connection,
+        source_reference: str,
+        asset_version_id: str,
+        provenance: DatasetProvenance,
+        created_at: str,
+        operation: str = "upload",
+    ) -> None:
+        metadata = {"provenance": provenance.model_dump(mode="json", exclude_none=True)}
+        metadata_json = _dumps(metadata)
+        existing = connection.execute(
+            """SELECT id FROM lineage_edges WHERE target_asset_version_id = ?
+               AND operation = ? AND metadata_json = ? LIMIT 1""",
+            (asset_version_id, operation, metadata_json),
+        ).fetchone()
+        if existing is None:
+            connection.execute(
+                """INSERT INTO lineage_edges (
+                    id, source_reference, target_asset_version_id, operation, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (str(uuid4()), source_reference, asset_version_id, operation, created_at, metadata_json),
+            )
 
     def fail_jobs_for_version(self, version_id: str, error: dict[str, Any]) -> list[str]:
         now = _now().isoformat()
@@ -770,11 +821,21 @@ class IngestionStorage:
         values.pop("inspection_json", None)
         values.pop("planned_location", None)
         values.pop("format", None)
+        lineage_rows = connection.execute(
+            "SELECT * FROM lineage_edges WHERE target_asset_version_id = ? ORDER BY created_at",
+            (row["id"],),
+        ).fetchall()
+        provenance: list[DatasetProvenance] = []
+        for lineage_row in lineage_rows:
+            edge = IngestionStorage._row_to_lineage(lineage_row)
+            if edge.provenance is not None and edge.provenance not in provenance:
+                provenance.append(edge.provenance)
         return AssetVersion(
             **values,
             technical_metadata=technical_metadata,
             schema_diff=AssetSchemaDiff.model_validate(diff_payload) if diff_payload else None,
             storage_bindings=[IngestionStorage._row_to_binding(item) for item in binding_rows],
+            provenance=provenance,
         )
 
     @staticmethod
@@ -784,12 +845,25 @@ class IngestionStorage:
         return StorageBinding.model_validate(values)
 
     @staticmethod
+    def _row_to_lineage(row: sqlite3.Row) -> LineageEdge:
+        values = dict(row)
+        metadata = _loads(values.pop("metadata_json", None), {})
+        payload = metadata.get("provenance") if isinstance(metadata, dict) else None
+        provenance = DatasetProvenance.model_validate(payload) if payload else (
+            DatasetProvenance() if values.get("operation") == "upload" else None
+        )
+        return LineageEdge(**values, metadata=metadata, provenance=provenance)
+
+    @staticmethod
     def _row_to_job(row: sqlite3.Row) -> IngestionJob:
         values = dict(row)
         values["warnings"] = _loads(values.pop("warnings_json"), [])
         values["error"] = _loads(values.pop("error_json"), None)
         inspection = _loads(values.pop("inspection_json"), None)
         values["inspection"] = InspectionResult.model_validate(inspection) if inspection else None
+        values["provenance"] = DatasetProvenance.model_validate(
+            _loads(values.pop("provenance_json", None), {})
+        )
         return IngestionJob.model_validate(values)
 
 

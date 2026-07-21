@@ -4,12 +4,6 @@ import logging
 import sqlite3
 from typing import Callable, TypeAlias
 
-from queryx.app.acquisition.service import (
-    AcquisitionCancelledError,
-    AcquisitionService,
-    AcquisitionServiceError,
-)
-from queryx.app.acquisition.models import AcquisitionStatus
 from queryx.app.core.config import Settings
 from queryx.app.ingestion.models import IngestionStatus
 from queryx.app.ingestion.service import (
@@ -30,9 +24,7 @@ from queryx.app.worker.storage import LeaseLostError, WorkerStorage
 
 
 logger = logging.getLogger(__name__)
-CancellationError: TypeAlias = (
-    type[IngestionCancelledError] | type[ProcessingCancelledError] | type[AcquisitionCancelledError]
-)
+CancellationError: TypeAlias = type[IngestionCancelledError] | type[ProcessingCancelledError]
 
 
 _PERMANENT_CODES = {
@@ -63,7 +55,6 @@ class WorkItemHandler:
         worker_id: str,
         ingestion: IngestionService | None = None,
         processing: ProcessingService | None = None,
-        acquisition: AcquisitionService | None = None,
         shutdown_expired: Callable[[], bool] | None = None,
     ) -> None:
         self.settings = settings
@@ -71,9 +62,6 @@ class WorkItemHandler:
         self.worker_id = worker_id
         self.ingestion = ingestion or IngestionService(settings)
         self.processing = processing or ProcessingService(settings)
-        self.acquisition = acquisition or AcquisitionService(
-            settings, ingestion=self.ingestion, work_storage=storage
-        )
         self.shutdown_expired = shutdown_expired or (lambda: False)
 
     def handle(self, item: WorkItem) -> WorkItem:
@@ -82,17 +70,15 @@ class WorkItemHandler:
                 return self._ingestion(item)
             if item.task_type == TaskType.PROCESSING:
                 return self._processing(item)
-            return self._acquisition(item)
+            return self._fail(item, "unsupported_task_type", "Work item task type is unsupported")
         except (LeaseLostError, ExecutionInterruptedError):
             logger.warning("work_item_lease_lost item_id=%s task_type=%s", item.id, item.task_type)
             current = self.storage.get(item.id)
             return current or item
         except (sqlite3.OperationalError, OSError, DuckDBLockTimeout) as exc:
             return self._retry(item, "transient_storage_error", _safe_message(exc))
-        except (IngestionServiceError, ProcessingServiceError, AcquisitionServiceError) as exc:
+        except (IngestionServiceError, ProcessingServiceError) as exc:
             code = exc.code
-            if isinstance(exc, AcquisitionServiceError) and exc.transient:
-                return self._retry(item, code, exc.message)
             if code in _PERMANENT_CODES or exc.status_code < 500:
                 return self._fail(item, code, exc.message)
             return self._retry(item, code, exc.message)
@@ -135,30 +121,6 @@ class WorkItemHandler:
             return self.storage.cancel_owned(item.id, self.worker_id)
         return self._fail(item, "processing_failed", "Processing did not produce usable outputs")
 
-    def _acquisition(self, item: WorkItem) -> WorkItem:
-        try:
-            if item.task_type == TaskType.KAGGLE_INSPECT:
-                self.acquisition.execute_inspection(
-                    item.aggregate_id,
-                    checkpoint=lambda: self._checkpoint(item, AcquisitionCancelledError),
-                )
-            else:
-                self.acquisition.execute_download(
-                    item.aggregate_id,
-                    checkpoint=lambda: self._checkpoint(item, AcquisitionCancelledError),
-                )
-        except AcquisitionCancelledError:
-            current = self.acquisition.storage.get_run(item.aggregate_id)
-            if current and current.status not in {
-                AcquisitionStatus.COMPLETED,
-                AcquisitionStatus.PARTIAL,
-                AcquisitionStatus.FAILED,
-                AcquisitionStatus.CANCELLED,
-            }:
-                self.acquisition.cancel(item.aggregate_id)
-            return self.storage.cancel_owned(item.id, self.worker_id)
-        return self.storage.complete(item.id, self.worker_id)
-
     def _checkpoint(self, item: WorkItem, cancellation_error: CancellationError) -> None:
         if self.shutdown_expired():
             raise ExecutionInterruptedError("Worker shutdown deadline reached")
@@ -197,8 +159,6 @@ class WorkItemHandler:
                 fail(item.aggregate_id, code, message)
         elif item.task_type == TaskType.PROCESSING:
             self.processing.fail_execution(item.aggregate_id, code, message)
-        else:
-            self.acquisition.fail_execution(item.aggregate_id, code, message)
 
 
 def _safe_message(exc: Exception) -> str:

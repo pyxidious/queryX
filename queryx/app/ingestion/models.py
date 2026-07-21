@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class IngestionStatus(StrEnum):
@@ -58,6 +58,39 @@ class DataFormat(StrEnum):
     PARQUET = "parquet"
 
 
+class SourceProvider(StrEnum):
+    MANUAL = "manual"
+    KAGGLE = "kaggle"
+    OTHER = "other"
+
+
+class DatasetProvenance(BaseModel):
+    """User-declared descriptive origin; it never triggers external access."""
+
+    source_provider: SourceProvider = SourceProvider.MANUAL
+    source_reference: str | None = Field(default=None, max_length=512)
+    source_version: str | None = Field(default=None, max_length=128)
+    dataset_title: str | None = Field(default=None, max_length=256)
+    license_name: str | None = Field(default=None, max_length=128)
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator(
+        "source_reference", "source_version", "dataset_title", "license_name", "notes", mode="before"
+    )
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        normalized = " ".join(value.split())
+        if not normalized:
+            return None
+        if "<" in normalized or ">" in normalized:
+            raise ValueError("HTML is not allowed in provenance fields")
+        return normalized
+
+
 class DataAsset(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -86,6 +119,7 @@ class AssetVersion(BaseModel):
     technical_metadata: dict[str, Any] = Field(default_factory=dict)
     schema_diff: AssetSchemaDiff | None = None
     storage_bindings: list[StorageBinding] = Field(default_factory=list)
+    provenance: list[DatasetProvenance] = Field(default_factory=list)
 
 
 class StorageBinding(BaseModel):
@@ -110,6 +144,8 @@ class LineageEdge(BaseModel):
     target_asset_version_id: str
     operation: str
     created_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    provenance: DatasetProvenance | None = None
 
 
 class SchemaField(BaseModel):
@@ -180,6 +216,7 @@ class IngestionJob(BaseModel):
     heartbeat_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    provenance: DatasetProvenance = Field(default_factory=DatasetProvenance)
 
 
 class UploadResult(BaseModel):

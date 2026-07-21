@@ -4,10 +4,8 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
-from pydantic import BaseModel, Field
+from pydantic import ValidationError
 
-from queryx.app.acquisition.models import FileSelection
-from queryx.app.acquisition.service import AcquisitionService, AcquisitionServiceError
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
 from queryx.app.catalog.service import CatalogService
@@ -16,6 +14,7 @@ from queryx.app.core.config import Settings, get_settings
 from queryx.app.llm.ollama_client import OllamaClient
 from queryx.app.llm.semantic_enrichment import SemanticEnrichmentService
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
+from queryx.app.ingestion.models import DatasetProvenance, SourceProvider
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
 from queryx.app.sources.registry import SourceRegistry
 from queryx.app.worker.facade import TaskCoordinator
@@ -24,15 +23,6 @@ from queryx.app.worker.storage import WorkItemConflictError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-class KaggleInspectRequest(BaseModel):
-    dataset: str = Field(min_length=3, max_length=201)
-    version: str = Field(default="latest", min_length=1, max_length=128)
-
-
-class AcquisitionStartRequest(BaseModel):
-    files: list[FileSelection] = Field(min_length=1)
 
 
 def _build_orchestrator(settings: Settings | None = None) -> ScanOrchestrator:
@@ -81,23 +71,6 @@ def _processing_service(settings: Settings | None = None) -> ProcessingService:
 
 def _worker_service(settings: Settings | None = None) -> WorkerService:
     return WorkerService(settings or get_settings())
-
-
-def _acquisition_service(settings: Settings | None = None) -> AcquisitionService:
-    return AcquisitionService(settings or get_settings())
-
-
-def _acquisition_coordinator(settings: Settings | None = None) -> TaskCoordinator:
-    resolved = settings or get_settings()
-    ingestion = _ingestion_service(resolved)
-    acquisition = _acquisition_service(resolved)
-    return TaskCoordinator(
-        resolved,
-        ingestion=ingestion,
-        work_storage=acquisition.work_storage,
-        acquisition=acquisition,
-        initialize_processing=False,
-    )
 
 
 def _task_coordinator(settings: Settings | None = None) -> TaskCoordinator:
@@ -154,83 +127,6 @@ async def health_endpoint() -> dict[str, Any]:
 @router.get("/worker/status")
 async def worker_status() -> dict[str, object]:
     return _worker_service().status()
-
-
-@router.get("/acquisition/providers")
-async def acquisition_providers() -> dict[str, Any]:
-    return {"providers": _acquisition_service().providers()}
-
-
-@router.post("/acquisitions/kaggle/inspect", status_code=status.HTTP_201_CREATED)
-async def inspect_kaggle(payload: KaggleInspectRequest, response: Response) -> dict[str, Any]:
-    try:
-        coordinator = _acquisition_coordinator()
-        submission = coordinator.inspect_kaggle(payload.dataset, payload.version)
-        if coordinator.settings.queryx_execution_mode == "worker":
-            response.status_code = status.HTTP_202_ACCEPTED
-        return {
-            "acquisition": submission.run.model_dump(mode="json"),
-            "work_item_id": submission.work_item_id,
-        }
-    except AcquisitionServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail={"error": {"code": exc.code, "message": exc.message}},
-        ) from exc
-
-
-@router.get("/acquisitions/{acquisition_id}")
-async def get_acquisition(acquisition_id: str) -> dict[str, Any]:
-    run = _acquisition_service().storage.get_run(acquisition_id)
-    if run is None:
-        raise _not_found("acquisition", acquisition_id)
-    return run.model_dump(mode="json")
-
-
-@router.get("/acquisitions/{acquisition_id}/files")
-async def get_acquisition_files(acquisition_id: str) -> dict[str, Any]:
-    service = _acquisition_service()
-    if service.storage.get_run(acquisition_id) is None:
-        raise _not_found("acquisition", acquisition_id)
-    return {
-        "acquisition_id": acquisition_id,
-        "files": [item.model_dump(mode="json") for item in service.storage.list_files(acquisition_id)],
-    }
-
-
-@router.post("/acquisitions/{acquisition_id}/start", status_code=status.HTTP_201_CREATED)
-async def start_acquisition(
-    acquisition_id: str,
-    payload: AcquisitionStartRequest,
-    response: Response,
-) -> dict[str, Any]:
-    try:
-        coordinator = _acquisition_coordinator()
-        submission = coordinator.start_acquisition(acquisition_id, payload.files)
-        if coordinator.settings.queryx_execution_mode == "worker" and submission.work_item_id:
-            response.status_code = status.HTTP_202_ACCEPTED
-        return {
-            "acquisition": submission.run.model_dump(mode="json"),
-            "work_item_id": submission.work_item_id,
-            "reused": submission.reused,
-        }
-    except AcquisitionServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail={"error": {"code": exc.code, "message": exc.message}},
-        ) from exc
-
-
-@router.post("/acquisitions/{acquisition_id}/cancel")
-async def cancel_acquisition(acquisition_id: str) -> dict[str, Any]:
-    try:
-        run = _acquisition_coordinator().cancel_acquisition(acquisition_id)
-        return run.model_dump(mode="json")
-    except AcquisitionServiceError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail={"error": {"code": exc.code, "message": exc.message}},
-        ) from exc
 
 
 @router.get("/llm/health")
@@ -397,13 +293,39 @@ async def upload_ingestion(
     response: Response,
     file: UploadFile = File(...),
     asset_id: str | None = Form(default=None),
+    logical_name: str | None = Form(default=None),
+    source_provider: SourceProvider = Form(default=SourceProvider.MANUAL),
+    source_reference: str | None = Form(default=None, max_length=512),
+    source_version: str | None = Form(default=None, max_length=128),
+    dataset_title: str | None = Form(default=None, max_length=256),
+    license_name: str | None = Form(default=None, max_length=128),
+    provenance_notes: str | None = Form(default=None, max_length=1000),
 ) -> dict[str, Any]:
     try:
+        provenance = DatasetProvenance(
+            source_provider=source_provider,
+            source_reference=source_reference,
+            source_version=source_version,
+            dataset_title=dataset_title,
+            license_name=license_name,
+            notes=provenance_notes,
+        )
         coordinator = _task_coordinator()
-        result = await coordinator.submit_ingestion(file, asset_id=asset_id)
+        result = await coordinator.submit_ingestion(
+            file,
+            asset_id=asset_id,
+            logical_name=logical_name,
+            provenance=provenance,
+        )
         if coordinator.settings.queryx_execution_mode == "worker":
             response.status_code = status.HTTP_202_ACCEPTED
         return result.model_dump(mode="json")
+    except ValidationError as exc:
+        await file.close()
+        raise HTTPException(
+            status_code=422,
+            detail={"error": {"code": "invalid_provenance", "message": "Invalid provenance metadata"}},
+        ) from exc
     except IngestionServiceError as exc:
         raise HTTPException(
             status_code=exc.status_code,

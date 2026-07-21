@@ -1,12 +1,22 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Passaggio 1</p><h1>Importa dataset</h1><p>CSV o Parquet, massimo {{ max_upload }} byte.</p></div></div>
-<nav class="tabs" aria-label="Modalità importazione"><strong>Upload locale</strong><a href="/ui/acquisitions/kaggle">Kaggle</a></nav>
+<div class="page-heading"><div><p class="eyebrow">Passaggio 1</p><h1>Importa dataset</h1><p>Upload locale CSV o Parquet, massimo {{ max_upload }} byte.</p></div></div>
+<div class="alert alert-info">QueryX non scarica il dataset. Scarica ed estrai localmente il dataset, quindi carica uno dei file CSV o Parquet. Gli archivi ZIP devono essere estratti prima dell’upload.</div>
 <form class="card form" action="/ui/ingestions" method="post" enctype="multipart/form-data">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>File CSV o Parquet<input type="file" name="file" accept=".csv,.parquet,text/csv,application/vnd.apache.parquet" required></label>
   <label>Nome logico opzionale<input type="text" name="logical_name" maxlength="200" autocomplete="off"></label>
   <label>Asset esistente opzionale<select name="asset_id"><option value="">Crea nuovo asset</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.short_id }}</option>{% endfor %}</select></label>
+  <details>
+    <summary>Provenienza del dataset — opzionale</summary>
+    <p class="muted">Metadata descrittivi dichiarati dall’utente; non attivano download e la licenza non viene verificata da QueryX.</p>
+    <label>Provider<select name="source_provider"><option value="manual" selected>manual</option><option value="kaggle">kaggle</option><option value="other">other</option></select></label>
+    <label>Riferimento o slug<input type="text" name="source_reference" maxlength="512" autocomplete="off"></label>
+    <label>Versione<input type="text" name="source_version" maxlength="128" autocomplete="off"></label>
+    <label>Titolo dataset<input type="text" name="dataset_title" maxlength="256" autocomplete="off"></label>
+    <label>Licenza dichiarata<input type="text" name="license_name" maxlength="128" autocomplete="off"></label>
+    <label>Note<textarea name="provenance_notes" maxlength="1000"></textarea></label>
+  </details>
   <button class="button" type="submit">Carica e avvia</button>
 </form>
 {% endblock %}

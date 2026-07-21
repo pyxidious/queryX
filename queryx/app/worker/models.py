@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field
 class TaskType(StrEnum):
     INGESTION = "ingestion"
     PROCESSING = "processing"
-    KAGGLE_INSPECT = "kaggle_inspect"
-    KAGGLE_DOWNLOAD = "kaggle_download"
 
 
 class WorkStatus(StrEnum):

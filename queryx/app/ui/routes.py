@@ -11,19 +11,19 @@ from fastapi.exception_handlers import http_exception_handler, request_validatio
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from queryx.app.agent.orchestrator import ScanOrchestrator
 from queryx.app.catalog.service import CatalogService
 from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.core.config import Settings
+from queryx.app.ingestion.models import DatasetProvenance, SourceProvider
 from queryx.app.ingestion.service import IngestionService, IngestionServiceError
 from queryx.app.processing.service import ProcessingService, ProcessingServiceError
 from queryx.app.sources.registry import SourceRegistry
 from queryx.app.ui.view_models import (
     AlertVM,
-    acquisition_file_vm,
-    acquisition_vm,
     asset_vm,
     badge,
     binding_vm,
@@ -67,23 +67,6 @@ def _coordinator(request: Request) -> TaskCoordinator:
     settings = _settings(request)
     ingestion, processing, storage = _services(request)
     return TaskCoordinator(settings, ingestion, processing, storage)
-
-
-def _acquisition_service(request: Request) -> AcquisitionService:
-    settings = _settings(request)
-    return AcquisitionService(settings)
-
-
-def _acquisition_coordinator(request: Request) -> TaskCoordinator:
-    settings = _settings(request)
-    acquisition = _acquisition_service(request)
-    return TaskCoordinator(
-        settings,
-        ingestion=acquisition.ingestion,
-        work_storage=acquisition.work_storage,
-        acquisition=acquisition,
-        initialize_processing=False,
-    )
 
 
 def _signed_csrf(secret: str) -> str:
@@ -230,102 +213,6 @@ async def new_ingestion(request: Request) -> HTMLResponse:
     )
 
 
-@router.get("/acquisitions/kaggle", response_class=HTMLResponse)
-async def kaggle_new(request: Request) -> HTMLResponse:
-    settings = _settings(request)
-    return _render(
-        request,
-        "acquisition/kaggle.html",
-        {"title": "Importa da Kaggle", "enabled": settings.kaggle_enabled},
-    )
-
-
-@router.post("/acquisitions/kaggle/inspect", response_class=HTMLResponse)
-async def kaggle_inspect_ui(
-    request: Request,
-    dataset: str = Form(...),
-    version: str = Form(default="latest"),
-    csrf_token: str | None = Form(default=None),
-) -> Response:
-    invalid = _require_csrf(request, csrf_token)
-    if invalid:
-        return invalid
-    try:
-        submission = _acquisition_coordinator(request).inspect_kaggle(dataset, version)
-        return RedirectResponse(f"/ui/acquisitions/{submission.run.id}", status_code=303)
-    except AcquisitionServiceError as exc:
-        return _error(request, exc.status_code, "Acquisizione non disponibile", exc.message)
-
-
-@router.get("/acquisitions/{acquisition_id}", response_class=HTMLResponse)
-async def acquisition_detail(request: Request, acquisition_id: str) -> HTMLResponse:
-    service = _acquisition_service(request)
-    run = service.storage.get_run(acquisition_id)
-    if run is None:
-        return _error(request, 404, "Acquisizione non trovata", "L'acquisizione richiesta non esiste.")
-    return _render(
-        request,
-        "acquisition/detail.html",
-        {
-            "title": "Acquisizione Kaggle",
-            "acquisition": acquisition_vm(run),
-            "files": [acquisition_file_vm(item) for item in service.storage.list_files(run.id)],
-            "assets": [asset_vm(item) for item in service.ingestion.list_assets()],
-        },
-    )
-
-
-@router.get("/acquisitions/{acquisition_id}/status", response_class=HTMLResponse)
-async def acquisition_status_ui(request: Request, acquisition_id: str) -> HTMLResponse:
-    service = _acquisition_service(request)
-    run = service.storage.get_run(acquisition_id)
-    if run is None:
-        return _error(request, 404, "Acquisizione non trovata", "L'acquisizione richiesta non esiste.")
-    return _render(
-        request,
-        "components/acquisition_status.html",
-        {"acquisition": acquisition_vm(run), "fragment": True},
-    )
-
-
-@router.post("/acquisitions/{acquisition_id}/start", response_class=HTMLResponse)
-async def acquisition_start_ui(request: Request, acquisition_id: str) -> Response:
-    form = await request.form()
-    invalid = _require_csrf(request, str(form.get("csrf_token") or ""))
-    if invalid:
-        return invalid
-    file_ids = [str(value) for value in form.getlist("file_id")]
-    selections = [
-        FileSelection(
-            file_id=file_id,
-            logical_name=str(form.get(f"logical_name_{file_id}") or "") or None,
-            target_asset_id=str(form.get(f"target_asset_id_{file_id}") or "") or None,
-        )
-        for file_id in file_ids
-    ]
-    try:
-        _acquisition_coordinator(request).start_acquisition(acquisition_id, selections)
-        return RedirectResponse(f"/ui/acquisitions/{acquisition_id}", status_code=303)
-    except AcquisitionServiceError as exc:
-        return _error(request, exc.status_code, "Selezione non valida", exc.message)
-
-
-@router.post("/acquisitions/{acquisition_id}/cancel", response_class=HTMLResponse)
-async def acquisition_cancel_ui(
-    request: Request,
-    acquisition_id: str,
-    csrf_token: str | None = Form(default=None),
-) -> Response:
-    invalid = _require_csrf(request, csrf_token)
-    if invalid:
-        return invalid
-    try:
-        _acquisition_coordinator(request).cancel_acquisition(acquisition_id)
-        return RedirectResponse(f"/ui/acquisitions/{acquisition_id}", status_code=303)
-    except AcquisitionServiceError as exc:
-        return _error(request, exc.status_code, "Cancellazione non disponibile", exc.message)
-
-
 @router.post("/ingestions", response_class=HTMLResponse)
 async def create_ingestion(
     request: Request,
@@ -333,18 +220,36 @@ async def create_ingestion(
     csrf_token: str | None = Form(default=None),
     logical_name: str | None = Form(default=None),
     asset_id: str | None = Form(default=None),
+    source_provider: SourceProvider = Form(default=SourceProvider.MANUAL),
+    source_reference: str | None = Form(default=None, max_length=512),
+    source_version: str | None = Form(default=None, max_length=128),
+    dataset_title: str | None = Form(default=None, max_length=256),
+    license_name: str | None = Form(default=None, max_length=128),
+    provenance_notes: str | None = Form(default=None, max_length=1000),
 ) -> Response:
     invalid = _require_csrf(request, csrf_token)
     if invalid:
         await file.close()
         return invalid
     try:
+        provenance = DatasetProvenance(
+            source_provider=source_provider,
+            source_reference=source_reference,
+            source_version=source_version,
+            dataset_title=dataset_title,
+            license_name=license_name,
+            notes=provenance_notes,
+        )
         result = await _coordinator(request).submit_ingestion(
             file,
             asset_id=asset_id or None,
             logical_name=logical_name,
+            provenance=provenance,
         )
         return RedirectResponse(f"/ui/ingestions/{result.job_id}", status_code=303)
+    except ValidationError:
+        await file.close()
+        return _error(request, 422, "Provenienza non valida", "Controlla i metadata di provenienza.")
     except IngestionServiceError as exc:
         return _error(request, exc.status_code, "Importazione non accettata", exc.message)
 
@@ -587,5 +492,3 @@ def _source_view_models(settings: Settings) -> list[Any]:
     except Exception:
         current = {}
     return [source_vm(source, current.get(source.id)) for source in registry.list_sources()]
-from queryx.app.acquisition.models import FileSelection
-from queryx.app.acquisition.service import AcquisitionService, AcquisitionServiceError

@@ -4,10 +4,8 @@ from dataclasses import dataclass
 
 from fastapi import UploadFile
 
-from queryx.app.acquisition.models import AcquisitionRun, FileSelection
-from queryx.app.acquisition.service import AcquisitionService
 from queryx.app.core.config import Settings
-from queryx.app.ingestion.models import IngestionJob, UploadResult
+from queryx.app.ingestion.models import DatasetProvenance, IngestionJob, UploadResult
 from queryx.app.ingestion.service import IngestionService
 from queryx.app.processing.models import ProcessingRun
 from queryx.app.processing.service import ProcessingService
@@ -21,13 +19,6 @@ class ProcessingSubmission:
     work_item: WorkItem | None = None
 
 
-@dataclass(frozen=True)
-class AcquisitionSubmission:
-    run: AcquisitionRun
-    work_item_id: str | None = None
-    reused: bool = False
-
-
 class TaskCoordinator:
     """Shared application flow used by JSON and server-rendered routes."""
 
@@ -37,27 +28,21 @@ class TaskCoordinator:
         ingestion: IngestionService | None = None,
         processing: ProcessingService | None = None,
         work_storage: WorkerStorage | None = None,
-        acquisition: AcquisitionService | None = None,
         *,
         initialize_ingestion: bool = True,
         initialize_processing: bool = True,
-        initialize_acquisition: bool = False,
     ) -> None:
         self.settings = settings
         self.ingestion = ingestion or (IngestionService(settings) if initialize_ingestion else None)
         self.processing = processing or (ProcessingService(settings) if initialize_processing else None)
         self.work_storage = work_storage or WorkerStorage(settings.catalog_db_path)
-        self.acquisition = acquisition or (
-            AcquisitionService(settings, ingestion=self.ingestion, work_storage=self.work_storage)
-            if initialize_acquisition
-            else None
-        )
 
     async def submit_ingestion(
         self,
         upload: UploadFile,
         asset_id: str | None = None,
         logical_name: str | None = None,
+        provenance: DatasetProvenance | None = None,
     ) -> UploadResult:
         if self.ingestion is None:  # pragma: no cover - construction invariant
             raise RuntimeError("ingestion service is not configured")
@@ -66,12 +51,14 @@ class TaskCoordinator:
                 upload,
                 asset_id=asset_id,
                 logical_name=logical_name,
+                provenance=provenance,
                 enqueue=True,
             )
         return await self.ingestion.ingest_upload(
             upload,
             asset_id=asset_id,
             logical_name=logical_name,
+            provenance=provenance,
         )
 
     def submit_processing(self, asset_id: str, version_id: str) -> ProcessingSubmission:
@@ -112,44 +99,3 @@ class TaskCoordinator:
         if cancelled_item.status == WorkStatus.CANCELLED:
             run = self.processing.cancel(run_id)
         return run, cancelled_item
-
-    def inspect_kaggle(self, dataset: str, version: str | None = None) -> AcquisitionSubmission:
-        if self.acquisition is None:
-            raise RuntimeError("acquisition service is not configured")
-        if self.settings.queryx_execution_mode != "worker":
-            from queryx.app.acquisition.service import AcquisitionServiceError
-
-            raise AcquisitionServiceError(
-                "kaggle_worker_required",
-                "Kaggle acquisition requires worker execution mode",
-                409,
-            )
-        run, work_item_id = self.acquisition.create_inspection(
-            dataset,
-            version,
-            enqueue=True,
-        )
-        return AcquisitionSubmission(run, work_item_id)
-
-    def start_acquisition(self, run_id: str, files: list[FileSelection]) -> AcquisitionSubmission:
-        if self.acquisition is None:
-            raise RuntimeError("acquisition service is not configured")
-        if self.settings.queryx_execution_mode != "worker":
-            from queryx.app.acquisition.service import AcquisitionServiceError
-
-            raise AcquisitionServiceError(
-                "kaggle_worker_required",
-                "Kaggle acquisition requires worker execution mode",
-                409,
-            )
-        run, work_item_id, reused = self.acquisition.start(
-            run_id,
-            files,
-            enqueue=True,
-        )
-        return AcquisitionSubmission(run, work_item_id, reused)
-
-    def cancel_acquisition(self, run_id: str) -> AcquisitionRun:
-        if self.acquisition is None:
-            raise RuntimeError("acquisition service is not configured")
-        return self.acquisition.cancel(run_id)
