@@ -545,6 +545,7 @@ class _SequencedNaturalClient(_NaturalClient):
         self,
         *plans: dict[str, Any],
         classification: dict[str, Any] | None = None,
+        explanation: str = "La query ha restituito il risultato richiesto.",
     ) -> None:
         super().__init__(plans[0])
         self.plans = list(plans)
@@ -552,12 +553,15 @@ class _SequencedNaturalClient(_NaturalClient):
             "classification": "answerable",
             "reason": "I dati sono disponibili.",
         }
+        self.explanation = explanation
         self.planning_calls: list[list[dict[str, str]]] = []
 
     def chat_text(
         self, messages: list[dict[str, str]], json_schema: dict[str, Any] | None = None,
     ) -> OllamaTextResponse:
         self.prompts.extend(message["content"] for message in messages)
+        if json_schema is None:
+            return OllamaTextResponse(self.explanation, {})
         return OllamaTextResponse(json.dumps(self.classification), {})
 
     def chat_json(
@@ -577,6 +581,30 @@ def _mysql_records_plan(asset: Any) -> dict[str, Any]:
         "filters": [
             {"source_alias": "o", "field": "total", "operator": "gt", "value": 100}
         ],
+    }
+
+
+def _mysql_metric_plan(asset: Any, function: str, alias: str) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "o", "asset_id": asset.asset_id}],
+        "aggregations": [{
+            "function": function,
+            "source_alias": "o",
+            "field": "total",
+            "alias": alias,
+        }],
+    }
+
+
+def _mysql_paid_count_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "o", "asset_id": asset.asset_id}],
+        "filters": [{
+            "source_alias": "o", "field": "status", "operator": "eq", "value": "paid"
+        }],
+        "aggregations": [{
+            "function": "count", "source_alias": "o", "field": "id", "alias": "orders"
+        }],
     }
 
 
@@ -668,6 +696,106 @@ def test_italian_mysql_orders_count_by_status_is_catalog_disambiguated(
     example = prompt_payload["catalog_scoped_resolution_examples"][0]["plan"]
     assert example["sources"][0]["asset_id"] == assets["orders"].asset_id
     assert example["group_by"] == [{"source_alias": "o", "field": "status"}]
+
+
+@pytest.mark.parametrize(
+    ("question", "function", "alias"),
+    [
+        (
+            "Qual è il totale medio degli ordini nel database MySQL?",
+            "avg",
+            "average_total",
+        ),
+        (
+            "Qual è il valore totale degli ordini nel database MySQL?",
+            "sum",
+            "total_value",
+        ),
+    ],
+)
+def test_mysql_total_metric_is_resolved_from_selected_asset_schema(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    question: str,
+    function: str,
+    alias: str,
+) -> None:
+    settings, _, assets = mysql_query_env
+    expected = _mysql_metric_plan(assets["orders"], function, alias)
+    client = _SequencedNaturalClient(
+        expected,
+        classification={
+            "classification": "ambiguous",
+            "reason": "Il termine totale potrebbe essere ambiguo.",
+            "clarification_question": "Quale totale intendi?",
+        },
+    )
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question=question)
+    )
+
+    assert response.classification == "answerable"
+    assert response.clarification_question is None
+    plan = response.normalized_plan
+    assert plan is not None and plan.sources[0].asset_id == assets["orders"].asset_id
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        (function, "total", alias)
+    ]
+    assert plan.group_by == [] and plan.projections == []
+    payload = json.loads(client.planning_calls[0][1]["content"])
+    metric_hints = payload["catalog"]["assets"][0]["semantic_metric_hints"]
+    assert any(
+        hint["field"] == "total" and hint["aggregation"] == function
+        for hint in metric_hints
+    )
+
+
+def test_mysql_paid_count_retries_missing_filter_and_explains_single_result(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, query_service, assets = mysql_query_env
+    incorrect = _mysql_plan(assets)
+    corrected = _mysql_paid_count_plan(assets["orders"])
+    client = _SequencedNaturalClient(
+        incorrect,
+        corrected,
+        explanation="C'è 1 ordine MySQL con stato paid.",
+    )
+    monkeypatch.setattr(
+        query_service.mysql_executor,
+        "execute",
+        lambda compiled: (["orders"], [[1]], False, 1.5),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=query_service  # type: ignore[arg-type]
+    ).translate(
+        NaturalLanguageQueryRequest(
+            question="Quanti ordini MySQL hanno stato paid?", execute=True
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.group_by == [] and plan.projections == []
+    assert len(plan.filters) == 1
+    assert (
+        plan.filters[0].field,
+        plan.filters[0].operator.value,
+        plan.filters[0].value,
+    ) == ("status", "eq", "paid")
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "id", "orders")
+    ]
+    assert response.result is not None and response.result.rows == [[1]]
+    assert response.answer == "C'è 1 ordine MySQL con stato paid."
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "missing_explicit_filter"
+    assert feedback["semantic_requirements"]["filter"] == {
+        "field": "status", "operator": "eq", "value": "paid"
+    }
+    assert "Remove category projections and group_by" in feedback["instruction"]
 
 
 def test_natural_language_field_not_found_retry_receives_exact_mysql_schema(

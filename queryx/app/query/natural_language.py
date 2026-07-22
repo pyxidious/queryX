@@ -50,6 +50,8 @@ If the question explicitly names MySQL, choose only an asset whose backend is my
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
+Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
+An explicit categorical condition such as "stato paid" is a filter on the matching field, not a request to group by every category. For a filtered count, do not project or group by that field unless explicitly requested.
 An aggregation is already an output column and must not be duplicated in projections.
 Aggregation aliases may be referenced by order_by, but must never be used as source_alias in projections.
 Every order_by field must exactly match an existing projection output name or aggregation alias.
@@ -74,6 +76,12 @@ Output: {"classification":"unanswerable","reason":"Il catalogo contiene dati sui
 
 
 class _ClassificationParseError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class _PlanningSemanticError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
@@ -257,21 +265,38 @@ class NaturalLanguageQueryService:
         candidate, retry_used = self._generate(messages)
         candidate = self._unwrap_logical_query_plan(candidate)
         if candidate.get("error") == "ambiguous_question":
-            return NaturalLanguageQueryResponse(
-                classification=QueryClassification.AMBIGUOUS,
-                clarification_question=(
-                    "Puoi specificare il criterio o il campo da usare per la richiesta?"
-                ),
-                reason="Il piano non può essere determinato univocamente dal catalogo.",
-                planning_time_ms=(monotonic() - planning_started) * 1000,
-            )
+            requirements = self._semantic_requirements(question, context)
+            if requirements.get("aggregation") and not retry_used:
+                candidate = self._unwrap_logical_query_plan(
+                    self._retry_invalid_plan(
+                        messages,
+                        candidate,
+                        "catalog_resolved_question",
+                        context,
+                        question,
+                    )
+                )
+                retry_used = True
+            else:
+                return NaturalLanguageQueryResponse(
+                    classification=QueryClassification.AMBIGUOUS,
+                    clarification_question=(
+                        "Puoi specificare il criterio o il campo da usare per la richiesta?"
+                    ),
+                    reason="Il piano non può essere determinato univocamente dal catalogo.",
+                    planning_time_ms=(monotonic() - planning_started) * 1000,
+                )
         try:
-            validation = self._validate_candidate(candidate)
-        except QueryValidationError as exc:
+            validation = self._validate_candidate_semantics(
+                candidate, question, context
+            )
+        except (QueryValidationError, _PlanningSemanticError) as exc:
             if retry_used:
                 raise self._invalid_plan_error(exc, candidate) from exc
             candidate = self._unwrap_logical_query_plan(
-                self._retry_invalid_plan(messages, candidate, exc.code, context)
+                self._retry_invalid_plan(
+                    messages, candidate, exc.code, context, question
+                )
             )
             if candidate.get("error") == "ambiguous_question":
                 return NaturalLanguageQueryResponse(
@@ -283,8 +308,10 @@ class NaturalLanguageQueryService:
                     planning_time_ms=(monotonic() - planning_started) * 1000,
                 )
             try:
-                validation = self._validate_candidate(candidate)
-            except QueryValidationError as retry_exc:
+                validation = self._validate_candidate_semantics(
+                    candidate, question, context
+                )
+            except (QueryValidationError, _PlanningSemanticError) as retry_exc:
                 raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
@@ -474,6 +501,63 @@ class NaturalLanguageQueryService:
             ) from exc
         return self.query_service.validate(plan)
 
+    def _validate_candidate_semantics(
+        self, candidate: dict[str, Any], question: str, context: dict[str, Any]
+    ) -> Any:
+        requirements = self._semantic_requirements(question, context)
+        sources = candidate.get("sources", [])
+        selected = next(
+            (
+                source
+                for source in sources
+                if isinstance(source, dict)
+                and source.get("asset_id") == requirements.get("asset_id")
+            ),
+            None,
+        )
+        if requirements.get("asset_id") and selected is None:
+            raise _PlanningSemanticError("semantic_asset_mismatch")
+        if selected is not None:
+            alias = selected.get("alias")
+            required_filter = requirements.get("filter")
+            if required_filter is not None:
+                matched_filter = any(
+                    isinstance(item, dict)
+                    and item.get("source_alias") == alias
+                    and item.get("field") == required_filter["field"]
+                    and item.get("operator") == "eq"
+                    and str(item.get("value", "")).casefold()
+                    == required_filter["value"].casefold()
+                    for item in candidate.get("filters", [])
+                )
+                if not matched_filter:
+                    raise _PlanningSemanticError("missing_explicit_filter")
+                category_field = required_filter["field"]
+                if any(
+                    isinstance(item, dict) and item.get("field") == category_field
+                    for item in [
+                        *candidate.get("projections", []),
+                        *candidate.get("group_by", []),
+                    ]
+                ):
+                    raise _PlanningSemanticError("unrequested_categories")
+            aggregation = requirements.get("aggregation")
+            if aggregation is not None:
+                matched = any(
+                    isinstance(item, dict)
+                    and item.get("function") == aggregation["function"]
+                    and item.get("field") == aggregation["field"]
+                    and item.get("source_alias") == alias
+                    and (
+                        aggregation.get("alias") is None
+                        or item.get("alias") == aggregation["alias"]
+                    )
+                    for item in candidate.get("aggregations", [])
+                )
+                if not matched or candidate.get("group_by"):
+                    raise _PlanningSemanticError("metric_aggregation_mismatch")
+        return self._validate_candidate(candidate)
+
     @staticmethod
     def _unwrap_logical_query_plan(candidate: dict[str, Any]) -> dict[str, Any]:
         if set(candidate) == {"logical_query_plan"}:
@@ -483,7 +567,8 @@ class NaturalLanguageQueryService:
         return candidate
 
     def _invalid_plan_error(
-        self, error: QueryValidationError, candidate: dict[str, Any]
+        self, error: QueryValidationError | _PlanningSemanticError,
+        candidate: dict[str, Any],
     ) -> NaturalLanguageQueryError:
         return NaturalLanguageQueryError(
             "invalid_logical_plan",
@@ -498,6 +583,7 @@ class NaturalLanguageQueryService:
         candidate: dict[str, Any],
         validation_code: str,
         context: dict[str, Any],
+        question: str,
     ) -> dict[str, Any]:
         selected_ids = {
             source.get("asset_id")
@@ -518,6 +604,32 @@ class NaturalLanguageQueryService:
                 "its exact valid_fields. Do not copy fields from an asset with the same "
                 "name, and return only the corrected plan object."
             )
+        semantic_requirements = self._semantic_requirements(question, context)
+        if validation_code in {
+            "missing_explicit_filter",
+            "unrequested_categories",
+            "filtered_count_mismatch",
+        }:
+            instruction = (
+                "Correct only the LogicalQueryPlan. Preserve the explicit categorical "
+                "condition as the required eq filter. Remove category projections and "
+                "group_by that were not requested, then return only the corrected plan object."
+            )
+        elif validation_code == "metric_aggregation_mismatch":
+            instruction = (
+                "Correct only the LogicalQueryPlan using the catalog-scoped required "
+                "aggregation and field. Do not add group_by, then return only the corrected plan object."
+            )
+        elif validation_code == "semantic_asset_mismatch":
+            instruction = (
+                "Correct only the LogicalQueryPlan using the catalog-scoped required asset, "
+                "then return only the corrected plan object."
+            )
+        elif validation_code == "catalog_resolved_question":
+            instruction = (
+                "The catalog-scoped semantic requirements resolve the question. Generate only "
+                "the corresponding LogicalQueryPlan and return only the plan object."
+            )
         retry_messages = [
             *messages,
             {
@@ -527,6 +639,7 @@ class NaturalLanguageQueryService:
                         "instruction": instruction,
                         "previous_plan": candidate,
                         "validation_code": validation_code,
+                        "semantic_requirements": semantic_requirements,
                         "selected_assets": [
                             {
                                 "asset_id": asset["asset_id"],
@@ -644,6 +757,7 @@ class NaturalLanguageQueryService:
                 }
                 candidate["semantic_field_hints"] = self._semantic_field_hints(candidate)
                 candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
+                candidate["semantic_metric_hints"] = self._semantic_metric_hints(candidate)
                 candidates.append(candidate)
                 break
         for asset in self.query_service.mysql_catalog.list_ready_assets():
@@ -666,6 +780,7 @@ class NaturalLanguageQueryService:
             }
             candidate["semantic_field_hints"] = self._semantic_field_hints(candidate)
             candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
+            candidate["semantic_metric_hints"] = self._semantic_metric_hints(candidate)
             candidates.append(candidate)
         if re.search(r"\bmysql\b", question, re.IGNORECASE):
             candidates = [asset for asset in candidates if asset["backend"] == "mysql"]
@@ -682,12 +797,18 @@ class NaturalLanguageQueryService:
                 for hint in asset["semantic_field_hints"]
                 for term in hint["terms"]
             ]
+            metric_terms = [
+                term
+                for hint in asset["semantic_metric_hints"]
+                for term in hint["terms"]
+            ]
             searchable = " ".join(
                 [
                     asset["logical_name"],
                     *(field["name"] for field in asset["fields"]),
                     *asset["semantic_entity_terms"],
                     *hint_terms,
+                    *metric_terms,
                 ]
             ).casefold()
             scores[asset["asset_id"]] = sum(token in searchable for token in tokens)
@@ -738,6 +859,77 @@ class NaturalLanguageQueryService:
         return []
 
     @staticmethod
+    def _semantic_metric_hints(asset: dict[str, Any]) -> list[dict[str, Any]]:
+        fields = {
+            field["name"].casefold(): str(field["data_type"]).casefold()
+            for field in asset["fields"]
+        }
+        total_type = fields.get("total", "")
+        if not any(
+            numeric in total_type
+            for numeric in ("int", "decimal", "numeric", "float", "double", "real")
+        ):
+            return []
+        return [
+            {
+                "terms": ["totale medio", "media del totale", "valore medio"],
+                "field": "total",
+                "aggregation": "avg",
+            },
+            {
+                "terms": ["valore totale", "somma dei totali", "totale complessivo"],
+                "field": "total",
+                "aggregation": "sum",
+            },
+        ]
+
+    @staticmethod
+    def _semantic_requirements(
+        question: str, context: dict[str, Any]
+    ) -> dict[str, Any]:
+        normalized = question.casefold()
+        assets = [
+            asset
+            for asset in context["assets"]
+            if any(
+                re.search(rf"\b{re.escape(term)}\b", normalized)
+                for term in asset.get("semantic_entity_terms", [])
+            )
+        ]
+        if len(assets) != 1:
+            return {}
+        asset = assets[0]
+        requirements: dict[str, Any] = {"asset_id": asset["asset_id"]}
+        for hint in asset.get("semantic_metric_hints", []):
+            if any(term in normalized for term in hint["terms"]):
+                requirements["aggregation"] = {
+                    "function": hint["aggregation"],
+                    "field": hint["field"],
+                }
+                break
+        explicit_status = re.search(r"\bstato\s+([\w-]+)", normalized)
+        if explicit_status and explicit_status.group(1) not in {
+            "nel", "per", "degli", "dell", "ordine"
+        }:
+            status_fields = {
+                hint["field"]
+                for hint in asset.get("semantic_field_hints", [])
+                if "stato" in hint["terms"]
+            }
+            if status_fields == {"status"}:
+                requirements["filter"] = {
+                    "field": "status",
+                    "operator": "eq",
+                    "value": explicit_status.group(1),
+                }
+                requirements["aggregation"] = {
+                    "function": "count",
+                    "field": "id",
+                    "alias": "orders",
+                }
+        return requirements
+
+    @staticmethod
     def _apply_catalog_disambiguation(
         question: str,
         context: dict[str, Any],
@@ -745,6 +937,15 @@ class NaturalLanguageQueryService:
     ) -> NaturalLanguageClassification:
         if classification.classification != QueryClassification.AMBIGUOUS:
             return classification
+        requirements = NaturalLanguageQueryService._semantic_requirements(
+            question, context
+        )
+        if requirements.get("aggregation"):
+            return NaturalLanguageClassification(
+                classification=QueryClassification.ANSWERABLE,
+                reason="The catalog uniquely resolves the requested metric.",
+                clarification_question=None,
+            )
         normalized = question.casefold()
         matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for asset in context["assets"]:
@@ -797,6 +998,57 @@ class NaturalLanguageQueryService:
                         }],
                         "group_by": [{"source_alias": "o", "field": "status"}],
                         "order_by": [{"field": "orders", "direction": "desc"}],
+                    },
+                })
+                if asset.get("semantic_metric_hints"):
+                    for function, question, alias in (
+                        (
+                            "avg",
+                            "Qual è il totale medio degli ordini nel database MySQL?",
+                            "average_total",
+                        ),
+                        (
+                            "sum",
+                            "Qual è il valore totale degli ordini nel database MySQL?",
+                            "total_value",
+                        ),
+                    ):
+                        examples.append({
+                            "question": question,
+                            "plan": {
+                                "sources": [{
+                                    "alias": "o",
+                                    "asset_id": asset["asset_id"],
+                                    "asset_version_id": asset["asset_version_id"],
+                                }],
+                                "aggregations": [{
+                                    "function": function,
+                                    "source_alias": "o",
+                                    "field": "total",
+                                    "alias": alias,
+                                }],
+                            },
+                        })
+                examples.append({
+                    "question": "Quanti ordini MySQL hanno stato paid?",
+                    "plan": {
+                        "sources": [{
+                            "alias": "o",
+                            "asset_id": asset["asset_id"],
+                            "asset_version_id": asset["asset_version_id"],
+                        }],
+                        "filters": [{
+                            "source_alias": "o",
+                            "field": "status",
+                            "operator": "eq",
+                            "value": "paid",
+                        }],
+                        "aggregations": [{
+                            "function": "count",
+                            "source_alias": "o",
+                            "field": "id",
+                            "alias": "orders",
+                        }],
                     },
                 })
         return examples
