@@ -1,0 +1,484 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sqlite3
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+from fastapi import UploadFile
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+
+from queryx.app.api import routes as api_routes
+from queryx.app.catalog.models import ScanRun, SourceScanResult
+from queryx.app.catalog.service import CatalogService
+from queryx.app.catalog.storage import CatalogStorage
+from queryx.app.core.config import Settings
+from queryx.app.ingestion.service import IngestionService
+from queryx.app.ingestion.storage import IngestionStorage
+from queryx.app.llm.ollama_client import OllamaResponse, OllamaTextResponse
+from queryx.app.main import create_app
+from queryx.app.processing.service import ProcessingService
+from queryx.app.query.mysql_executor import MySQLQueryExecutor
+from queryx.app.query.models import LogicalQueryPlan, NaturalLanguageQueryRequest
+from queryx.app.query.natural_language import NaturalLanguageQueryService
+from queryx.app.query.service import QueryService
+from queryx.app.query.validation import QueryValidationError
+from queryx.app.sources.registry import SourceRegistry
+
+
+def _save_mysql_scan(
+    settings: Settings,
+    tables: list[dict[str, Any]],
+    *,
+    scan_status: str = "completed",
+) -> None:
+    now = datetime.now(timezone.utc)
+    catalog = CatalogService(CatalogStorage(settings.catalog_db_path))
+    catalog.upsert_sources(SourceRegistry(settings).list_sources())
+    result = SourceScanResult(
+        source_id=settings.mysql_source_id,
+        database_type="mysql",
+        scan_status=scan_status,
+        started_at=now,
+        finished_at=now,
+        duration_ms=1,
+        fingerprint="mysql-fingerprint" if scan_status == "completed" else None,
+        declared_metadata={"tables": tables} if scan_status == "completed" else {},
+        error=None if scan_status == "completed" else {"code": "source_unavailable"},
+    )
+    catalog.save_run(
+        ScanRun(
+            started_at=now,
+            finished_at=now,
+            duration_ms=1,
+            status=scan_status,
+            sources_succeeded=int(scan_status == "completed"),
+            sources_failed=int(scan_status != "completed"),
+            results=[result],
+        )
+    )
+
+
+@pytest.fixture
+def mysql_query_env(tmp_path: Path) -> tuple[Settings, QueryService, dict[str, Any]]:
+    data = tmp_path / "data"
+    settings = Settings(
+        catalog_db_path=data / "catalog.sqlite3",
+        data_raw_dir=data / "raw",
+        data_staging_dir=data / "staging",
+        data_normalized_dir=data / "normalized",
+        duckdb_path=data / "queryx.duckdb",
+        duckdb_lock_path=data / "queryx.duckdb.lock",
+        mysql_url="mysql+pymysql://queryx:secret@db.invalid:3306/demo_schema",
+        mysql_host="db.invalid",
+        mysql_database="demo_schema",
+        mysql_user="do-not-expose-user",
+        mysql_password="do-not-expose-password",
+        mysql_enabled=True,
+        mongodb_enabled=False,
+        query_default_limit=2,
+        query_max_limit=5,
+        mysql_query_timeout_seconds=3,
+    )
+    tables = [
+                {
+                    "name": "orders",
+                    "columns": [
+                        {"name": "id", "type": "INTEGER", "nullable": False},
+                        {"name": "status", "type": "VARCHAR(40)", "nullable": False},
+                        {"name": "total", "type": "DECIMAL(10, 2)", "nullable": False},
+                        {"name": "select", "type": "VARCHAR(40)", "nullable": True},
+                    ],
+                    "primary_key": {"columns": ["id"]},
+                    "foreign_keys": [
+                        {"columns": ["customer_id"], "referenced_table": "customers"}
+                    ],
+                    "indexes": [{"name": "idx_orders_status", "columns": ["status"]}],
+                },
+                {
+                    "name": "customers",
+                    "columns": [
+                        {"name": "id", "type": "INTEGER", "nullable": False},
+                        {"name": "name", "type": "VARCHAR(120)", "nullable": False},
+                    ],
+                },
+            ]
+    _save_mysql_scan(settings, tables)
+    service = QueryService(settings)
+    assets = {asset.name: asset for asset in service.mysql_catalog.list_ready_assets()}
+    return settings, service, assets
+
+
+def _mysql_plan(assets: dict[str, Any], **updates: Any) -> dict[str, Any]:
+    plan: dict[str, Any] = {
+        "sources": [{"alias": "o", "asset_id": assets["orders"].asset_id}],
+        "projections": [{"source_alias": "o", "field": "status", "alias": "status"}],
+        "aggregations": [
+            {"function": "count", "source_alias": "o", "field": "id", "alias": "orders"}
+        ],
+        "group_by": [{"source_alias": "o", "field": "status"}],
+        "order_by": [{"field": "orders", "direction": "desc"}],
+    }
+    plan.update(updates)
+    return plan
+
+
+def test_mysql_scan_promotes_virtual_assets_and_assets_api(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, assets = mysql_query_env
+    storage = IngestionStorage(settings.catalog_db_path)
+    catalog_assets = {asset.name: asset for asset in storage.list_assets()}
+
+    assert set(catalog_assets) == {"customers", "orders"}
+    orders = catalog_assets["orders"]
+    assert orders.id == assets["orders"].asset_id
+    assert str(orders.asset_kind) == "mysql_table"
+    assert orders.versions[0].status == "ready"
+    assert orders.versions[0].storage_bindings == []
+    metadata = orders.versions[0].technical_metadata
+    assert metadata["source_id"] == settings.mysql_source_id
+    assert metadata["database"] == metadata["schema"] == "demo_schema"
+    assert metadata["table"] == "orders"
+    assert metadata["primary_key"] == {"columns": ["id"]}
+    assert metadata["foreign_keys"]
+    assert metadata["indexes"]
+    assert metadata["schema_fingerprint"] == orders.versions[0].schema_fingerprint
+
+    monkeypatch.setattr(
+        api_routes,
+        "_ingestion_service",
+        lambda settings_arg=None: IngestionService(settings_arg or settings),
+    )
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            return await client.get("/assets")
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    returned = {asset["name"]: asset for asset in response.json()["assets"]}
+    assert returned["customers"]["asset_kind"] == "mysql_table"
+    assert returned["orders"]["id"] == assets["orders"].asset_id
+
+
+def test_mysql_promotion_is_idempotent_and_schema_change_creates_version(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    catalog = CatalogStorage(settings.catalog_db_path)
+    original_tables = catalog.get_latest_successful_source_result(
+        settings.mysql_source_id
+    ).declared_metadata["tables"]
+    storage = IngestionStorage(settings.catalog_db_path)
+    original = storage.get_asset(assets["orders"].asset_id)
+    assert original is not None
+    original_version_id = original.versions[0].id
+
+    _save_mysql_scan(settings, original_tables)
+    unchanged = storage.get_asset(original.id)
+    assert unchanged is not None
+    assert [version.id for version in unchanged.versions] == [original_version_id]
+
+    changed_tables = json.loads(json.dumps(original_tables))
+    changed_tables[0]["columns"].append(
+        {"name": "created_at", "type": "DATETIME", "nullable": True}
+    )
+    _save_mysql_scan(settings, changed_tables)
+    changed = storage.get_asset(original.id)
+    assert changed is not None
+    assert len(changed.versions) == 2
+    assert changed.versions[0].id != original_version_id
+    assert changed.versions[0].status == "ready"
+    assert changed.versions[1].status == "stale"
+    assert changed.versions[0].technical_metadata["fields"][-1]["name"] == "created_at"
+
+    query_service = QueryService(settings)
+    current = query_service.mysql_catalog.resolve(original.id)
+    assert current is not None
+    resolved = query_service.validator.validate(
+        LogicalQueryPlan.model_validate(_mysql_plan({"orders": current}))
+    )
+    assert resolved.sources["o"].asset_id == original.id
+    assert resolved.sources["o"].asset_version_id == changed.versions[0].id
+
+
+def test_mysql_removed_table_becomes_stale_and_not_queryable(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    catalog = CatalogStorage(settings.catalog_db_path)
+    tables = catalog.get_latest_successful_source_result(
+        settings.mysql_source_id
+    ).declared_metadata["tables"]
+    _save_mysql_scan(settings, [table for table in tables if table["name"] == "customers"])
+
+    removed = IngestionStorage(settings.catalog_db_path).get_asset(assets["orders"].asset_id)
+    assert removed is not None
+    assert all(version.status == "stale" for version in removed.versions)
+    with pytest.raises(QueryValidationError) as captured:
+        QueryService(settings).validate(_mysql_plan(assets))
+    assert captured.value.code == "mysql_source_not_ready"
+
+
+def test_mysql_single_source_validation_projection_and_limits(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mysql_query_env
+    validated = service.validate(_mysql_plan(assets))
+    assert validated.normalized_plan.limit == settings.query_default_limit
+    assert [field.name for field in validated.output_schema] == ["status", "orders"]
+    with pytest.raises(QueryValidationError) as captured:
+        service.validate(_mysql_plan(assets, limit=settings.query_max_limit + 1))
+    assert captured.value.code == "query_limit_exceeded"
+
+
+def test_mysql_compiler_quotes_and_parameterizes_filters_and_aggregation(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mysql_query_env
+    payload = _mysql_plan(
+        assets,
+        projections=[{"source_alias": "o", "field": "select", "alias": "category"}],
+        group_by=[{"source_alias": "o", "field": "select"}],
+        filters=[{
+            "source_alias": "o",
+            "field": "status",
+            "operator": "eq",
+            "value": "paid' OR 1=1 --",
+        }],
+        aggregations=[{
+            "function": "sum", "source_alias": "o", "field": "total", "alias": "revenue"
+        }],
+        order_by=[{"field": "revenue", "direction": "desc"}],
+        limit=5,
+    )
+    validated = service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    compiled = service.mysql_compiler.compile(validated)
+    assert compiled.sql.startswith("SELECT ")
+    assert "FROM `demo_schema`.`orders` AS `o`" in compiled.sql
+    assert "`o`.`select`" in compiled.sql
+    assert "SUM(`o`.`total`) AS `revenue`" in compiled.sql
+    assert "paid' OR 1=1 --" not in compiled.sql
+    assert compiled.parameters["p0"] == "paid' OR 1=1 --"
+    assert compiled.parameters["result_limit"] == 6
+    assert compiled.sql.endswith("LIMIT :result_limit")
+
+
+def test_mysql_scope_cross_backend_and_arbitrary_sql_are_rejected(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mysql_query_env
+    stream = tempfile.SpooledTemporaryFile()
+    stream.write(b"id,name\n1,local\n")
+    stream.seek(0)
+    uploaded = asyncio.run(
+        IngestionService(settings).ingest_upload(
+            UploadFile(stream, filename="local.csv"), logical_name="local"
+        )
+    )
+    ProcessingService(settings).prepare(uploaded.asset_id or "", uploaded.asset_version_id or "")
+    cross_backend = {
+        "sources": [
+            {"alias": "l", "asset_id": uploaded.asset_id},
+            {"alias": "m", "asset_id": assets["orders"].asset_id},
+        ],
+        "projections": [{"source_alias": "l", "field": "name"}],
+    }
+    with pytest.raises(QueryValidationError) as federation:
+        QueryService(settings).validate(cross_backend)
+    assert federation.value.code == "federation_not_supported"
+    with pytest.raises(QueryValidationError) as arbitrary:
+        service.validate({"sql": "SELECT * FROM orders"})
+    assert arbitrary.value.code == "invalid_logical_query_plan"
+
+
+def test_mysql_multi_source_join_transform_and_unknown_field_are_rejected(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mysql_query_env
+    multi = {
+        "sources": [
+            {"alias": "o", "asset_id": assets["orders"].asset_id},
+            {"alias": "c", "asset_id": assets["customers"].asset_id},
+        ],
+        "projections": [{"source_alias": "o", "field": "status"}],
+    }
+    with pytest.raises(QueryValidationError) as multiple:
+        service.validate(multi)
+    assert multiple.value.code == "mysql_multi_source_not_supported"
+    joined = _mysql_plan(assets)
+    joined["joins"] = [{
+        "relationship_id": "not-used",
+        "left_alias": "o",
+        "right_alias": "o",
+    }]
+    with pytest.raises(QueryValidationError) as join:
+        service.validate(joined)
+    assert join.value.code == "mysql_joins_not_supported"
+    transformed = _mysql_plan(assets)
+    transformed["projections"][0]["transform"] = "date_trunc_month"
+    transformed["group_by"][0]["transform"] = "date_trunc_month"
+    with pytest.raises(QueryValidationError) as transform:
+        service.validate(transformed)
+    assert transform.value.code == "mysql_transform_not_supported"
+    missing = _mysql_plan(assets)
+    missing["projections"][0]["field"] = "missing"
+    missing["group_by"][0]["field"] = "missing"
+    with pytest.raises(QueryValidationError) as field:
+        service.validate(missing)
+    assert field.value.code == "field_not_found"
+
+
+def test_mysql_asset_from_stale_source_is_not_queryable(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    _save_mysql_scan(settings, [], scan_status="failed")
+    with pytest.raises(QueryValidationError) as captured:
+        QueryService(settings).validate(_mysql_plan(assets))
+    assert captured.value.code == "mysql_source_not_ready"
+
+
+def test_mysql_execute_routes_and_audits_without_filter_values(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mysql_query_env
+    monkeypatch.setattr(
+        service.mysql_executor,
+        "execute",
+        lambda compiled: (["status", "orders"], [["paid", 2], ["pending", 1]], False, 4.5),
+    )
+    payload = _mysql_plan(assets, filters=[{
+        "source_alias": "o", "field": "status", "operator": "neq", "value": "secret"
+    }])
+    result = service.execute(payload)
+    assert result.columns == ["status", "orders"] and result.row_count == 2
+    with sqlite3.connect(settings.catalog_db_path) as connection:
+        backend, source_ids, plan_json = connection.execute(
+            "SELECT backend, source_ids_json, normalized_plan_json FROM query_runs ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+    assert backend == "mysql"
+    assert json.loads(source_ids) == [settings.mysql_source_id]
+    assert "secret" not in plan_json and "<redacted>" in plan_json
+    assert "rows" not in json.loads(plan_json)
+
+
+class _FailingEngine:
+    def connect(self) -> Any:
+        raise SQLAlchemyError("offline")
+
+
+class _TimeoutConnection:
+    def __enter__(self) -> _TimeoutConnection:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def execute(self, statement: Any, parameters: Any = None) -> Any:
+        if str(statement).startswith("SELECT"):
+            raise DBAPIError(str(statement), parameters, TimeoutError("timeout"), False)
+        return object()
+
+
+class _TimeoutEngine:
+    def connect(self) -> _TimeoutConnection:
+        return _TimeoutConnection()
+
+
+def test_mysql_executor_connection_error_and_timeout(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mysql_query_env
+    validated = service.validator.validate(
+        LogicalQueryPlan.model_validate(_mysql_plan(assets))
+    )
+    compiled = service.mysql_compiler.compile(validated)
+    from queryx.app.query.executor import QueryExecutionError
+
+    with pytest.raises(QueryExecutionError) as connection:
+        MySQLQueryExecutor("mysql+pymysql://unused", 1, engine=_FailingEngine()).execute(compiled)  # type: ignore[arg-type]
+    assert connection.value.code == "mysql_connection_failed"
+    with pytest.raises(QueryExecutionError) as timeout:
+        MySQLQueryExecutor("mysql+pymysql://unused", 1, engine=_TimeoutEngine()).execute(compiled)  # type: ignore[arg-type]
+    assert timeout.value.code == "query_timeout"
+
+
+def test_mysql_api_execute_uses_existing_result_contract(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mysql_query_env
+    monkeypatch.setattr(
+        service.mysql_executor,
+        "execute",
+        lambda compiled: (["status", "orders"], [["paid", 2]], False, 2.0),
+    )
+    monkeypatch.setattr(api_routes, "_query_service", lambda settings=None: service)
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            return await client.post("/query/execute", json=_mysql_plan(assets))
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 200
+    assert response.json()["rows"] == [["paid", 2]]
+    assert "sql" not in response.json()
+
+
+class _NaturalClient:
+    def __init__(self, plan: dict[str, Any]) -> None:
+        self.plan = plan
+        self.prompts: list[str] = []
+
+    def chat_text(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any] | None = None,
+    ) -> OllamaTextResponse:
+        self.prompts.extend(message["content"] for message in messages)
+        return OllamaTextResponse(
+            json.dumps({"classification": "answerable", "reason": "I dati sono disponibili."}),
+            {},
+        )
+
+    def chat_json(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any]
+    ) -> OllamaResponse:
+        self.prompts.extend(message["content"] for message in messages)
+        return OllamaResponse(self.plan, {})
+
+
+def test_natural_language_context_includes_ready_mysql_asset_without_connection_details(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    plan = _mysql_plan(assets)
+    client = _NaturalClient(plan)
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    response = service.translate(
+        NaturalLanguageQueryRequest(question="Quanti ordini ci sono per stato?")
+    )
+    prompt = "\n".join(client.prompts)
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.sources[0].asset_id == assets["orders"].asset_id
+    assert assets["orders"].asset_id in prompt and '"backend":"mysql"' in prompt
+    assert "status" in prompt
+    assert settings.mysql_url not in prompt
+    assert settings.mysql_host not in prompt
+    assert settings.mysql_password not in prompt
+    assert settings.mysql_database not in prompt

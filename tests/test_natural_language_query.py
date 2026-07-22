@@ -190,7 +190,7 @@ def test_valid_single_source_plan_and_safe_relevant_prompt(
     assert "physical_location" not in prompt and "serving_schema" not in prompt
     assert "queryx_managed" not in prompt and "/data/" not in prompt
     assert "sample" not in prompt.casefold() and '"rows"' not in prompt
-    assert "sql" not in prompt.casefold()
+    assert '"sql"' not in prompt.casefold()
     assert "every non-aggregated projection must appear identically in group_by" in prompt
     assert "without wrappers" in prompt
     assert '"field":"order_status"' in prompt

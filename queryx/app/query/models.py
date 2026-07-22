@@ -173,6 +173,8 @@ class QueryRun(StrictModel):
     error: dict[str, Any] | None = None
     created_at: datetime
     finished_at: datetime | None = None
+    backend: str | None = None
+    source_ids: list[str] = Field(default_factory=list)
 
 
 class QueryValidationResult(StrictModel):

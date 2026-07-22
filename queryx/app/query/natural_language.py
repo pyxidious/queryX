@@ -42,6 +42,7 @@ _SYSTEM_PROMPT = """You translate a user question into the supplied LogicalQuery
 Return the LogicalQueryPlan object directly, without wrappers, markdown, commentary or additional top-level keys.
 Use only listed asset_id, asset_version_id, fields, transforms, operators and relationship_id values.
 Never invent assets, fields, functions or relationships.
+For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 An aggregation is already an output column and must not be duplicated in projections.
 Aggregation aliases may be referenced by order_by, but must never be used as source_alias in projections.
@@ -574,6 +575,23 @@ class NaturalLanguageQueryService:
                     }
                 )
                 break
+        for asset in self.query_service.mysql_catalog.list_ready_assets():
+            candidates.append(
+                {
+                    "asset_id": asset.asset_id,
+                    "asset_version_id": asset.asset_version_id,
+                    "name": asset.name,
+                    "backend": "mysql",
+                    "fields": [
+                        {
+                            "name": field["name"],
+                            "data_type": field["data_type"],
+                            "nullable": field["nullable"],
+                        }
+                        for field in asset.fields.values()
+                    ],
+                }
+            )
         active_relationships = [
             relationship for relationship in self.storage.list_relationships(False)
         ]

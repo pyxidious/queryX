@@ -178,7 +178,7 @@ curl -X POST http://localhost:8000/relationships \
   }'
 ```
 
-Il `LogicalQueryPlan` contiene esclusivamente sorgenti catalogate, join tramite relationship ID, proiezioni, filtri, aggregazioni, group by, ordinamento e limite. Il client non invia SQL, nomi di viste DuckDB o path. La validazione risolve una versione `ready`, il relativo serving binding DuckDB `ready`, gli schemi e le relazioni attive. Controlla inoltre alias, tipi, aggregazioni, group by e limite.
+Il `LogicalQueryPlan` contiene esclusivamente sorgenti catalogate, join tramite relationship ID, proiezioni, filtri, aggregazioni, group by, ordinamento e limite. Il client non invia SQL, connection string, host, schema/tabelle fisici, nomi di viste DuckDB o path. La validazione risolve internamente il backend: una versione con serving binding DuckDB `ready`, oppure una tabella proveniente dall'ultimo snapshot MySQL `current` e completato. Controlla inoltre alias, tipi, aggregazioni, group by e limite.
 
 Esempio “numero ordini per stato”:
 
@@ -199,9 +199,25 @@ Esempio “numero ordini per stato”:
 
 Per raggruppare temporalmente è disponibile la sola trasformazione controllata `date_trunc_month`, applicabile a campi date/timestamp nelle proiezioni e nel corrispondente `group_by`. I join usano sempre un `relationship_id` dichiarato; i casi orders/customer, orders/order_items e products/order_items non sono hardcoded e vanno registrati con gli ID reali del catalogo.
 
-`POST /query/validate` normalizza il limite e restituisce lo schema di output previsto senza eseguire. `POST /query/execute` compila internamente una sola `SELECT` DuckDB con identificatori quoted, valori parametrizzati e `LIMIT`, quindi restituisce colonne, righe bounded, conteggio, indicazione di troncamento, tempo, fingerprint e warning. Il piano logico è quindi il contratto pubblico; il SQL fisico resta un dettaglio interno e non compare nelle risposte standard.
+`POST /query/validate` normalizza il limite e restituisce lo schema di output previsto senza eseguire. `POST /query/execute` sceglie automaticamente il backend dell'asset e compila internamente una sola `SELECT`, con identificatori quoted, valori parametrizzati e `LIMIT`; restituisce colonne, righe bounded, conteggio, indicazione di troncamento, tempo, fingerprint e warning. DuckDB continua a usare il serving binding e il file lock esistenti. MySQL usa backtick, parametri SQLAlchemy, sessione read-only e `MYSQL_QUERY_TIMEOUT_SECONDS` (default 10). Il piano logico è il contratto pubblico; SQL fisico e credenziali restano dettagli interni e non compaiono nelle risposte standard.
 
-Ogni esecuzione crea un `QueryRun` di audit con piano normalizzato, fingerprint, versioni sorgente, stato e metriche. Le righe del risultato e il SQL completo non vengono persistiti; i valori dei filtri non vengono loggati. Timeout, limite predefinito e massimo sono configurati con `QUERY_TIMEOUT_SECONDS`, `QUERY_DEFAULT_LIMIT` e `QUERY_MAX_LIMIT`. La UI temporanea `/ui/query` accetta JSON e offre Validate/Execute; `/ui/relationships` permette di elencare e dichiarare relazioni.
+Primo smoke plan per la tabella demo MySQL `orders` (l'`asset_id` opaco si ricava dal catalogo corrente):
+
+```json
+{
+  "sources": [{"alias": "o", "asset_id": "<mysql-orders-asset-id>"}],
+  "projections": [{"source_alias": "o", "field": "status", "alias": "status"}],
+  "filters": [{"source_alias": "o", "field": "total", "operator": "gte", "value": 50}],
+  "aggregations": [{"function": "sum", "source_alias": "o", "field": "total", "alias": "revenue"}],
+  "group_by": [{"source_alias": "o", "field": "status"}],
+  "order_by": [{"field": "revenue", "direction": "desc"}],
+  "limit": 100
+}
+```
+
+Il supporto MySQL corrente è intenzionalmente single-source: projection, filtri, aggregazioni (`count`, `count_distinct`, `sum`, `avg`, `min`, `max`), group by, order by e limit. Join MySQL, trasformazioni temporali MySQL, piani multi-source, MongoDB e query federate non sono ancora supportati. Un piano che mescola backend viene rifiutato con `federation_not_supported`.
+
+Ogni esecuzione crea un `QueryRun` di audit con piano normalizzato redatto, fingerprint, backend, source/versioni coinvolte, stato e metriche. Le righe del risultato, il SQL completo, le credenziali e i valori dei filtri non vengono persistiti. Timeout, limite predefinito e massimo sono configurati con `QUERY_TIMEOUT_SECONDS`, `MYSQL_QUERY_TIMEOUT_SECONDS`, `QUERY_DEFAULT_LIMIT` e `QUERY_MAX_LIMIT`. La UI temporanea `/ui/query` accetta JSON e offre Validate/Execute; `/ui/relationships` permette di elencare e dichiarare relazioni.
 
 ## Linguaggio naturale → piano logico
 
@@ -258,7 +274,7 @@ La configurazione è documentata in `.env.example`. Le aree principali sono:
 - MySQL e MongoDB (`MYSQL_*`, `MONGODB_*`);
 - storage (`CATALOG_DB_PATH`, `DATA_RAW_DIR`, `DATA_STAGING_DIR`, `DATA_NORMALIZED_DIR`);
 - ingestion e processing (`INGESTION_*`, `PARQUET_*`, `DUCKDB_*`);
-- query bounded (`QUERY_DEFAULT_LIMIT`, `QUERY_MAX_LIMIT`, `QUERY_TIMEOUT_SECONDS`);
+- query bounded (`QUERY_DEFAULT_LIMIT`, `QUERY_MAX_LIMIT`, `QUERY_TIMEOUT_SECONDS`, `MYSQL_QUERY_TIMEOUT_SECONDS`);
 - worker (`QUERYX_EXECUTION_MODE`, `WORKER_*`);
 - UI (`QUERYX_UI_*`);
 - enrichment semantico (`OLLAMA_*`, `QUERYX_ENRICHMENT_*`).

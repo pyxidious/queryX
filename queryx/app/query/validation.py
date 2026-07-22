@@ -15,6 +15,7 @@ from queryx.app.query.models import (
     LogicalQueryPlan,
     OutputField,
 )
+from queryx.app.query.mysql_catalog import MySQLCatalogAssetError, MySQLCatalogAssets
 from queryx.app.query.storage import QueryStorage
 
 
@@ -38,9 +39,12 @@ class ResolvedSource:
     alias: str
     asset_id: str
     asset_version_id: str
-    binding: StorageBinding
+    binding: StorageBinding | None
     relation: str
     fields: dict[str, dict[str, Any]]
+    backend: str = "duckdb"
+    schema: str | None = None
+    source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,12 +61,14 @@ class PlanValidator:
     def __init__(
         self, ingestion: IngestionStorage, processing: ProcessingStorage,
         query_storage: QueryStorage, default_limit: int, max_limit: int,
+        mysql_assets: MySQLCatalogAssets | None = None,
     ) -> None:
         self.ingestion = ingestion
         self.processing = processing
         self.query_storage = query_storage
         self.default_limit = default_limit
         self.max_limit = max_limit
+        self.mysql_assets = mysql_assets
 
     def validate(self, plan: LogicalQueryPlan) -> ValidatedPlan:
         aliases = [source.alias for source in plan.sources]
@@ -76,7 +82,18 @@ class PlanValidator:
             )
         normalized = plan.model_copy(update={"limit": limit})
         resolved = {source.alias: self._resolve_source(source) for source in normalized.sources}
-        relationships = self._validate_joins(normalized, resolved)
+        backends = {source.backend for source in resolved.values()}
+        if len(backends) > 1:
+            raise QueryValidationError(
+                "federation_not_supported",
+                "A logical query plan cannot mix execution backends",
+            )
+        backend = next(iter(backends))
+        if backend == "mysql":
+            self._validate_mysql_scope(normalized)
+            relationships: dict[str, AssetRelationship] = {}
+        else:
+            relationships = self._validate_joins(normalized, resolved)
         self._validate_filters(normalized, resolved)
         output_schema, output_names = self._validate_outputs(normalized, resolved)
         self._validate_group_by(normalized, resolved)
@@ -93,10 +110,35 @@ class PlanValidator:
         return ValidatedPlan(normalized, resolved, relationships, output_schema, fingerprint, [])
 
     def _resolve_source(self, source: Any) -> ResolvedSource:
+        if self.mysql_assets is not None:
+            try:
+                mysql_asset = self.mysql_assets.resolve(
+                    source.asset_id, source.asset_version_id
+                )
+            except MySQLCatalogAssetError as exc:
+                raise QueryValidationError(exc.code, exc.message) from exc
+            if mysql_asset is not None:
+                return ResolvedSource(
+                    alias=source.alias,
+                    asset_id=mysql_asset.asset_id,
+                    asset_version_id=mysql_asset.asset_version_id,
+                    binding=None,
+                    relation=mysql_asset.table,
+                    fields=mysql_asset.fields,
+                    backend="mysql",
+                    schema=mysql_asset.schema,
+                    source_id=mysql_asset.source_id,
+                )
         asset = self.ingestion.get_asset(source.asset_id)
         if asset is None:
             raise QueryValidationError(
                 "asset_not_found", "Query source asset does not exist",
+                details={"asset_id": source.asset_id},
+            )
+        if str(asset.asset_kind) == "mysql_table":
+            raise QueryValidationError(
+                "mysql_source_not_ready",
+                "The MySQL catalog source is not current and ready",
                 details={"asset_id": source.asset_id},
             )
         if source.asset_version_id:
@@ -134,6 +176,23 @@ class PlanValidator:
             "serving_binding_not_ready", "A ready DuckDB serving binding is required",
             details={"asset_id": source.asset_id},
         )
+
+    @staticmethod
+    def _validate_mysql_scope(plan: LogicalQueryPlan) -> None:
+        if len(plan.sources) != 1:
+            raise QueryValidationError(
+                "mysql_multi_source_not_supported",
+                "MySQL queries currently support exactly one source",
+            )
+        if plan.joins:
+            raise QueryValidationError(
+                "mysql_joins_not_supported", "MySQL joins are not supported yet"
+            )
+        if any(item.transform is not None for item in [*plan.projections, *plan.group_by]):
+            raise QueryValidationError(
+                "mysql_transform_not_supported",
+                "Transforms are not supported for MySQL queries yet",
+            )
 
     def _validate_joins(
         self, plan: LogicalQueryPlan, sources: dict[str, ResolvedSource]

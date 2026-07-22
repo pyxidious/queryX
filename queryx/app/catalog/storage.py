@@ -202,6 +202,23 @@ class CatalogStorage:
                     ),
                 )
 
+    def get_source(self, source_id: str) -> DataSource | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return DataSource(
+            id=row["id"],
+            name=row["name"],
+            database_type=row["database_type"],
+            host=row["host"],
+            port=int(row["port"]),
+            database=row["database_name"],
+            enabled=bool(row["enabled"]),
+        )
+
     def save_scan_run(self, run: ScanRun) -> ScanRun:
         with self._connect() as connection:
             cursor = connection.execute(

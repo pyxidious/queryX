@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     mysql_user: str = "queryx"
     mysql_password: str = "queryx"
     mysql_enabled: bool = True
+    mysql_query_timeout_seconds: float = Field(default=10, gt=0, le=300)
 
     mongodb_url: str = "mongodb://queryx:queryx@mongodb:27017/queryx_demo?authSource=admin"
     mongodb_source_id: str = "mongodb"

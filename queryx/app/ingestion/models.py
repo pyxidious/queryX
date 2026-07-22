@@ -21,6 +21,7 @@ class IngestionStatus(StrEnum):
 class AssetKind(StrEnum):
     FILE = "file"
     TABLE = "table"
+    MYSQL_TABLE = "mysql_table"
     COLLECTION = "collection"
     GRAPH = "graph"
 
@@ -31,6 +32,7 @@ class AssetVersionStatus(StrEnum):
     COMPLETED = "completed"
     PARTIAL = "partial"
     FAILED = "failed"
+    STALE = "stale"
 
 
 class BackendType(StrEnum):

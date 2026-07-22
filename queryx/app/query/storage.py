@@ -79,6 +79,19 @@ class QueryStorage:
                 "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
                 (12, _now().isoformat()),
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(query_runs)")
+            }
+            if "backend" not in columns:
+                connection.execute("ALTER TABLE query_runs ADD COLUMN backend TEXT")
+            if "source_ids_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE query_runs ADD COLUMN source_ids_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)",
+                (13, _now().isoformat()),
+            )
 
     def create_relationship(self, payload: AssetRelationshipCreate) -> AssetRelationship:
         now = _now()
@@ -137,22 +150,24 @@ class QueryStorage:
         return self.get_relationship(relationship_id)
 
     def create_query_run(
-        self, plan_fingerprint: str, normalized_plan: dict[str, Any], source_versions: list[str]
+        self, plan_fingerprint: str, normalized_plan: dict[str, Any], source_versions: list[str],
+        *, backend: str | None = None, source_ids: list[str] | None = None,
     ) -> QueryRun:
         now = _now()
         run = QueryRun(
             id=str(uuid4()), plan_fingerprint=plan_fingerprint,
             normalized_plan=normalized_plan, status=QueryRunStatus.RUNNING,
             source_asset_versions=source_versions, created_at=now,
+            backend=backend, source_ids=source_ids or [],
         )
         with self._connect() as connection:
             connection.execute(
                 """INSERT INTO query_runs (
                     id, plan_fingerprint, normalized_plan_json, status,
-                    source_asset_versions_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    source_asset_versions_json, backend, source_ids_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (run.id, plan_fingerprint, _dumps(normalized_plan), run.status,
-                 _dumps(source_versions), now.isoformat()),
+                 _dumps(source_versions), backend, _dumps(source_ids or []), now.isoformat()),
             )
         return run
 
@@ -181,6 +196,7 @@ class QueryStorage:
         values = dict(row)
         values["normalized_plan"] = json.loads(values.pop("normalized_plan_json"))
         values["source_asset_versions"] = json.loads(values.pop("source_asset_versions_json"))
+        values["source_ids"] = json.loads(values.pop("source_ids_json") or "[]")
         error_json = values.pop("error_json")
         values["error"] = json.loads(error_json) if error_json else None
         values["truncated"] = bool(values["truncated"])
