@@ -369,6 +369,23 @@ def test_sources_pages_render_offline(monkeypatch: object, tmp_path: Path) -> No
     assert client.get("/ui/sources/missing").status_code == 404
 
 
+def test_enabled_source_page_has_manual_scan_button_and_accessible_loader(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path).model_copy(update={"mysql_enabled": True})
+    page = _client(monkeypatch, settings).get(f"/ui/sources/{settings.mysql_source_id}")
+    assert page.status_code == 200
+    assert "Avvia nuova scansione" in page.text
+    assert f'action="/ui/sources/{settings.mysql_source_id}/scan"' in page.text
+    assert "data-source-scan-form" in page.text
+    assert 'id="source-scan-loading"' in page.text
+    assert 'aria-busy="false"' in page.text
+    script = _client(monkeypatch, settings).get("/ui/static/queryx-source.js")
+    assert "event.preventDefault()" in script.text
+    assert "button.disabled = active" in script.text
+    assert "if (busy) return" in script.text
+
+
 def test_json_api_contract_is_unchanged(monkeypatch: object, tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     ingestion = IngestionService(settings)
@@ -425,3 +442,11 @@ def test_query_result_ui_formats_only_float_cells(monkeypatch: object, tmp_path:
     assert "<td>100.0</td>" in response.text
     assert "<td>2026-07-22</td>" in response.text
     assert "<td>null</td>" in response.text
+
+
+def test_query_page_describes_duckdb_and_mysql_backends(
+    monkeypatch: object, tmp_path: Path
+) -> None:
+    page = _client(monkeypatch, _settings(tmp_path)).get("/ui/query")
+    assert page.status_code == 200
+    assert "DuckDB o MySQL" in page.text

@@ -93,6 +93,15 @@ class CatalogStorage:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS source_scan_locks (
+                    source_id TEXT PRIMARY KEY,
+                    token TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS source_scan_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     scan_run_id INTEGER NOT NULL,
@@ -218,6 +227,24 @@ class CatalogStorage:
             database=row["database_name"],
             enabled=bool(row["enabled"]),
         )
+
+    def acquire_source_scan(self, source_id: str, token: str) -> bool:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO source_scan_locks VALUES (?, ?, ?)",
+                    (source_id, token, datetime.now(timezone.utc).isoformat()),
+                )
+        except sqlite3.IntegrityError:
+            return False
+        return True
+
+    def release_source_scan(self, source_id: str, token: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM source_scan_locks WHERE source_id = ? AND token = ?",
+                (source_id, token),
+            )
 
     def save_scan_run(self, run: ScanRun) -> ScanRun:
         with self._connect() as connection:

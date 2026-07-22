@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import secrets
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from queryx.app.agent.orchestrator import ScanOrchestrator
+from queryx.app.agent.orchestrator import ScanAlreadyRunning, ScanOrchestrator
 from queryx.app.catalog.service import CatalogService
 from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.core.config import Settings
@@ -60,7 +61,9 @@ _STATIC_FILES = {
     "queryx.css": "text/css; charset=utf-8",
     "queryx-polling.js": "text/javascript; charset=utf-8",
     "queryx-query.js": "text/javascript; charset=utf-8",
+    "queryx-source.js": "text/javascript; charset=utf-8",
 }
+logger = logging.getLogger(__name__)
 
 
 def _settings(request: Request) -> Settings:
@@ -684,18 +687,82 @@ async def source_detail(request: Request, source_id: str) -> HTMLResponse:
     source = registry.get_source(source_id)
     if source is None:
         return _error(request, 404, "Sorgente non trovata", "La sorgente richiesta non esiste.")
-    catalog = CatalogService(CatalogStorage(settings.catalog_db_path))
-    history = catalog.source_history(source_id)[:10]
-    current = {item.source_id: item for item in catalog.current_catalog(registry.list_sources()).sources}
+    alert = None
+    if request.query_params.get("scan") == "completed":
+        run_id = request.query_params.get("run_id", "")
+        alert = AlertVM("success", f"Scansione completata. Run {run_id}.")
     return _render(
         request,
         "sources/detail.html",
-        {
-            "title": source.name,
-            "source": source_vm(source, current.get(source_id)),
-            "history": [scan_vm(item) for item in history],
-        },
+        _source_detail_context(settings, source, alert),
     )
+
+
+@router.post("/sources/{source_id}/scan", response_class=HTMLResponse)
+async def scan_source_ui(
+    request: Request,
+    source_id: str,
+    csrf_token: str | None = Form(default=None),
+) -> Response:
+    invalid = _require_csrf(request, csrf_token)
+    if invalid:
+        return invalid
+    settings = _settings(request)
+    source = SourceRegistry(settings).get_source(source_id)
+    if source is None:
+        return _error(request, 404, "Sorgente non trovata", "La sorgente richiesta non esiste.")
+    if not source.enabled:
+        return _render(
+            request,
+            "sources/detail.html",
+            _source_detail_context(
+                settings, source, AlertVM("danger", "La sorgente è disabilitata.")
+            ),
+            400,
+        )
+    try:
+        result = ScanOrchestrator.from_settings(settings).scan(source_id=source_id)
+    except ScanAlreadyRunning:
+        return _render(
+            request,
+            "sources/detail.html",
+            _source_detail_context(
+                settings, source, AlertVM("warning", "Una scansione è già in corso.")
+            ),
+            409,
+        )
+    except Exception:
+        logger.exception("Manual source scan failed")
+        return _render(
+            request,
+            "sources/detail.html",
+            _source_detail_context(
+                settings, source, AlertVM("danger", "Scansione non completata.")
+            ),
+            500,
+        )
+    return RedirectResponse(
+        f"/ui/sources/{source_id}?scan=completed&run_id={result['run_id']}",
+        status_code=303,
+    )
+
+
+def _source_detail_context(
+    settings: Settings, source: Any, alert: AlertVM | None = None
+) -> dict[str, Any]:
+    registry = SourceRegistry(settings)
+    catalog = CatalogService(CatalogStorage(settings.catalog_db_path))
+    history = catalog.source_history(source.id)[:10]
+    current = {
+        item.source_id: item
+        for item in catalog.current_catalog(registry.list_sources()).sources
+    }
+    return {
+        "title": source.name,
+        "source": source_vm(source, current.get(source.id)),
+        "history": [scan_vm(item) for item in history],
+        "scan_alert": alert,
+    }
 
 
 def _source_view_models(settings: Settings) -> list[Any]:

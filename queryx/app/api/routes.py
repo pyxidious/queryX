@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile, status
 from pydantic import ValidationError
 
-from queryx.app.agent.orchestrator import ScanOrchestrator
+from queryx.app.agent.orchestrator import ScanAlreadyRunning, ScanOrchestrator
 from queryx.app.catalog.models import EnrichmentRequest
 from queryx.app.catalog.service import CatalogService
 from queryx.app.catalog.storage import CatalogStorage
@@ -193,6 +193,16 @@ def scan_source(source_id: str) -> dict[str, Any]:
         )
     try:
         return _build_orchestrator().scan(source_id=source_id)
+    except ScanAlreadyRunning as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "scan_already_running",
+                    "message": "A scan is already running for this source",
+                }
+            },
+        ) from exc
     except Exception as exc:
         logger.exception("Source scan failed")
         raise HTTPException(

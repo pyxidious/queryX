@@ -14,6 +14,7 @@ from fastapi import UploadFile
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 
 from queryx.app.api import routes as api_routes
+from queryx.app.catalog.bootstrap import backfill_mysql_assets
 from queryx.app.catalog.models import ScanRun, SourceScanResult
 from queryx.app.catalog.service import CatalogService
 from queryx.app.catalog.storage import CatalogStorage
@@ -64,10 +65,9 @@ def _save_mysql_scan(
     )
 
 
-@pytest.fixture
-def mysql_query_env(tmp_path: Path) -> tuple[Settings, QueryService, dict[str, Any]]:
+def _mysql_settings(tmp_path: Path) -> Settings:
     data = tmp_path / "data"
-    settings = Settings(
+    return Settings(
         catalog_db_path=data / "catalog.sqlite3",
         data_raw_dir=data / "raw",
         data_staging_dir=data / "staging",
@@ -85,13 +85,21 @@ def mysql_query_env(tmp_path: Path) -> tuple[Settings, QueryService, dict[str, A
         query_max_limit=5,
         mysql_query_timeout_seconds=3,
     )
+
+
+@pytest.fixture
+def mysql_query_env(tmp_path: Path) -> tuple[Settings, QueryService, dict[str, Any]]:
+    settings = _mysql_settings(tmp_path)
     tables = [
                 {
                     "name": "orders",
                     "columns": [
                         {"name": "id", "type": "INTEGER", "nullable": False},
+                        {"name": "customer_id", "type": "INTEGER", "nullable": False},
                         {"name": "status", "type": "VARCHAR(40)", "nullable": False},
                         {"name": "total", "type": "DECIMAL(10, 2)", "nullable": False},
+                        {"name": "created_at", "type": "DATETIME", "nullable": False},
+                        {"name": "notes", "type": "TEXT", "nullable": True},
                         {"name": "select", "type": "VARCHAR(40)", "nullable": True},
                     ],
                     "primary_key": {"columns": ["id"]},
@@ -170,6 +178,75 @@ def test_mysql_scan_promotes_virtual_assets_and_assets_api(
     returned = {asset["name"]: asset for asset in response.json()["assets"]}
     assert returned["customers"]["asset_kind"] == "mysql_table"
     assert returned["orders"]["id"] == assets["orders"].asset_id
+
+
+def test_mysql_backfill_promotes_historical_completed_scan_idempotently(
+    tmp_path: Path,
+) -> None:
+    settings = _mysql_settings(tmp_path)
+    now = datetime.now(timezone.utc)
+    storage = CatalogStorage(settings.catalog_db_path)
+    storage.save_scan_run(
+        ScanRun(
+            started_at=now,
+            finished_at=now,
+            duration_ms=1,
+            status="completed",
+            sources_succeeded=1,
+            sources_failed=0,
+            results=[SourceScanResult(
+                source_id=settings.mysql_source_id,
+                database_type="mysql",
+                scan_status="completed",
+                started_at=now,
+                finished_at=now,
+                duration_ms=1,
+                fingerprint="historical",
+                declared_metadata={
+                    "tables": [{
+                        "name": "customers",
+                        "columns": [{"name": "id", "type": "INTEGER", "nullable": False}],
+                    }]
+                },
+            )],
+        )
+    )
+
+    assert IngestionStorage(settings.catalog_db_path).list_assets() == []
+    backfill_mysql_assets(settings)
+    first = IngestionStorage(settings.catalog_db_path).list_assets()
+    backfill_mysql_assets(settings)
+    second = IngestionStorage(settings.catalog_db_path).list_assets()
+    assert len(first) == len(second) == 1
+    assert first[0].id == second[0].id
+    assert [version.id for version in second[0].versions] == [first[0].versions[0].id]
+
+
+def test_mysql_backfill_ignores_failed_latest_scan(tmp_path: Path) -> None:
+    settings = _mysql_settings(tmp_path)
+    now = datetime.now(timezone.utc)
+    storage = CatalogStorage(settings.catalog_db_path)
+    storage.save_scan_run(
+        ScanRun(
+            started_at=now,
+            finished_at=now,
+            duration_ms=1,
+            status="failed",
+            sources_succeeded=0,
+            sources_failed=1,
+            results=[SourceScanResult(
+                source_id=settings.mysql_source_id,
+                database_type="mysql",
+                scan_status="failed",
+                started_at=now,
+                finished_at=now,
+                duration_ms=1,
+                error={"code": "source_unavailable"},
+            )],
+        )
+    )
+    backfill_mysql_assets(settings)
+    assert IngestionStorage(settings.catalog_db_path).list_assets() == []
 
 
 def test_mysql_promotion_is_idempotent_and_schema_change_creates_version(
@@ -461,6 +538,128 @@ class _NaturalClient:
     ) -> OllamaResponse:
         self.prompts.extend(message["content"] for message in messages)
         return OllamaResponse(self.plan, {})
+
+
+class _SequencedNaturalClient(_NaturalClient):
+    def __init__(self, *plans: dict[str, Any]) -> None:
+        super().__init__(plans[0])
+        self.plans = list(plans)
+        self.planning_calls: list[list[dict[str, str]]] = []
+
+    def chat_json(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any]
+    ) -> OllamaResponse:
+        self.planning_calls.append(messages)
+        return OllamaResponse(self.plans.pop(0), {})
+
+
+def _mysql_records_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "o", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "o", "field": field}
+            for field in ("id", "customer_id", "status", "total", "created_at")
+        ],
+        "filters": [
+            {"source_alias": "o", "field": "total", "operator": "gt", "value": 100}
+        ],
+    }
+
+
+def _add_duckdb_orders(settings: Settings) -> None:
+    stream = tempfile.SpooledTemporaryFile()
+    stream.write(b"order_id,order_status,order_purchase_timestamp\na1,paid,2024-01-01 10:00:00\n")
+    stream.seek(0)
+    uploaded = asyncio.run(
+        IngestionService(settings).ingest_upload(
+            UploadFile(stream, filename="file_orders.csv"), logical_name="orders"
+        )
+    )
+    ProcessingService(settings).prepare(
+        uploaded.asset_id or "", uploaded.asset_version_id or ""
+    )
+
+
+def test_natural_language_mysql_hint_excludes_same_named_duckdb_schema(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    _add_duckdb_orders(settings)
+    client = _SequencedNaturalClient(_mysql_records_plan(assets["orders"]))
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra gli ordini MySQL con totale maggiore di 100"
+        )
+    )
+
+    catalog = json.loads(client.planning_calls[0][1]["content"])["catalog"]
+    assert all(asset["backend"] == "mysql" for asset in catalog["assets"])
+    mysql_orders = [
+        asset for asset in catalog["assets"] if asset["logical_name"] == "orders"
+    ]
+    assert len(mysql_orders) == 1
+    block = mysql_orders[0]
+    assert block["backend"] == "mysql"
+    assert block["source_id"] == settings.mysql_source_id
+    assert block["source_name"] == settings.mysql_source_name
+    assert {field["name"] for field in block["fields"]} >= {
+        "id", "customer_id", "status", "total", "created_at", "notes"
+    }
+    assert "order_id" not in {field["name"] for field in block["fields"]}
+    assert [item.field for item in response.normalized_plan.projections] == [
+        "id", "customer_id", "status", "total", "created_at"
+    ]
+
+
+def test_natural_language_field_not_found_retry_receives_exact_mysql_schema(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    _add_duckdb_orders(settings)
+    invalid = _mysql_records_plan(assets["orders"])
+    invalid["projections"][0]["field"] = "order_id"
+    corrected = _mysql_records_plan(assets["orders"])
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra gli ordini MySQL con totale maggiore di 100"
+        )
+    )
+
+    assert response.normalized_plan.sources[0].asset_id == assets["orders"].asset_id
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "field_not_found"
+    assert feedback["selected_assets"][0]["asset_id"] == assets["orders"].asset_id
+    assert set(feedback["selected_assets"][0]["valid_fields"]) >= {
+        "id", "customer_id", "status", "total", "created_at", "notes"
+    }
+    assert "order_id" not in feedback["selected_assets"][0]["valid_fields"]
+    assert "same name" in feedback["instruction"]
+
+
+def test_natural_language_same_name_without_backend_keeps_asset_schemas_atomic(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    _add_duckdb_orders(settings)
+    client = _SequencedNaturalClient(_mysql_records_plan(assets["orders"]))
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Show orders with total greater than 100")
+    )
+
+    catalog = json.loads(client.planning_calls[0][1]["content"])["catalog"]
+    order_blocks = [
+        asset for asset in catalog["assets"] if asset["logical_name"] == "orders"
+    ]
+    assert {asset["backend"] for asset in order_blocks} == {"duckdb", "mysql"}
+    by_backend = {
+        asset["backend"]: {field["name"] for field in asset["fields"]}
+        for asset in order_blocks
+    }
+    assert "order_id" in by_backend["duckdb"] and "order_id" not in by_backend["mysql"]
+    assert "total" in by_backend["mysql"] and "total" not in by_backend["duckdb"]
+    assert response.normalized_plan.sources[0].asset_id == assets["orders"].asset_id
 
 
 def test_natural_language_context_includes_ready_mysql_asset_without_connection_details(

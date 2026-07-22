@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any
+from uuid import uuid4
 
 from queryx.app.catalog.fingerprint import schema_fingerprint
 from queryx.app.catalog.models import DataSource, RunStatus, ScanRun, SourceScanResult
@@ -16,6 +17,12 @@ from queryx.app.core.config import Settings
 from queryx.app.sources.registry import SourceRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class ScanAlreadyRunning(RuntimeError):
+    def __init__(self, source_id: str) -> None:
+        super().__init__(f"A scan is already running for source '{source_id}'")
+        self.source_id = source_id
 
 
 class ScanOrchestrator:
@@ -70,6 +77,24 @@ class ScanOrchestrator:
             for connector in self.connectors
             if source_id is None or self._connector_source_id(connector) == source_id
         ]
+        job_id = str(uuid4())
+        locked: list[str] = []
+        for connector in selected:
+            selected_source_id = self._connector_source_id(connector)
+            if not self.catalog.acquire_source_scan(selected_source_id, job_id):
+                for locked_source_id in locked:
+                    self.catalog.release_source_scan(locked_source_id, job_id)
+                raise ScanAlreadyRunning(selected_source_id)
+            locked.append(selected_source_id)
+        try:
+            return self._run_scan(selected, job_id)
+        finally:
+            for locked_source_id in locked:
+                self.catalog.release_source_scan(locked_source_id, job_id)
+
+    def _run_scan(
+        self, selected: list[MetadataConnector], job_id: str
+    ) -> dict[str, Any]:
         started_at = datetime.now(timezone.utc)
         started = monotonic()
         results = [self._scan_connector(connector) for connector in selected]
@@ -94,6 +119,8 @@ class ScanOrchestrator:
         saved = self.catalog.save_run(run)
         latest_snapshot = self.catalog.latest()
         return {
+            "job_id": job_id,
+            "run_id": saved.id,
             "summary": {
                 "snapshot_id": saved.id,
                 "created_at": saved.finished_at.isoformat(),

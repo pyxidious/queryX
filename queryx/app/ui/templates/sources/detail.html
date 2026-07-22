@@ -1,3 +1,38 @@
 {% extends "base.html" %}
 {% from "components/status_badge.html" import status_badge %}
-{% block content %}<div class="page-heading"><div><p class="eyebrow">External source</p><h1>{{ source.name }}</h1><p>{{ source.database_type }} · {{ status_badge(source.freshness) }}</p></div></div><section class="card"><h2>Stato</h2><p>Fingerprint <code>{{ source.fingerprint }}</code></p>{% if source.warning %}<div class="alert alert-warning">{{ source.warning }}</div>{% endif %}</section><section><h2>Ultime scansioni</h2>{% if history %}<div class="table-wrap"><table><thead><tr><th>Stato</th><th>Fine</th><th>Fingerprint</th><th>Warning</th></tr></thead><tbody>{% for item in history %}<tr><td>{{ status_badge(item.status) }}</td><td>{{ item.finished_at }}</td><td><code>{{ item.fingerprint or "—" }}</code></td><td>{{ item.warnings|join(", ") or "—" }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessuna scansione.</p>{% endif %}</section>{% endblock %}
+{% block content %}
+<div id="source-workspace" aria-busy="false">
+  <div id="source-scan-loading" class="query-loading" role="status" aria-live="polite" hidden>
+    <span class="query-spinner" aria-hidden="true"></span>
+    <span data-loading-message>Scansione in corso…</span>
+  </div>
+  <div id="source-scan-client-error" class="alert alert-danger" role="alert" hidden>Scansione non completata. Riprova.</div>
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">External source</p>
+      <h1>{{ source.name }}</h1>
+      <p>{{ source.database_type }} · {{ status_badge(source.freshness) }}</p>
+    </div>
+    {% if source.enabled %}
+    <form method="post" action="/ui/sources/{{ source.id }}/scan" data-source-scan-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="button" type="submit">Avvia nuova scansione</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if scan_alert %}<div class="alert alert-{{ scan_alert.level }}">{{ scan_alert.message }}</div>{% endif %}
+  <section class="card">
+    <h2>Stato</h2>
+    <p>Fingerprint <code>{{ source.fingerprint }}</code></p>
+    {% if source.warning %}<div class="alert alert-warning">{{ source.warning }}</div>{% endif %}
+  </section>
+  <section>
+    <h2>Ultime scansioni</h2>
+    {% if history %}
+    <div class="table-wrap"><table><thead><tr><th>Stato</th><th>Fine</th><th>Fingerprint</th><th>Warning</th></tr></thead><tbody>
+      {% for item in history %}<tr><td>{{ status_badge(item.status) }}</td><td>{{ item.finished_at }}</td><td><code>{{ item.fingerprint or "—" }}</code></td><td>{{ item.warnings|join(", ") or "—" }}</td></tr>{% endfor %}
+    </tbody></table></div>
+    {% else %}<p class="empty">Nessuna scansione.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

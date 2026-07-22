@@ -45,6 +45,21 @@ class CatalogService:
                 self.mysql_promoter.mark_source_not_current(result.source_id)
         return saved
 
+    def backfill_mysql_assets(self, sources: list[DataSource]) -> None:
+        for source in sources:
+            if source.database_type != "mysql" or not source.enabled:
+                continue
+            latest = self.storage.get_latest_source_result(source.id)
+            if latest is None or latest.scan_status != "completed":
+                continue
+            self.mysql_promoter.promote(latest, source.database)
+
+    def acquire_source_scan(self, source_id: str, token: str) -> bool:
+        return self.storage.acquire_source_scan(source_id, token)
+
+    def release_source_scan(self, source_id: str, token: str) -> None:
+        self.storage.release_source_scan(source_id, token)
+
     def latest_run(self) -> ScanRun | None:
         return self.storage.get_latest_scan_run()
 

@@ -29,6 +29,7 @@ from queryx.app.query.models import (
 from queryx.app.query.service import QueryService
 from queryx.app.query.storage import QueryStorage
 from queryx.app.query.validation import QueryValidationError
+from queryx.app.sources.registry import SourceRegistry
 
 
 _MAX_CONTEXT_ASSETS = 12
@@ -42,8 +43,12 @@ _SYSTEM_PROMPT = """You translate a user question into the supplied LogicalQuery
 Return the LogicalQueryPlan object directly, without wrappers, markdown, commentary or additional top-level keys.
 Use only listed asset_id, asset_version_id, fields, transforms, operators and relationship_id values.
 Never invent assets, fields, functions or relationships.
+Treat every catalog asset object as an atomic source block identified by its asset_id and backend.
+After choosing a source, use only the fields listed for that source. Never combine schemas from assets with the same logical name.
+If the question explicitly names MySQL, choose only an asset whose backend is mysql.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
+For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
 An aggregation is already an output column and must not be duplicated in projections.
 Aggregation aliases may be referenced by order_by, but must never be used as source_alias in projections.
 Every order_by field must exactly match an existing projection output name or aggregation alias.
@@ -56,6 +61,7 @@ Return only one JSON object matching the supplied schema, without markdown or ad
 Use classification answerable when the requested result is defined and computable from the listed fields and active relationships.
 Use ambiguous when essential intent is unclear, and provide one concise clarification_question.
 Use unanswerable when required data or metrics are absent, and explain the missing data briefly in reason.
+If assets share a logical name across backends and the question identifies neither a backend nor fields that select one unambiguously, classify it as ambiguous.
 Do not invent data, perform calculations, or include hidden analysis.
 Exact example:
 Input: "Quali sono i clienti migliori?"
@@ -173,6 +179,24 @@ class NaturalLanguageQueryService:
                                 {"source_alias": "o", "field": "order_status"}
                             ],
                         },
+                        "mysql_record_display_example": {
+                            "question": "Mostra gli ordini MySQL con totale maggiore di 100",
+                            "rule": "Use this shape only when the selected MySQL asset lists these exact fields.",
+                            "projections": [
+                                {"source_alias": "o", "field": field}
+                                for field in (
+                                    "id", "customer_id", "status", "total", "created_at"
+                                )
+                            ],
+                            "filters": [
+                                {
+                                    "source_alias": "o",
+                                    "field": "total",
+                                    "operator": "gt",
+                                    "value": 100,
+                                }
+                            ],
+                        },
                         "correct_multi_asset_revenue_example": {
                             "sources": [
                                 {
@@ -234,7 +258,7 @@ class NaturalLanguageQueryService:
             if retry_used:
                 raise self._invalid_plan_error(exc, candidate) from exc
             candidate = self._unwrap_logical_query_plan(
-                self._retry_invalid_plan(messages, candidate, exc.code)
+                self._retry_invalid_plan(messages, candidate, exc.code, context)
             )
             if candidate.get("error") == "ambiguous_question":
                 raise NaturalLanguageQueryError(
@@ -455,20 +479,45 @@ class NaturalLanguageQueryService:
         messages: list[dict[str, str]],
         candidate: dict[str, Any],
         validation_code: str,
+        context: dict[str, Any],
     ) -> dict[str, Any]:
+        selected_ids = {
+            source.get("asset_id")
+            for source in candidate.get("sources", [])
+            if isinstance(source, dict) and isinstance(source.get("asset_id"), str)
+        }
+        selected_assets = [
+            asset for asset in context["assets"] if asset["asset_id"] in selected_ids
+        ]
+        instruction = (
+            "Correct only the LogicalQueryPlan: remove unnecessary assets, joins, "
+            "and metrics; correct output aliases and join order; then return only "
+            "the corrected plan object."
+        )
+        if validation_code == "field_not_found":
+            instruction = (
+                "Regenerate only the LogicalQueryPlan using the selected asset and only "
+                "its exact valid_fields. Do not copy fields from an asset with the same "
+                "name, and return only the corrected plan object."
+            )
         retry_messages = [
             *messages,
             {
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "instruction": (
-                            "Correct only the LogicalQueryPlan: remove unnecessary assets, joins, "
-                            "and metrics; correct output aliases and join order; then return only "
-                            "the corrected plan object."
-                        ),
+                        "instruction": instruction,
                         "previous_plan": candidate,
                         "validation_code": validation_code,
+                        "selected_assets": [
+                            {
+                                "asset_id": asset["asset_id"],
+                                "asset_version_id": asset["asset_version_id"],
+                                "backend": asset["backend"],
+                                "valid_fields": [field["name"] for field in asset["fields"]],
+                            }
+                            for asset in selected_assets
+                        ],
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -562,7 +611,10 @@ class NaturalLanguageQueryService:
                     {
                         "asset_id": asset.id,
                         "asset_version_id": version.id,
-                        "name": asset.name,
+                        "logical_name": asset.name,
+                        "backend": "duckdb",
+                        "source_id": "manual_upload",
+                        "source_name": "Local dataset upload",
                         "fields": [
                             {
                                 "name": str(field.get("name")),
@@ -576,12 +628,15 @@ class NaturalLanguageQueryService:
                 )
                 break
         for asset in self.query_service.mysql_catalog.list_ready_assets():
+            source = SourceRegistry(self.settings).get_source(asset.source_id)
             candidates.append(
                 {
                     "asset_id": asset.asset_id,
                     "asset_version_id": asset.asset_version_id,
-                    "name": asset.name,
+                    "logical_name": asset.name,
                     "backend": "mysql",
+                    "source_id": asset.source_id,
+                    "source_name": source.name if source is not None else asset.source_id,
                     "fields": [
                         {
                             "name": field["name"],
@@ -592,6 +647,8 @@ class NaturalLanguageQueryService:
                     ],
                 }
             )
+        if re.search(r"\bmysql\b", question, re.IGNORECASE):
+            candidates = [asset for asset in candidates if asset["backend"] == "mysql"]
         active_relationships = [
             relationship for relationship in self.storage.list_relationships(False)
         ]
@@ -601,7 +658,7 @@ class NaturalLanguageQueryService:
         scores: dict[str, int] = {}
         for asset in candidates:
             searchable = " ".join(
-                [asset["name"], *(field["name"] for field in asset["fields"])]
+                [asset["logical_name"], *(field["name"] for field in asset["fields"])]
             ).casefold()
             scores[asset["asset_id"]] = sum(token in searchable for token in tokens)
         matched = {asset_id for asset_id, score in scores.items() if score > 0}
@@ -610,7 +667,7 @@ class NaturalLanguageQueryService:
                 if relationship.left_asset_id in matched or relationship.right_asset_id in matched:
                     matched.update({relationship.left_asset_id, relationship.right_asset_id})
             candidates = [asset for asset in candidates if asset["asset_id"] in matched]
-        candidates.sort(key=lambda asset: (-scores.get(asset["asset_id"], 0), asset["name"], asset["asset_id"]))
+        candidates.sort(key=lambda asset: (-scores.get(asset["asset_id"], 0), asset["logical_name"], asset["asset_id"]))
         selected = candidates[:_MAX_CONTEXT_ASSETS]
         selected_ids = {asset["asset_id"] for asset in selected}
         relationships = [

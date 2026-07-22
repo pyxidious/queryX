@@ -2,7 +2,7 @@
 {% block content %}
 <div id="query-workspace" aria-busy="false">
 <div id="query-loading" class="query-loading" role="status" aria-live="polite" hidden><span class="query-spinner" aria-hidden="true"></span><span data-loading-message>Operazione in corso…</span></div>
-<div class="page-heading"><div><p class="eyebrow">Strumento tecnico</p><h1>Logical Query Plan</h1><p class="muted">Inserisci esclusivamente un piano JSON. QueryX compila internamente una SELECT DuckDB bounded; SQL e path non sono accettati.</p></div></div>
+<div class="page-heading"><div><p class="eyebrow">Strumento tecnico</p><h1>Logical Query Plan</h1><p class="muted">Inserisci esclusivamente un piano JSON. QueryX compila internamente una SELECT bounded per DuckDB o MySQL; SQL e path non sono accettati.</p></div></div>
 {% if error %}<div class="alert alert-danger"><strong>{{ error.code }}</strong>: {{ error.message }}{% if error.issues %}<ul>{% for issue in error.issues %}<li><code>{{ issue.path }}</code>: {{ issue.message }}</li>{% endfor %}</ul>{% endif %}</div>{% endif %}
 {% if explanation_warning %}<div class="alert alert-warning"><strong>{{ explanation_warning.code }}</strong>: {{ explanation_warning.message }}</div>{% endif %}
 {% if classification == "ambiguous" %}<section class="card"><h2>Chiarimento necessario</h2><p>{{ clarification_question }}</p>{% if reason %}<p class="muted">{{ reason }}</p>{% endif %}</section>{% endif %}

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from queryx.app.agent.orchestrator import ScanOrchestrator
+import pytest
+
+from queryx.app.agent.orchestrator import ScanAlreadyRunning, ScanOrchestrator
 from queryx.app.catalog.models import DataSource, SourceMetadata
 from queryx.app.catalog.service import CatalogService
 from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.connectors.base import ConnectorError, MetadataConnector
+from queryx.app.ingestion.storage import IngestionStorage
 
 
 class _OkConnector(MetadataConnector):
@@ -86,3 +89,30 @@ def test_history_keeps_multiple_scans_in_descending_order(tmp_path: Path) -> Non
     assert history[0].scan_run_id is not None
     assert history[1].scan_run_id is not None
     assert history[0].scan_run_id > history[1].scan_run_id
+
+
+def test_completed_mysql_scan_promotes_asset_and_concurrent_scan_is_rejected(
+    tmp_path: Path,
+) -> None:
+    storage = CatalogStorage(tmp_path / "catalog.sqlite3")
+    catalog = CatalogService(storage)
+    source = DataSource(
+        id="mysql", name="MySQL", database_type="mysql", host="x",
+        port=3306, database="db", enabled=True,
+    )
+    catalog.upsert_sources([source])
+    orchestrator = ScanOrchestrator([_OkConnector("mysql")], catalog, [source])
+
+    result = orchestrator.scan("mysql")
+    assets = IngestionStorage(storage.db_path).list_assets()
+    assert result["run_id"] is not None
+    assert [(asset.name, str(asset.asset_kind)) for asset in assets] == [
+        ("customers", "mysql_table")
+    ]
+
+    assert catalog.acquire_source_scan("mysql", "other-job") is True
+    try:
+        with pytest.raises(ScanAlreadyRunning):
+            orchestrator.scan("mysql")
+    finally:
+        catalog.release_source_scan("mysql", "other-job")
