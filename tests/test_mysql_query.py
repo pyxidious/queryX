@@ -320,6 +320,25 @@ def test_mysql_single_source_validation_projection_and_limits(
     assert captured.value.code == "query_limit_exceeded"
 
 
+def test_mysql_rejects_undeclared_source_alias(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mysql_query_env
+    payload = _mysql_plan(assets)
+    payload["filters"] = [{
+        "source_alias": "orders",
+        "field": "status",
+        "operator": "eq",
+        "value": "paid",
+    }]
+
+    with pytest.raises(QueryValidationError) as captured:
+        service.validate(payload)
+
+    assert captured.value.code == "source_alias_not_found"
+    assert captured.value.details["location"] == "filter"
+
+
 def test_mysql_compiler_quotes_and_parameterizes_filters_and_aggregation(
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:

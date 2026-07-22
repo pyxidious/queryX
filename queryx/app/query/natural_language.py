@@ -50,11 +50,16 @@ If the question explicitly names MySQL, choose only an asset whose backend is my
 If the question explicitly names MongoDB, choose only an asset whose backend is mongodb.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
+For MongoDB profiles, use preferences.newsletter for newsletter conditions when that exact field is listed; never shorten it to newsletter.
+"newsletter attiva" or "newsletter abilitata" means exactly one eq true filter; "newsletter disattiva" or "newsletter non attiva" means exactly one eq false filter. Do not add is_not_null to a boolean comparison.
+For a count request, output only the requested count aggregation: do not add row projections, filters, group_by or order_by unless explicitly requested.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
 Treat "mostra", "elenca", "visualizza" and "dammi gli ordini" as row-returning intent: use projections and filters, with no aggregation or group_by unless the question explicitly requests an aggregate.
 Treat "quanti", "conta" and "numero di" as count intent. Never turn a row-returning request into a count.
 When the user explicitly lists fields, project exactly those fields and do not add filters, aggregations or categories that were not requested.
+For row-returning requests, leave order_by empty unless the user explicitly asks for ordering.
+Every source_alias in projections, filters, aggregations, group_by and joins must exactly match an alias declared in sources.
 Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
 An explicit categorical condition such as "stato paid" is a filter on the matching field, not a request to group by every category. For a filtered count, do not project or group by that field unless explicitly requested.
 An aggregation is already an output column and must not be duplicated in projections.
@@ -446,7 +451,11 @@ class NaturalLanguageQueryService:
         self, question: str, result: Any
     ) -> tuple[str | None, NaturalLanguageWarning | None]:
         if result.row_count == 0:
-            return "La query non ha restituito risultati.", None
+            return (
+                "The query returned no results."
+                if self._is_english_question(question)
+                else "La query non ha restituito risultati."
+            ), None
         serialized = result.model_dump(mode="json")
         payload = {
             "question": question,
@@ -463,7 +472,7 @@ class NaturalLanguageQueryService:
                     "exclusively on the supplied result values. Do not perform or request new "
                     "calculations. Do not include reasoning or hidden analysis. If truncated is "
                     "true, clearly state that the displayed result is truncated. Return only "
-                    "the answer text."
+                    "the answer text in the same language as the user's question."
                 ),
             },
             {
@@ -485,8 +494,21 @@ class NaturalLanguageQueryService:
             )
         answer = self._limit_sentences(raw_answer, 2 if result.truncated else 3)
         if result.truncated:
-            answer = f"{answer} Il risultato mostrato è troncato."
+            truncation_notice = (
+                "The displayed result is truncated."
+                if self._is_english_question(question)
+                else "Il risultato mostrato è troncato."
+            )
+            answer = f"{answer} {truncation_notice}"
         return answer, None
+
+    @staticmethod
+    def _is_english_question(question: str) -> bool:
+        return bool(re.search(
+            r"\b(show|list|display|how\s+many|count|number\s+of|which|what)\b",
+            question,
+            re.IGNORECASE,
+        ))
 
     @staticmethod
     def _limit_sentences(answer: str, maximum: int) -> str:
@@ -528,7 +550,10 @@ class NaturalLanguageQueryService:
             intent = requirements.get("intent")
             required_filter = requirements.get("filter")
             if required_filter is not None:
-                matched_filter = any(
+                matching_filters = [
+                    item
+                    for item in candidate.get("filters", [])
+                    if (
                     isinstance(item, dict)
                     and item.get("source_alias") == alias
                     and item.get("field") == required_filter["field"]
@@ -536,10 +561,15 @@ class NaturalLanguageQueryService:
                     and self._semantic_values_equal(
                         item.get("value"), required_filter["value"]
                     )
-                    for item in candidate.get("filters", [])
-                )
-                if not matched_filter:
+                    )
+                ]
+                if not matching_filters:
                     raise _PlanningSemanticError("missing_explicit_filter")
+                if requirements.get("exact_filter") and (
+                    len(matching_filters) != 1
+                    or len(candidate.get("filters", [])) != 1
+                ):
+                    raise _PlanningSemanticError("mongodb_filter_mismatch")
                 category_field = required_filter["field"]
                 if intent == "count" and any(
                     isinstance(item, dict) and item.get("field") == category_field
@@ -552,17 +582,34 @@ class NaturalLanguageQueryService:
             if intent == "row_returning":
                 if candidate.get("aggregations") or candidate.get("group_by"):
                     raise _PlanningSemanticError("row_intent_mismatch")
-                expected_filters = 1 if required_filter is not None else 0
-                if len(candidate.get("filters", [])) != expected_filters:
-                    raise _PlanningSemanticError("row_filter_mismatch")
-                required_fields = requirements.get("projections", [])
-                projected_fields = [
-                    item.get("field")
-                    for item in candidate.get("projections", [])
-                    if isinstance(item, dict) and item.get("source_alias") == alias
-                ]
-                if projected_fields != required_fields:
-                    raise _PlanningSemanticError("row_projection_mismatch")
+                if candidate.get("order_by") and not requirements.get("ordering_requested"):
+                    raise _PlanningSemanticError("row_order_by_mismatch")
+                if requirements.get("strict_row_shape"):
+                    expected_filters = 1 if required_filter is not None else 0
+                    if len(candidate.get("filters", [])) != expected_filters:
+                        raise _PlanningSemanticError("row_filter_mismatch")
+                    required_fields = requirements.get("projections", [])
+                    projected_fields = [
+                        item.get("field")
+                        for item in candidate.get("projections", [])
+                        if isinstance(item, dict) and item.get("source_alias") == alias
+                    ]
+                    if projected_fields != required_fields:
+                        raise _PlanningSemanticError("row_projection_mismatch")
+                if requirements.get("strict_mongodb_row_shape"):
+                    projected_fields = [
+                        item.get("field")
+                        for item in candidate.get("projections", [])
+                        if isinstance(item, dict) and item.get("source_alias") == alias
+                    ]
+                    required_fields = set(requirements["required_projections"])
+                    allowed_fields = set(requirements["allowed_projections"])
+                    if (
+                        not required_fields.issubset(projected_fields)
+                        or any(field not in allowed_fields for field in projected_fields)
+                        or len(projected_fields) != len(set(projected_fields))
+                    ):
+                        raise _PlanningSemanticError("mongodb_row_projection_mismatch")
             aggregation = requirements.get("aggregation")
             if aggregation is not None:
                 matched = any(
@@ -578,6 +625,22 @@ class NaturalLanguageQueryService:
                 )
                 if not matched or candidate.get("group_by"):
                     raise _PlanningSemanticError("metric_aggregation_mismatch")
+            if requirements.get("strict_mongodb_count_shape"):
+                aggregations = candidate.get("aggregations", [])
+                expected = requirements["aggregation"]
+                if (
+                    len(aggregations) != 1
+                    or not isinstance(aggregations[0], dict)
+                    or aggregations[0].get("function") != "count"
+                    or aggregations[0].get("source_alias") != alias
+                    or aggregations[0].get("field") != expected["field"]
+                    or aggregations[0].get("alias") != expected["alias"]
+                    or candidate.get("projections")
+                    or candidate.get("filters")
+                    or candidate.get("group_by")
+                    or candidate.get("order_by")
+                ):
+                    raise _PlanningSemanticError("mongodb_count_intent_mismatch")
         return validation
 
     @staticmethod
@@ -630,7 +693,16 @@ class NaturalLanguageQueryService:
             instruction = (
                 "Regenerate only the LogicalQueryPlan using the selected asset and only "
                 "its exact valid_fields. Do not copy fields from an asset with the same "
-                "name, and return only the corrected plan object."
+                "name. Honor semantic_requirements, remove unrequested fields and filters, "
+                "and return only the corrected plan object."
+            )
+        elif validation_code == "source_alias_not_found":
+            instruction = (
+                "Correct only alias consistency in the LogicalQueryPlan. Every reference must "
+                "exactly match a source alias. If one source declaration is an obvious typo and "
+                "all references consistently use the intended alias, correct that declaration; "
+                "otherwise use an exact declared_source_alias. Preserve the original intent, "
+                "fields, filters, aggregations and ordering. Return only the corrected plan object."
             )
         semantic_requirements = self._semantic_requirements(question, context)
         if (
@@ -640,6 +712,7 @@ class NaturalLanguageQueryService:
                 "row_intent_mismatch",
                 "row_filter_mismatch",
                 "row_projection_mismatch",
+                "row_order_by_mismatch",
             }
         ):
             instruction = (
@@ -666,12 +739,24 @@ class NaturalLanguageQueryService:
         elif validation_code == "semantic_asset_mismatch":
             instruction = (
                 "Correct only the LogicalQueryPlan using the catalog-scoped required asset, "
-                "then return only the corrected plan object."
+                "rebuild its shape from semantic_requirements without fragments from the previous "
+                "asset, then return only the corrected plan object."
             )
         elif validation_code == "catalog_resolved_question":
             instruction = (
                 "The catalog-scoped semantic requirements resolve the question. Generate only "
                 "the corresponding LogicalQueryPlan and return only the plan object."
+            )
+        elif validation_code in {
+            "mongodb_filter_mismatch",
+            "mongodb_row_projection_mismatch",
+            "mongodb_count_intent_mismatch",
+        }:
+            instruction = (
+                "Regenerate only the MongoDB LogicalQueryPlan from a clean state using the exact "
+                "catalog-scoped semantic_requirements. Remove every unrequested projection, "
+                "filter, aggregation, group_by and order_by, and do not reuse fragments from "
+                "another request. Return only the corrected plan object."
             )
         retry_messages = [
             *messages,
@@ -683,6 +768,22 @@ class NaturalLanguageQueryService:
                         "previous_plan": candidate,
                         "validation_code": validation_code,
                         "query_intent": semantic_requirements.get("intent"),
+                        "declared_source_aliases": [
+                            source["alias"]
+                            for source in candidate.get("sources", [])
+                            if isinstance(source, dict)
+                            and isinstance(source.get("alias"), str)
+                        ],
+                        "referenced_source_aliases": sorted({
+                            alias
+                            for section in (
+                                "projections", "filters", "aggregations", "group_by"
+                            )
+                            for item in candidate.get(section, [])
+                            if isinstance(item, dict)
+                            for alias in [item.get("source_alias")]
+                            if isinstance(alias, str)
+                        }),
                         "semantic_requirements": semantic_requirements,
                         "selected_assets": [
                             {
@@ -902,6 +1003,22 @@ class NaturalLanguageQueryService:
     def _semantic_field_hints(asset: dict[str, Any]) -> list[dict[str, Any]]:
         fields = {field["name"].casefold() for field in asset["fields"]}
         if (
+            asset.get("backend") == "mongodb"
+            and asset["logical_name"].casefold() == "profiles"
+            and "preferences.newsletter" in fields
+        ):
+            return [{
+                "terms": [
+                    "newsletter",
+                    "newsletter attiva",
+                    "newsletter abilitata",
+                    "newsletter disattiva",
+                    "newsletter non attiva",
+                ],
+                "field": "preferences.newsletter",
+                "reason": "the newsletter flag is nested in the observed profiles schema",
+            }]
+        if (
             asset["logical_name"].casefold() == "orders"
             and "status" in fields
             and not fields.intersection({"state", "customer_state", "shipping_state"})
@@ -915,8 +1032,13 @@ class NaturalLanguageQueryService:
 
     @staticmethod
     def _semantic_entity_terms(asset: dict[str, Any]) -> list[str]:
-        if asset["logical_name"].casefold() == "orders":
+        logical_name = asset["logical_name"].casefold()
+        if logical_name == "orders":
             return ["ordine", "ordini"]
+        if asset.get("backend") == "mongodb" and logical_name == "profiles":
+            return ["profilo", "profili", "profile", "profiles"]
+        if asset.get("backend") == "mongodb" and logical_name == "events":
+            return ["evento", "eventi", "event", "events"]
         return []
 
     @staticmethod
@@ -961,13 +1083,13 @@ class NaturalLanguageQueryService:
             return {}
         asset = assets[0]
         requirements: dict[str, Any] = {"asset_id": asset["asset_id"]}
-        intent = (
-            NaturalLanguageQueryService._question_intent(normalized)
-            if asset.get("backend") == "mysql"
-            else None
-        )
+        intent = NaturalLanguageQueryService._question_intent(normalized)
         if intent is not None:
             requirements["intent"] = intent
+        if intent == "row_returning":
+            requirements["ordering_requested"] = (
+                NaturalLanguageQueryService._ordering_requested(normalized)
+            )
         for hint in asset.get("semantic_metric_hints", []):
             if any(term in normalized for term in hint["terms"]):
                 requirements["aggregation"] = {
@@ -996,7 +1118,8 @@ class NaturalLanguageQueryService:
                         "field": "id",
                         "alias": "orders",
                     }
-        if intent == "row_returning":
+        if intent == "row_returning" and asset.get("backend") == "mysql":
+            requirements["strict_row_shape"] = True
             numeric_filter = NaturalLanguageQueryService._numeric_filter(
                 normalized, asset
             )
@@ -1008,18 +1131,83 @@ class NaturalLanguageQueryService:
                 )
                 or NaturalLanguageQueryService._default_row_fields(asset)
             )
+        if asset.get("backend") == "mongodb" and intent == "count":
+            fields = {str(field["name"]) for field in asset["fields"]}
+            if "_id" in fields:
+                requirements["aggregation"] = {
+                    "function": "count",
+                    "field": "_id",
+                    "alias": asset["logical_name"],
+                }
+                requirements["strict_mongodb_count_shape"] = True
+        if (
+            asset.get("backend") == "mongodb"
+            and asset["logical_name"].casefold() == "profiles"
+            and intent == "row_returning"
+        ):
+            newsletter_value = NaturalLanguageQueryService._newsletter_value(
+                normalized
+            )
+            fields = {str(field["name"]) for field in asset["fields"]}
+            if newsletter_value is not None and "preferences.newsletter" in fields:
+                requirements["filter"] = {
+                    "field": "preferences.newsletter",
+                    "operator": "eq",
+                    "value": newsletter_value,
+                }
+                requirements["exact_filter"] = True
+                requirements["strict_mongodb_row_shape"] = True
+                requirements["required_projections"] = [
+                    field
+                    for field in ("email", "preferences.newsletter")
+                    if field in fields
+                ]
+                requirements["allowed_projections"] = [
+                    field
+                    for field in (
+                        "email",
+                        "preferences.newsletter",
+                        "preferences.language",
+                    )
+                    if field in fields
+                ]
         return requirements
 
     @staticmethod
+    def _newsletter_value(normalized_question: str) -> bool | None:
+        if re.search(
+            r"\bnewsletter\s+(?:disattiva|non\s+attiva|disabled|inactive)\b",
+            normalized_question,
+        ):
+            return False
+        if re.search(
+            r"\bnewsletter\s+(?:attiva|abilitata|active|enabled)\b",
+            normalized_question,
+        ):
+            return True
+        return None
+
+    @staticmethod
     def _question_intent(normalized_question: str) -> str | None:
-        if re.search(r"\b(quanti|conta|numero\s+di)\b", normalized_question):
+        if re.search(
+            r"\b(quanti|conta|numero\s+di|how\s+many|count|number\s+of)\b",
+            normalized_question,
+        ):
             return "count"
         if re.search(
-            r"\b(mostra|elenca|visualizza|dammi\s+gli\s+ordini)\b",
+            r"\b(mostra|elenca|visualizza|dammi\s+gli\s+ordini|show|list|display)\b",
             normalized_question,
         ):
             return "row_returning"
         return None
+
+    @staticmethod
+    def _ordering_requested(normalized_question: str) -> bool:
+        return bool(re.search(
+            r"\b(ordina|ordinati|ordinate|ordine\s+(?:crescente|decrescente)|"
+            r"crescente|decrescente|pi[uù]\s+recenti|meno\s+recenti)\b",
+            normalized_question,
+        ))
 
     @staticmethod
     def _explicit_projection_fields(
@@ -1247,4 +1435,55 @@ class NaturalLanguageQueryService:
                             "group_by": [],
                         },
                     })
+            if (
+                asset["backend"] == "mongodb"
+                and asset["logical_name"].casefold() == "profiles"
+                and {"_id", "email", "preferences.newsletter"}.issubset(fields)
+            ):
+                examples.extend([
+                    {
+                        "question": "Mostra i profili MongoDB con newsletter attiva",
+                        "intent": "row_returning",
+                        "plan": {
+                            "sources": [{
+                                "alias": "profiles",
+                                "asset_id": asset["asset_id"],
+                                "asset_version_id": asset["asset_version_id"],
+                            }],
+                            "projections": [{
+                                "source_alias": "profiles", "field": field
+                            } for field in ("email", "preferences.newsletter")],
+                            "filters": [{
+                                "source_alias": "profiles",
+                                "field": "preferences.newsletter",
+                                "operator": "eq",
+                                "value": True,
+                            }],
+                            "aggregations": [],
+                            "group_by": [],
+                            "order_by": [],
+                        },
+                    },
+                    {
+                        "question": "Quanti profili ci sono nel database MongoDB?",
+                        "intent": "count",
+                        "plan": {
+                            "sources": [{
+                                "alias": "profiles",
+                                "asset_id": asset["asset_id"],
+                                "asset_version_id": asset["asset_version_id"],
+                            }],
+                            "projections": [],
+                            "filters": [],
+                            "aggregations": [{
+                                "function": "count",
+                                "source_alias": "profiles",
+                                "field": "_id",
+                                "alias": "profiles",
+                            }],
+                            "group_by": [],
+                            "order_by": [],
+                        },
+                    },
+                ])
         return examples

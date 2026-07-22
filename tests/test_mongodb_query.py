@@ -72,6 +72,52 @@ def _collections(*, changed: bool = False) -> tuple[list[dict[str, Any]], list[d
     return declared, inferred
 
 
+def _profiles_events_collections() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    schemas = {
+        "profiles": [
+            ("_id", "object_id"),
+            ("email", "str"),
+            ("preferences.language", "str"),
+            ("preferences.newsletter", "bool"),
+            ("roles", "array"),
+        ],
+        "events": [
+            ("_id", "object_id"),
+            ("created_at", "datetime"),
+            ("properties.amount", "float"),
+            ("properties.currency", "str"),
+            ("properties.device", "str"),
+            ("properties.path", "str"),
+            ("type", "str"),
+            ("user_id", "object_id"),
+            ("tags", "array"),
+            ("items", "array"),
+        ],
+    }
+    declared = [
+        {"name": name, "indexes": [{"name": "_id_", "keys": [["_id", 1]]}]}
+        for name in schemas
+    ]
+    inferred = [
+        {
+            "name": name,
+            "sample_size": 2,
+            "sample_scope": "limited_documents",
+            "fields": [
+                {
+                    "path": path,
+                    "types": [data_type],
+                    "documents_present": 2,
+                    "presence": 1.0,
+                }
+                for path, data_type in fields
+            ],
+        }
+        for name, fields in schemas.items()
+    ]
+    return declared, inferred
+
+
 def _save_scan(
     settings: Settings,
     declared: list[dict[str, Any]],
@@ -118,6 +164,21 @@ def mongodb_env(tmp_path: Path) -> tuple[Settings, QueryService, Any]:
     return settings, service, assets[0]
 
 
+@pytest.fixture
+def mongodb_profiles_env(
+    tmp_path: Path,
+) -> tuple[Settings, QueryService, dict[str, Any]]:
+    settings = _settings(tmp_path)
+    declared, inferred = _profiles_events_collections()
+    _save_scan(settings, declared, inferred)
+    service = QueryService(settings)
+    assets = {
+        asset.name: asset for asset in service.mongodb_catalog.list_ready_assets()
+    }
+    assert set(assets) == {"events", "profiles"}
+    return settings, service, assets
+
+
 def _plan(asset: Any, **updates: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "sources": [{"alias": "o", "asset_id": asset.asset_id}],
@@ -127,6 +188,62 @@ def _plan(asset: Any, **updates: Any) -> dict[str, Any]:
     }
     payload.update(updates)
     return payload
+
+
+def _newsletter_plan(asset: Any, value: bool) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "profiles", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "profiles", "field": "email"},
+            {
+                "source_alias": "profiles",
+                "field": "preferences.newsletter",
+            },
+            {
+                "source_alias": "profiles",
+                "field": "preferences.language",
+            },
+        ],
+        "filters": [{
+            "source_alias": "profiles",
+            "field": "preferences.newsletter",
+            "operator": "eq",
+            "value": value,
+        }],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+    }
+
+
+def _profiles_count_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "profiles", "asset_id": asset.asset_id}],
+        "projections": [],
+        "filters": [],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "profiles",
+            "field": "_id",
+            "alias": "profiles",
+        }],
+        "group_by": [],
+        "order_by": [],
+    }
+
+
+def _events_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "events", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "events", "field": "type"},
+            {"source_alias": "events", "field": "created_at"},
+        ],
+        "filters": [],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+    }
 
 
 def test_mongodb_collection_promotion_idempotence_schema_change_and_stale(
@@ -205,6 +322,87 @@ def test_mongodb_projection_filter_order_limit_and_nested_observation(
     with pytest.raises(QueryValidationError) as missing:
         service.validate(nested)
     assert missing.value.code == "field_not_found"
+
+
+def test_mongodb_declared_source_alias_is_used_exactly(
+    mongodb_env: tuple[Settings, QueryService, Any],
+) -> None:
+    _, service, asset = mongodb_env
+    payload = _plan(
+        asset,
+        sources=[{"alias": "profiles", "asset_id": asset.asset_id}],
+        projections=[{
+            "source_alias": "profiles", "field": "status", "alias": "status"
+        }],
+        filters=[],
+        order_by=[],
+    )
+
+    validated = service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    assert set(validated.sources) == {"profiles"}
+    assert service.mongodb_compiler.compile(validated).pipeline[0] == {
+        "$project": {"_id": 0, "status": "$status"}
+    }
+
+
+@pytest.mark.parametrize(
+    ("location", "expected_location"),
+    [
+        ("projection", "projection"),
+        ("filter", "filter"),
+        ("aggregation", "aggregation"),
+        ("group_by", "group_by"),
+        ("join", "join.right_alias"),
+    ],
+)
+def test_mongodb_rejects_unknown_source_alias_without_single_source_fallback(
+    mongodb_env: tuple[Settings, QueryService, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    expected_location: str,
+) -> None:
+    _, service, asset = mongodb_env
+    payload = _plan(asset, filters=[], order_by=[])
+    if location == "projection":
+        payload["projections"][0]["source_alias"] = "profiles"
+    elif location == "filter":
+        payload["filters"] = [{
+            "source_alias": "profiles",
+            "field": "status",
+            "operator": "eq",
+            "value": "paid",
+        }]
+    elif location == "aggregation":
+        payload["projections"] = []
+        payload["aggregations"] = [{
+            "function": "count",
+            "source_alias": "profiles",
+            "field": "_id",
+            "alias": "profiles",
+        }]
+    elif location == "group_by":
+        payload["group_by"] = [{"source_alias": "profiles", "field": "status"}]
+    else:
+        payload["joins"] = [{
+            "relationship_id": "unused",
+            "left_alias": "o",
+            "right_alias": "profiles",
+        }]
+    executed = False
+
+    def unexpected_execute(compiled: Any) -> Any:
+        nonlocal executed
+        executed = True
+        return (["status"], [], False, 1.0)
+
+    monkeypatch.setattr(service.mongodb_executor, "execute", unexpected_execute)
+    with pytest.raises(QueryValidationError) as captured:
+        service.execute(payload)
+
+    assert captured.value.code == "source_alias_not_found"
+    assert captured.value.details["source_alias"] == "profiles"
+    assert captured.value.details["location"] == expected_location
+    assert executed is False
 
 
 def test_mongodb_aggregation_group_by_count_distinct_and_not_in(
@@ -396,6 +594,33 @@ class _NaturalClient:
         return OllamaResponse(self.plan, {})
 
 
+class _SequencedNaturalClient(_NaturalClient):
+    def __init__(
+        self,
+        *plans: dict[str, Any],
+        explanation: str = "La query ha restituito il risultato richiesto.",
+    ) -> None:
+        super().__init__(plans[0])
+        self.plans = list(plans)
+        self.explanation = explanation
+        self.planning_calls: list[list[dict[str, str]]] = []
+        self.explanation_calls: list[list[dict[str, str]]] = []
+
+    def chat_text(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any] | None = None,
+    ) -> OllamaTextResponse:
+        if json_schema is None:
+            self.explanation_calls.append(messages)
+            return OllamaTextResponse(self.explanation, {})
+        return super().chat_text(messages, json_schema)
+
+    def chat_json(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any]
+    ) -> OllamaResponse:
+        self.planning_calls.append(messages)
+        return OllamaResponse(self.plans.pop(0), {})
+
+
 def test_natural_language_context_selects_only_mongodb_asset(
     mongodb_env: tuple[Settings, QueryService, Any],
 ) -> None:
@@ -417,3 +642,328 @@ def test_natural_language_context_selects_only_mongodb_asset(
     prompt = json.dumps(payload)
     assert settings.mongodb_url not in prompt
     assert settings.mongodb_database not in prompt
+
+
+def test_natural_language_retries_mongodb_source_alias_typo_once(
+    mongodb_env: tuple[Settings, QueryService, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, asset = mongodb_env
+    invalid = _plan(
+        asset,
+        sources=[{"alias": "profqiles", "asset_id": asset.asset_id}],
+        projections=[{
+            "source_alias": "profiles", "field": "status", "alias": "status"
+        }],
+        filters=[],
+        order_by=[],
+    )
+    corrected = _plan(
+        asset,
+        sources=[{"alias": "profiles", "asset_id": asset.asset_id}],
+        projections=[{
+            "source_alias": "profiles", "field": "status", "alias": "status"
+        }],
+        filters=[],
+        order_by=[],
+    )
+    client = _SequencedNaturalClient(invalid, corrected)
+    executions = 0
+
+    def execute(compiled: Any) -> Any:
+        nonlocal executions
+        executions += 1
+        return (["status"], [["active"]], False, 1.0)
+
+    monkeypatch.setattr(service.mongodb_executor, "execute", execute)
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Mostra gli ordini MongoDB", execute=True
+    ))
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.sources[0].alias == "profiles"
+    assert response.normalized_plan.projections[0].source_alias == "profiles"
+    assert executions == 1
+    assert len(client.planning_calls) == 2
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "source_alias_not_found"
+    assert feedback["declared_source_aliases"] == ["profqiles"]
+    assert feedback["referenced_source_aliases"] == ["profiles"]
+
+
+def test_natural_language_row_request_removes_unrequested_order_by(
+    mongodb_env: tuple[Settings, QueryService, Any],
+) -> None:
+    settings, _, asset = mongodb_env
+    invalid = _plan(asset, filters=[])
+    corrected = _plan(asset, filters=[], order_by=[])
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Mostra gli ordini MongoDB")
+    )
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.order_by == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "row_order_by_mismatch"
+
+
+def test_natural_language_mongodb_active_newsletter_uses_exact_nested_field(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    invalid = _newsletter_plan(assets["profiles"], True)
+    invalid["filters"] = [
+        {
+            "source_alias": "profiles",
+            "field": "newsletter",
+            "operator": "is_not_null",
+        },
+        {
+            "source_alias": "profiles",
+            "field": "newsletter",
+            "operator": "eq",
+            "value": True,
+        },
+    ]
+    corrected = _newsletter_plan(assets["profiles"], True)
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra i profili MongoDB con newsletter attiva"
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None and len(plan.filters) == 1
+    query_filter = plan.filters[0]
+    assert (
+        query_filter.field,
+        query_filter.operator.value,
+        query_filter.value,
+    ) == ("preferences.newsletter", "eq", True)
+    assert [item.field for item in plan.projections] == [
+        "email", "preferences.newsletter", "preferences.language"
+    ]
+    assert plan.aggregations == [] and plan.group_by == [] and plan.order_by == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "field_not_found"
+    assert "preferences.newsletter" in feedback["selected_assets"][0]["valid_fields"]
+
+
+def test_natural_language_mongodb_newsletter_filter_is_not_duplicated(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    invalid = _newsletter_plan(assets["profiles"], True)
+    invalid["filters"].insert(0, {
+        "source_alias": "profiles",
+        "field": "preferences.newsletter",
+        "operator": "is_not_null",
+    })
+    corrected = _newsletter_plan(assets["profiles"], True)
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra i profili MongoDB con newsletter abilitata"
+        )
+    )
+
+    assert response.normalized_plan is not None
+    assert len(response.normalized_plan.filters) == 1
+    assert response.normalized_plan.filters[0].operator.value == "eq"
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_filter_mismatch"
+
+
+def test_natural_language_mongodb_inactive_newsletter_maps_to_false(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(_newsletter_plan(assets["profiles"], False))
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra i profili MongoDB con newsletter disattiva"
+        )
+    )
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.filters[0].value is False
+    assert len(client.planning_calls) == 1
+
+
+def test_mongodb_unobserved_short_newsletter_field_is_rejected(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mongodb_profiles_env
+    invalid = _newsletter_plan(assets["profiles"], True)
+    invalid["filters"][0]["field"] = "newsletter"
+
+    with pytest.raises(QueryValidationError) as captured:
+        service.validate(invalid)
+
+    assert captured.value.code == "field_not_found"
+    assert captured.value.details["field"] == "newsletter"
+
+
+def test_natural_language_mongodb_profiles_count_discards_events_fragments(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    invalid = _events_plan(assets["events"])
+    invalid["filters"] = [
+        {"source_alias": "events", "field": "type", "operator": "eq", "value": "order"},
+        {
+            "source_alias": "events",
+            "field": "properties.device",
+            "operator": "eq",
+            "value": "mobile",
+        },
+    ]
+    invalid["order_by"] = [{"field": "created_at", "direction": "desc"}]
+    corrected = _profiles_count_plan(assets["profiles"])
+    client = _SequencedNaturalClient(invalid, corrected)
+    executions = 0
+
+    def execute(compiled: Any) -> Any:
+        nonlocal executions
+        executions += 1
+        return (["profiles"], [[2]], False, 1.0)
+
+    monkeypatch.setattr(service.mongodb_executor, "execute", execute)
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Quanti profili ci sono nel database MongoDB?", execute=True
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None and plan.sources[0].asset_id == assets["profiles"].asset_id
+    assert plan.projections == [] and plan.filters == []
+    assert plan.group_by == [] and plan.order_by == []
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "_id", "profiles")
+    ]
+    assert response.result is not None and response.result.rows == [[2]]
+    assert executions == 1
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "semantic_asset_mismatch"
+
+    catalog = json.loads(client.planning_calls[0][1]["content"])["catalog"]
+    assert [asset["logical_name"] for asset in catalog["assets"]] == ["profiles"]
+
+
+def test_natural_language_mongodb_count_rejects_unrequested_row_shape(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    invalid = _profiles_count_plan(assets["profiles"])
+    invalid["filters"] = [{
+        "source_alias": "profiles",
+        "field": "preferences.newsletter",
+        "operator": "eq",
+        "value": True,
+    }]
+    invalid["order_by"] = [{"field": "profiles", "direction": "desc"}]
+    corrected = _profiles_count_plan(assets["profiles"])
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quanti profili ci sono nel database MongoDB?"
+        )
+    )
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.projections == []
+    assert response.normalized_plan.filters == []
+    assert response.normalized_plan.order_by == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_count_intent_mismatch"
+
+
+def test_natural_language_mongodb_requests_are_isolated(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _events_plan(assets["events"]),
+        _profiles_count_plan(assets["profiles"]),
+        _newsletter_plan(assets["profiles"], True),
+    )
+    compiled_calls: list[Any] = []
+
+    def execute(compiled: Any) -> Any:
+        compiled_calls.append(compiled)
+        columns = [field.name for field in compiled.output_schema]
+        if columns == ["profiles"]:
+            return (columns, [[2]], False, 1.0)
+        if "preferences.newsletter" in columns:
+            return (columns, [["a@example.test", True, "it"]], False, 1.0)
+        return (columns, [["login", "2025-01-01T00:00:00"]], False, 1.0)
+
+    monkeypatch.setattr(service.mongodb_executor, "execute", execute)
+    natural = NaturalLanguageQueryService(
+        settings, client=client, query_service=service  # type: ignore[arg-type]
+    )
+    event_response = natural.translate(NaturalLanguageQueryRequest(
+        question="Mostra gli eventi MongoDB", execute=True
+    ))
+    count_response = natural.translate(NaturalLanguageQueryRequest(
+        question="Quanti profili ci sono nel database MongoDB?", execute=True
+    ))
+    newsletter_response = natural.translate(NaturalLanguageQueryRequest(
+        question="Mostra i profili MongoDB con newsletter attiva", execute=True
+    ))
+
+    assert event_response.normalized_plan.sources[0].asset_id == assets["events"].asset_id
+    assert count_response.normalized_plan.sources[0].asset_id == assets["profiles"].asset_id
+    assert count_response.normalized_plan.filters == []
+    assert count_response.normalized_plan.projections == []
+    assert newsletter_response.normalized_plan.sources[0].asset_id == assets["profiles"].asset_id
+    assert [item.field for item in newsletter_response.normalized_plan.filters] == [
+        "preferences.newsletter"
+    ]
+    assert all(item.field not in {"type", "created_at"} for item in newsletter_response.normalized_plan.projections)
+    assert len(client.planning_calls) == len(compiled_calls) == 3
+
+
+def test_natural_language_mongodb_english_query_and_explanation_language(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _newsletter_plan(assets["profiles"], True),
+        explanation="The matching profile has the newsletter enabled.",
+    )
+    monkeypatch.setattr(
+        service.mongodb_executor,
+        "execute",
+        lambda compiled: (
+            [field.name for field in compiled.output_schema],
+            [["a@example.test", True, "en"]],
+            False,
+            1.0,
+        ),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Show MongoDB profiles with newsletter enabled", execute=True
+    ))
+
+    assert response.answer == "The matching profile has the newsletter enabled."
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.filters[0].value is True
+    explanation_prompt = client.explanation_calls[0][0]["content"]
+    assert "same language" in explanation_prompt

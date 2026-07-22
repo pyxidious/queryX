@@ -136,6 +136,22 @@ def test_single_source_default_limit_and_maximum(query_env: tuple[Settings, dict
     assert captured.value.code == "query_limit_exceeded"
 
 
+def test_duckdb_rejects_undeclared_source_alias(
+    query_env: tuple[Settings, dict[str, Any]],
+) -> None:
+    settings, assets = query_env
+    payload = _status_plan(assets)
+    payload["projections"][0]["source_alias"] = "orders"
+
+    with pytest.raises(QueryValidationError) as captured:
+        QueryService(settings).validate(payload)
+
+    assert captured.value.code == "source_alias_not_found"
+    assert captured.value.details == {
+        "source_alias": "orders", "location": "projection"
+    }
+
+
 def test_declared_join_and_disabled_relationship(query_env: tuple[Settings, dict[str, Any]]) -> None:
     settings, assets = query_env
     relationships = RelationshipService(settings)

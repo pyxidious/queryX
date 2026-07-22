@@ -85,6 +85,7 @@ class PlanValidator:
                 details={"max_limit": self.max_limit},
             )
         normalized = plan.model_copy(update={"limit": limit})
+        self._validate_source_aliases(normalized, set(aliases))
         resolved = {source.alias: self._resolve_source(source) for source in normalized.sources}
         backends = {source.backend for source in resolved.values()}
         if len(backends) > 1:
@@ -116,6 +117,26 @@ class PlanValidator:
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         return ValidatedPlan(normalized, resolved, relationships, output_schema, fingerprint, [])
+
+    @staticmethod
+    def _validate_source_aliases(
+        plan: LogicalQueryPlan, declared_aliases: set[str]
+    ) -> None:
+        references: list[tuple[str, str]] = [
+            *((item.source_alias, "projection") for item in plan.projections),
+            *((item.source_alias, "filter") for item in plan.filters),
+            *((item.source_alias, "aggregation") for item in plan.aggregations if item.source_alias is not None),
+            *((item.source_alias, "group_by") for item in plan.group_by),
+            *((item.left_alias, "join.left_alias") for item in plan.joins),
+            *((item.right_alias, "join.right_alias") for item in plan.joins),
+        ]
+        for alias, location in references:
+            if alias not in declared_aliases:
+                raise QueryValidationError(
+                    "source_alias_not_found",
+                    "Referenced source alias is not declared in sources",
+                    details={"source_alias": alias, "location": location},
+                )
 
     def _resolve_source(self, source: Any) -> ResolvedSource:
         if self.mysql_assets is not None:
@@ -304,7 +325,7 @@ class PlanValidator:
         relationships: dict[str, AssetRelationship] = {}
         for join in plan.joins:
             if join.left_alias not in sources or join.right_alias not in sources:
-                raise QueryValidationError("unknown_source_alias", "Join references an unknown source alias")
+                raise QueryValidationError("source_alias_not_found", "Join references an unknown source alias")
             if join.left_alias not in joined or join.right_alias in joined:
                 raise QueryValidationError(
                     "invalid_join_order", "Joins must connect a new right source to an existing left source"
@@ -334,7 +355,7 @@ class PlanValidator:
         for query_filter in plan.filters:
             source = sources.get(query_filter.source_alias)
             if source is None:
-                raise QueryValidationError("unknown_source_alias", "Filter references an unknown source alias")
+                raise QueryValidationError("source_alias_not_found", "Filter references an unknown source alias")
             self._field(source, query_filter.field)
 
     def _validate_outputs(
@@ -347,7 +368,7 @@ class PlanValidator:
         for projection in plan.projections:
             source = sources.get(projection.source_alias)
             if source is None:
-                raise QueryValidationError("unknown_source_alias", "Projection references an unknown source alias")
+                raise QueryValidationError("source_alias_not_found", "Projection references an unknown source alias")
             field = self._field(source, projection.field)
             data_type = _type(field)
             if projection.transform == "date_trunc_month" and not is_temporal(data_type):
@@ -388,7 +409,7 @@ class PlanValidator:
         for item in plan.group_by:
             source = sources.get(item.source_alias)
             if source is None:
-                raise QueryValidationError("unknown_source_alias", "Group by references an unknown source alias")
+                raise QueryValidationError("source_alias_not_found", "Group by references an unknown source alias")
             field = self._field(source, item.field)
             if item.transform == "date_trunc_month" and not is_temporal(_type(field)):
                 raise QueryValidationError("invalid_transform_type", "date_trunc_month requires a temporal field")
@@ -419,7 +440,7 @@ class PlanValidator:
             return {"data_type": "BIGINT", "nullable": False}
         source = sources.get(aggregation.source_alias)
         if source is None:
-            raise QueryValidationError("unknown_source_alias", "Aggregation references an unknown source alias")
+            raise QueryValidationError("source_alias_not_found", "Aggregation references an unknown source alias")
         assert aggregation.field is not None
         return self._field(source, aggregation.field)
 

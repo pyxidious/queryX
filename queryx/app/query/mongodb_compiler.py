@@ -22,6 +22,20 @@ class MongoDBQueryCompiler:
         source = validated.sources[plan.sources[0].alias]
         if source.backend != "mongodb" or source.schema is None:
             raise ValueError("MongoDB compiler requires one resolved MongoDB source")
+        referenced_aliases = {
+            *(item.source_alias for item in plan.projections),
+            *(item.source_alias for item in plan.filters),
+            *(item.source_alias for item in plan.group_by),
+            *(
+                item.source_alias
+                for item in plan.aggregations
+                if item.source_alias is not None
+            ),
+            *(item.left_alias for item in plan.joins),
+            *(item.right_alias for item in plan.joins),
+        }
+        if referenced_aliases - {source.alias}:
+            raise ValueError("MongoDB compiler received an undeclared source alias")
 
         pipeline: list[dict[str, Any]] = []
         predicates = [self._predicate(item.field, item.operator, item.value) for item in plan.filters]
