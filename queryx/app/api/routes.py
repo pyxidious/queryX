@@ -587,9 +587,12 @@ async def execute_query(plan: LogicalQueryPlan) -> dict[str, Any]:
 @router.post("/query/natural-language")
 async def natural_language_query(request: NaturalLanguageQueryRequest) -> dict[str, Any]:
     try:
-        return _natural_language_query_service().translate(request).model_dump(
-            mode="json", exclude_none=True
-        )
+        response = _natural_language_query_service().translate(request)
+        payload = response.model_dump(mode="json", exclude_none=True)
+        if response.classification in {"ambiguous", "unanswerable"}:
+            payload["normalized_plan"] = None
+            payload["result"] = None
+        return payload
     except NaturalLanguageQueryError as exc:
         raise HTTPException(
             status_code=exc.status_code, detail={"error": exc.payload()}

@@ -37,13 +37,31 @@ from queryx.app.ui import routes as ui_routes
 
 
 class StubOllamaClient:
-    def __init__(self, *responses: dict[str, Any] | str | Exception) -> None:
+    def __init__(
+        self,
+        *responses: dict[str, Any] | str | Exception,
+        classifications: list[dict[str, Any] | Exception] | None = None,
+    ) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[list[dict[str, str]], dict[str, Any]]] = []
+        self.classifications = list(classifications or [])
+        self.classification_calls: list[
+            tuple[list[dict[str, str]], dict[str, Any]]
+        ] = []
 
     def chat_json(
         self, messages: list[dict[str, str]], json_schema: dict[str, Any]
     ) -> OllamaResponse:
+        if "classification" in json_schema.get("properties", {}):
+            self.classification_calls.append((messages, json_schema))
+            response = (
+                self.classifications.pop(0)
+                if self.classifications
+                else {"classification": "answerable", "reason": "Catalog data is sufficient."}
+            )
+            if isinstance(response, Exception):
+                raise response
+            return OllamaResponse(response, {})
         self.calls.append((messages, json_schema))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -159,6 +177,7 @@ def test_valid_single_source_plan_and_safe_relevant_prompt(
     response = service.translate(NaturalLanguageQueryRequest(question="orders by status"))
 
     assert response.normalized_plan.limit == settings.query_default_limit
+    assert response.classification == "answerable"
     assert response.result is None
     prompt = "\n".join(message["content"] for message in client.calls[0][0])
     assert assets["orders"].asset_id in prompt
@@ -173,6 +192,94 @@ def test_valid_single_source_plan_and_safe_relevant_prompt(
     assert '"function":"count"' in prompt
     assert service.client is client
     assert NaturalLanguageQueryService(settings).client.temperature == 0
+
+
+def test_classification_uses_catalog_before_answerable_planning(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(_single_plan(assets))
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Quanti ordini ci sono per stato?")
+    )
+
+    assert response.classification == "answerable"
+    assert response.normalized_plan is not None
+    assert len(client.classification_calls) == 1 and len(client.calls) == 1
+    classification_prompt = "\n".join(
+        message["content"] for message in client.classification_calls[0][0]
+    )
+    assert assets["orders"].asset_id in classification_prompt
+    assert "order_status" in classification_prompt
+    assert "logical_query_plan_schema" not in classification_prompt
+    assert "physical_location" not in classification_prompt
+
+
+@pytest.mark.parametrize(
+    ("classification", "question", "reason", "clarification"),
+    [
+        (
+            "ambiguous",
+            "Quali sono i clienti migliori?",
+            "Il criterio per stabilire i clienti migliori non è specificato.",
+            "Per migliori intendi quelli con più ordini, maggiore spesa o altro?",
+        ),
+        (
+            "unanswerable",
+            "Qual è il profitto totale?",
+            "Il catalogo contiene ricavi ma non dati di costo necessari per calcolare il profitto.",
+            None,
+        ),
+    ],
+)
+def test_non_answerable_classification_skips_plan_and_execution(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+    classification: str, question: str, reason: str, clarification: str | None,
+) -> None:
+    settings, _, _ = nl_env
+    payload: dict[str, Any] = {"classification": classification, "reason": reason}
+    if clarification:
+        payload["clarification_question"] = clarification
+    client = StubOllamaClient(classifications=[payload])
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        service.query_service,
+        "execute",
+        lambda plan: (_ for _ in ()).throw(AssertionError("execute must not be called")),
+    )
+
+    response = service.translate(
+        NaturalLanguageQueryRequest(question=question, execute=True)
+    )
+
+    assert response.classification == classification
+    assert response.normalized_plan is None and response.result is None
+    assert response.reason == reason
+    assert response.clarification_question == clarification
+    assert response.answer == (reason if classification == "unanswerable" else None)
+    assert client.calls == []
+
+
+def test_invalid_classification_json_has_only_one_retry(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, _, _ = nl_env
+    client = StubOllamaClient(
+        classifications=[
+            OllamaInvalidResponseError("invalid"),
+            OllamaInvalidResponseError("invalid"),
+        ]
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+            NaturalLanguageQueryRequest(question="orders by status")
+        )
+
+    assert captured.value.code == "invalid_classification"
+    assert len(client.classification_calls) == 2
+    assert client.calls == []
 
 
 def test_exact_logical_query_plan_wrapper_is_unwrapped(
@@ -727,3 +834,105 @@ def test_invalid_generated_plan_remains_visible_in_ui(
     assert "invalid_logical_plan" in response.text
     assert "order_status" in response.text and "group_by" in response.text
     assert "logical_query_plan" not in response.text
+
+
+def test_ui_renders_ambiguous_and_unanswerable_without_plan_actions(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _ = nl_env
+    services = iter([
+        NaturalLanguageQueryService(
+            settings,
+            client=StubOllamaClient(classifications=[{
+                "classification": "ambiguous",
+                "reason": "Il criterio non è specificato.",
+                "clarification_question": "Per migliori intendi più ordini o maggiore spesa?",
+            }]),  # type: ignore[arg-type]
+        ),
+        NaturalLanguageQueryService(
+            settings,
+            client=StubOllamaClient(classifications=[{
+                "classification": "unanswerable",
+                "reason": "Il profitto richiede dati di costo non presenti.",
+            }]),  # type: ignore[arg-type]
+        ),
+    ])
+    monkeypatch.setattr(
+        ui_routes, "NaturalLanguageQueryService", lambda settings: next(services)
+    )
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise_ui() -> tuple[httpx.Response, httpx.Response]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            page = await client.get("/ui/query")
+            token = re.search(
+                r'name="csrf_token" value="([^"]+)"', page.text
+            ).group(1)  # type: ignore[union-attr]
+            ambiguous = await client.post(
+                "/ui/query/natural-language",
+                data={
+                    "csrf_token": token,
+                    "question": "Quali sono i clienti migliori?",
+                    "execute": "true",
+                },
+            )
+            unanswerable = await client.post(
+                "/ui/query/natural-language",
+                data={
+                    "csrf_token": token,
+                    "question": "Qual è il profitto totale?",
+                    "execute": "true",
+                },
+            )
+            return ambiguous, unanswerable
+
+    ambiguous, unanswerable = asyncio.run(exercise_ui())
+    assert ambiguous.status_code == unanswerable.status_code == 200
+    assert "Chiarimento necessario" in ambiguous.text
+    assert "Per migliori intendi più ordini o maggiore spesa?" in ambiguous.text
+    assert "Quali sono i clienti migliori?" in ambiguous.text
+    assert "Richiesta non calcolabile" in unanswerable.text
+    assert "dati di costo non presenti" in unanswerable.text
+    assert "Qual è il profitto totale?" in unanswerable.text
+    for response in (ambiguous, unanswerable):
+        assert ">Validate</button>" not in response.text
+        assert ">Execute</button>" not in response.text
+
+
+def test_api_returns_structured_ambiguous_classification_without_result(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _ = nl_env
+    service = NaturalLanguageQueryService(
+        settings,
+        client=StubOllamaClient(classifications=[{
+            "classification": "ambiguous",
+            "reason": "Il criterio migliore non è definito.",
+            "clarification_question": "Vuoi ordinare per spesa o numero di ordini?",
+        }]),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(
+        api_routes, "_natural_language_query_service", lambda settings=None: service
+    )
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise_api() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            return await client.post(
+                "/query/natural-language",
+                json={"question": "Quali sono i clienti migliori?", "execute": True},
+            )
+
+    response = asyncio.run(exercise_api())
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["classification"] == "ambiguous"
+    assert payload["clarification_question"] == "Vuoi ordinare per spesa o numero di ordini?"
+    assert payload["normalized_plan"] is None
+    assert payload["result"] is None

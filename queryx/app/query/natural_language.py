@@ -19,9 +19,11 @@ from queryx.app.llm.ollama_client import (
 from queryx.app.processing.storage import ProcessingStorage
 from queryx.app.query.models import (
     LogicalQueryPlan,
+    NaturalLanguageClassification,
     NaturalLanguageQueryRequest,
     NaturalLanguageQueryResponse,
     NaturalLanguageWarning,
+    QueryClassification,
 )
 from queryx.app.query.service import QueryService
 from queryx.app.query.storage import QueryStorage
@@ -45,6 +47,13 @@ Every order_by field must exactly match an existing projection output name or ag
 When aggregations are present, every non-aggregated projection must appear identically in group_by, with the same source_alias, field and transform.
 For product categories ranked by revenue, use only products and order_items, join them through their active catalog relationship, project product_category_name, sum order_items.price as revenue, group by product_category_name, and order by revenue descending. Do not include orders.
 If the question cannot be resolved unambiguously from the catalog, return {"error":"ambiguous_question"}.
+"""
+_CLASSIFICATION_PROMPT = """Classify whether the user question can be answered from the supplied catalog.
+Return only one JSON object matching the supplied schema, without markdown or additional keys.
+Use classification answerable when the requested result is defined and computable from the listed fields and active relationships.
+Use ambiguous when essential intent is unclear, and provide one concise clarification_question.
+Use unanswerable when required data or metrics are absent, and explain the missing data briefly in reason.
+Do not invent data, perform calculations, or include hidden analysis.
 """
 
 
@@ -106,6 +115,20 @@ class NaturalLanguageQueryService:
         if not context["assets"]:
             raise NaturalLanguageQueryError(
                 "invalid_logical_plan", "No ready queryable assets are available", 409
+            )
+        classification = self._classify(question, context)
+        if classification.classification != QueryClassification.ANSWERABLE:
+            planning_time_ms = (monotonic() - planning_started) * 1000
+            return NaturalLanguageQueryResponse(
+                classification=classification.classification,
+                clarification_question=classification.clarification_question,
+                reason=classification.reason,
+                answer=(
+                    classification.reason
+                    if classification.classification == QueryClassification.UNANSWERABLE
+                    else None
+                ),
+                planning_time_ms=planning_time_ms,
             )
         messages = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -226,7 +249,65 @@ class NaturalLanguageQueryService:
             execution_time_ms=result.execution_time_ms if result is not None else None,
             explanation_time_ms=explanation_time_ms,
             explanation_warning=explanation_warning,
+            classification=classification.classification,
+            reason=classification.reason,
         )
+
+    def _classify(
+        self, question: str, context: dict[str, Any]
+    ) -> NaturalLanguageClassification:
+        messages = [
+            {"role": "system", "content": _CLASSIFICATION_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"question": question, "catalog": context},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        schema = NaturalLanguageClassification.model_json_schema()
+        try:
+            candidate = self.client.chat_json(messages, schema).content
+        except OllamaInvalidResponseError:
+            retry_messages = [
+                *messages,
+                {
+                    "role": "user",
+                    "content": "The previous response was not valid JSON. Return only one valid classification JSON object.",
+                },
+            ]
+            try:
+                candidate = self.client.chat_json(retry_messages, schema).content
+            except OllamaInvalidResponseError as exc:
+                raise NaturalLanguageQueryError(
+                    "invalid_classification",
+                    "Ollama returned invalid classification JSON after one retry",
+                    502,
+                ) from exc
+            except OllamaTimeoutError as exc:
+                raise NaturalLanguageQueryError(
+                    "llm_timeout", "Ollama classification request timed out", 504
+                ) from exc
+            except OllamaError as exc:
+                raise NaturalLanguageQueryError(
+                    "llm_unavailable", "Ollama is unavailable", 503
+                ) from exc
+        except OllamaTimeoutError as exc:
+            raise NaturalLanguageQueryError(
+                "llm_timeout", "Ollama classification request timed out", 504
+            ) from exc
+        except OllamaError as exc:
+            raise NaturalLanguageQueryError(
+                "llm_unavailable", "Ollama is unavailable", 503
+            ) from exc
+        try:
+            return NaturalLanguageClassification.model_validate(candidate)
+        except ValidationError as exc:
+            raise NaturalLanguageQueryError(
+                "invalid_classification", "Ollama returned an invalid classification", 502
+            ) from exc
 
     def _explain(
         self, question: str, result: Any

@@ -99,6 +99,8 @@ def _query_context(
     planning_time_ms: float | None = None, execution_time_ms: float | None = None,
     explanation_time_ms: float | None = None,
     explanation_warning: Any | None = None,
+    classification: str | None = None, clarification_question: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     return {
         "title": "Query tecnica", "plan_json": plan_json,
@@ -108,6 +110,9 @@ def _query_context(
         "execution_time_ms": execution_time_ms,
         "explanation_time_ms": explanation_time_ms,
         "explanation_warning": explanation_warning,
+        "classification": classification,
+        "clarification_question": clarification_question,
+        "reason": reason,
     }
 
 
@@ -591,10 +596,14 @@ async def natural_language_query_ui(
         response = NaturalLanguageQueryService(_settings(request)).translate(
             NaturalLanguageQueryRequest(question=question, execute=execute)
         )
-        plan_json = json.dumps(
-            response.normalized_plan.model_dump(mode="json", exclude_none=True),
-            indent=2,
-            ensure_ascii=False,
+        plan_json = (
+            json.dumps(
+                response.normalized_plan.model_dump(mode="json", exclude_none=True),
+                indent=2,
+                ensure_ascii=False,
+            )
+            if response.normalized_plan is not None
+            else ""
         )
         return _render(
             request,
@@ -603,12 +612,17 @@ async def natural_language_query_ui(
                 plan_json,
                 result=response.result,
                 question=question,
-                generated=True,
+                generated=response.normalized_plan is not None,
                 answer=response.answer,
                 planning_time_ms=response.planning_time_ms,
                 execution_time_ms=response.execution_time_ms,
                 explanation_time_ms=response.explanation_time_ms,
                 explanation_warning=response.explanation_warning,
+                classification=(
+                    response.classification.value if response.classification else None
+                ),
+                clarification_question=response.clarification_question,
+                reason=response.reason,
             ),
         )
     except ValidationError:

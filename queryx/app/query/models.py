@@ -197,14 +197,32 @@ class NaturalLanguageQueryRequest(StrictModel):
     execute: bool = False
 
 
+class QueryClassification(StrEnum):
+    ANSWERABLE = "answerable"
+    AMBIGUOUS = "ambiguous"
+    UNANSWERABLE = "unanswerable"
+
+
+class NaturalLanguageClassification(StrictModel):
+    classification: QueryClassification
+    reason: str = Field(min_length=1, max_length=500)
+    clarification_question: str | None = Field(default=None, min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def require_clarification(self) -> NaturalLanguageClassification:
+        if self.classification == QueryClassification.AMBIGUOUS and not self.clarification_question:
+            raise ValueError("ambiguous classification requires clarification_question")
+        return self
+
+
 class NaturalLanguageWarning(StrictModel):
     code: str
     message: str
 
 
 class NaturalLanguageQueryResponse(StrictModel):
-    normalized_plan: LogicalQueryPlan
-    output_schema: list[OutputField]
+    normalized_plan: LogicalQueryPlan | None = None
+    output_schema: list[OutputField] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     result: QueryExecutionResult | None = None
     answer: str | None = None
@@ -212,3 +230,6 @@ class NaturalLanguageQueryResponse(StrictModel):
     execution_time_ms: float | None = Field(default=None, ge=0)
     explanation_time_ms: float | None = Field(default=None, ge=0)
     explanation_warning: NaturalLanguageWarning | None = None
+    classification: QueryClassification | None = None
+    clarification_question: str | None = None
+    reason: str | None = None

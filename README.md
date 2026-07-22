@@ -205,7 +205,9 @@ Ogni esecuzione crea un `QueryRun` di audit con piano normalizzato, fingerprint,
 
 ## Linguaggio naturale → piano logico
 
-`POST /query/natural-language` usa Ollama esclusivamente per produrre un candidato `LogicalQueryPlan`. Il prompt è limitato agli asset rilevanti che hanno versione e serving binding `ready`, ai relativi campi/tipi, alle relazioni attive e allo schema JSON del piano. Non contiene righe campione, path fisici, nomi di relation DuckDB o query fisiche.
+`POST /query/natural-language` usa prima Ollama per classificare in JSON strict la domanda come `answerable`, `ambiguous` o `unanswerable`, usando soltanto asset interrogabili, campi/tipi e relazioni attive. Una richiesta ambigua restituisce una domanda di chiarimento; una richiesta non calcolabile indica i dati o le metriche mancanti. In entrambi i casi `normalized_plan` e `result` sono null e non vengono invocati planning, compiler o executor. Non è ancora presente memoria conversazionale multi-turn.
+
+Solo per `answerable`, Ollama produce un candidato `LogicalQueryPlan`. Il prompt è limitato agli asset rilevanti che hanno versione e serving binding `ready`, ai relativi campi/tipi, alle relazioni attive e allo schema JSON del piano. Non contiene righe campione, path fisici, nomi di relation DuckDB o query fisiche.
 
 ```bash
 curl -X POST http://localhost:8000/query/natural-language \
@@ -213,11 +215,11 @@ curl -X POST http://localhost:8000/query/natural-language \
   -d '{"question":"Quanti ordini ci sono per stato?","execute":false}'
 ```
 
-La risposta contiene `normalized_plan`, `output_schema`, `warnings` e il tempo di planning; con `execute=true` contiene anche il risultato bounded, una breve `answer` opzionale e i tempi separati di execution ed explanation. La spiegazione usa soltanto domanda, colonne e un massimo di 10 righe del risultato, non riceve dettagli fisici o ragionamenti, segnala risultati vuoti o troncati e non può rendere fallita una query già completata. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. È ammesso un solo retry complessivo per il planning: per correggere JSON non valido oppure un piano semanticamente rifiutato. Nel secondo caso il modello riceve il piano precedente e il solo codice di validazione; il piano corretto passa nuovamente dal validatore deterministico prima di qualsiasi esecuzione.
+La risposta aggiunge `classification`, `reason` e l'eventuale `clarification_question`; contiene inoltre `normalized_plan`, `output_schema`, `warnings` e il tempo di planning. Con `execute=true` e una domanda answerable contiene anche il risultato bounded, una breve `answer` opzionale e i tempi separati di execution ed explanation. La spiegazione usa soltanto domanda, colonne e un massimo di 10 righe del risultato, non riceve dettagli fisici o ragionamenti, segnala risultati vuoti o troncati e non può rendere fallita una query già completata. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. Classificazione e planning ammettono al massimo un retry per JSON non valido; il planning può usare il proprio retry anche per un piano semanticamente rifiutato. Il piano corretto passa nuovamente dal validatore deterministico prima di qualsiasi esecuzione.
 
 Il modello non è un'autorità: il JSON viene parsato con modelli strict e passa sempre dal validatore deterministico esistente. Solo un piano valido può raggiungere il normale `QueryService`; compiler ed executor non ricevono testo libero. Input che tenta di fornire query fisiche viene rifiutato. Gli errori applicativi sono `llm_unavailable`, `llm_timeout`, `invalid_llm_json`, `invalid_logical_plan` e `ambiguous_question`.
 
-Nella pagina `/ui/query` sono disponibili “Genera piano” e “Genera ed esegui”. Il piano prodotto resta visibile nell'editor JSON e il risultato riusa la stessa tabella bounded dell'esecuzione manuale.
+Nella pagina `/ui/query` sono disponibili “Genera piano” e “Genera ed esegui”. Il piano prodotto resta visibile nell'editor JSON e il risultato riusa la stessa tabella bounded dell'esecuzione manuale. Per richieste ambigue o non calcolabili la pagina mostra rispettivamente “Chiarimento necessario” o “Richiesta non calcolabile”, senza azioni Validate/Execute finché non esiste un piano.
 
 ## Worker
 
