@@ -101,6 +101,7 @@ def _query_context(
     explanation_warning: Any | None = None,
     classification: str | None = None, clarification_question: str | None = None,
     reason: str | None = None,
+    hide_plan_editor: bool = False,
 ) -> dict[str, Any]:
     return {
         "title": "Query tecnica", "plan_json": plan_json,
@@ -113,6 +114,7 @@ def _query_context(
         "classification": classification,
         "clarification_question": clarification_question,
         "reason": reason,
+        "hide_plan_editor": hide_plan_editor,
     }
 
 
@@ -592,6 +594,7 @@ async def natural_language_query_ui(
     if invalid:
         return invalid
     plan_json = ""
+    hide_plan_editor = False
     try:
         response = NaturalLanguageQueryService(_settings(request)).translate(
             NaturalLanguageQueryRequest(question=question, execute=execute)
@@ -629,6 +632,7 @@ async def natural_language_query_ui(
         error = {"code": "ambiguous_question", "message": "Inserisci una domanda valida."}
     except NaturalLanguageQueryError as exc:
         error = exc.payload()
+        hide_plan_editor = exc.code == "invalid_classification"
         if exc.candidate_plan is not None:
             plan_json = json.dumps(
                 exc.candidate_plan, indent=2, ensure_ascii=False
@@ -638,7 +642,12 @@ async def natural_language_query_ui(
     return _render(
         request,
         "query/index.html",
-        _query_context(plan_json, question=question, error=error),
+        _query_context(
+            plan_json,
+            question=question,
+            error=error,
+            hide_plan_editor=hide_plan_editor,
+        ),
         422,
     )
 

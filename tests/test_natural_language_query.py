@@ -221,6 +221,8 @@ def test_classification_uses_catalog_before_answerable_planning(
     assert "physical_location" not in classification_prompt
     assert 'Input: "Quali sono i clienti migliori?"' in classification_prompt
     assert "Per migliori intendi i clienti con più ordini" in classification_prompt
+    assert 'Input: "Qual è il profitto totale?"' in classification_prompt
+    assert '"classification":"unanswerable"' in classification_prompt
 
 
 @pytest.mark.parametrize(
@@ -317,6 +319,85 @@ def test_classification_retry_can_recover_with_explicit_schema_error(
     retry = json.loads(client.classification_calls[1][0][-1]["content"])
     assert retry["validation_error"] == "invalid_json"
     assert "classification_schema" in retry
+
+
+@pytest.mark.parametrize(
+    "raw_classification",
+    [
+        json.dumps({
+            "classification": "unanswerable",
+            "reason": "Mancano i dati sui costi.",
+            "clarification_question": None,
+        }),
+        json.dumps({
+            "classification": "unanswerable",
+            "reason": "Mancano i dati sui costi.",
+        }),
+        json.dumps({
+            "classification": "unanswerable",
+            "reason": "Mancano i dati sui costi.",
+            "clarification_question": "   ",
+        }),
+    ],
+)
+def test_unanswerable_accepts_null_omitted_or_blank_clarification(
+    nl_env: tuple[Settings, dict[str, Any], str], raw_classification: str,
+) -> None:
+    settings, _, _ = nl_env
+    response = NaturalLanguageQueryService(
+        settings, client=StubOllamaClient(classifications=[raw_classification])  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="Qual è il profitto totale?"))
+
+    assert response.classification == "unanswerable"
+    assert response.reason == "Mancano i dati sui costi."
+    assert response.clarification_question is None
+    assert response.normalized_plan is None
+
+
+def test_unanswerable_without_reason_remains_invalid_after_retry(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, _, _ = nl_env
+    invalid = json.dumps({
+        "classification": "unanswerable",
+        "clarification_question": None,
+    })
+    client = StubOllamaClient(classifications=[invalid, invalid])
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+            NaturalLanguageQueryRequest(question="Qual è il profitto totale?")
+        )
+
+    assert captured.value.code == "invalid_classification"
+    assert client.calls == []
+
+
+def test_unanswerable_retry_receives_previous_content_and_recovers(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, _, _ = nl_env
+    invalid = json.dumps({"classification": "unanswerable"})
+    corrected = json.dumps({
+        "classification": "unanswerable",
+        "reason": (
+            "Il catalogo contiene dati sui ricavi, ma non contiene dati sui costi "
+            "necessari per calcolare il profitto."
+        ),
+        "clarification_question": None,
+    })
+    client = StubOllamaClient(classifications=[invalid, corrected])
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Qual è il profitto totale?")
+    )
+
+    assert response.classification == "unanswerable"
+    retry = json.loads(client.classification_calls[1][0][-1]["content"])
+    assert retry["previous_content"] == invalid
+    assert retry["validation_error"] == "classification_schema_invalid"
+    assert retry["classification_schema"] == client.classification_calls[1][1]
+    assert "Return only one valid JSON object" in retry["instruction"]
 
 
 @pytest.mark.parametrize(
@@ -1001,8 +1082,49 @@ def test_ui_renders_ambiguous_and_unanswerable_without_plan_actions(
     assert "dati di costo non presenti" in unanswerable.text
     assert "Qual è il profitto totale?" in unanswerable.text
     for response in (ambiguous, unanswerable):
+        assert "Piano JSON" not in response.text
+        assert 'name="plan_json"' not in response.text
         assert ">Validate</button>" not in response.text
         assert ">Execute</button>" not in response.text
+
+
+def test_ui_hides_plan_editor_when_classification_fails(
+    nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, _, _ = nl_env
+    service = NaturalLanguageQueryService(
+        settings,
+        client=StubOllamaClient(classifications=["invalid", "still invalid"]),  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(ui_routes, "NaturalLanguageQueryService", lambda settings: service)
+    import queryx.app.main as main
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+
+    async def exercise_ui() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            page = await client.get("/ui/query")
+            token = re.search(
+                r'name="csrf_token" value="([^"]+)"', page.text
+            ).group(1)  # type: ignore[union-attr]
+            return await client.post(
+                "/ui/query/natural-language",
+                data={
+                    "csrf_token": token,
+                    "question": "Qual è il profitto totale?",
+                    "execute": "true",
+                },
+            )
+
+    response = asyncio.run(exercise_ui())
+    assert response.status_code == 422
+    assert "invalid_classification" in response.text
+    assert "Qual è il profitto totale?" in response.text
+    assert "Piano JSON" not in response.text
+    assert 'name="plan_json"' not in response.text
+    assert ">Validate</button>" not in response.text
+    assert ">Execute</button>" not in response.text
 
 
 def test_api_returns_structured_ambiguous_classification_without_result(

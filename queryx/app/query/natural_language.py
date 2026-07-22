@@ -59,6 +59,8 @@ Do not invent data, perform calculations, or include hidden analysis.
 Exact example:
 Input: "Quali sono i clienti migliori?"
 Output: {"classification":"ambiguous","reason":"Il criterio di migliore non è specificato.","clarification_question":"Per migliori intendi i clienti con più ordini, maggiore spesa o un altro criterio?"}
+Input: "Qual è il profitto totale?"
+Output: {"classification":"unanswerable","reason":"Il catalogo contiene dati sui ricavi, ma non contiene dati sui costi necessari per calcolare il profitto.","clarification_question":null}
 """
 
 
@@ -279,6 +281,7 @@ class NaturalLanguageQueryService:
             },
         ]
         schema = NaturalLanguageClassification.model_json_schema()
+        raw_content = ""
         try:
             raw_content = self.client.chat_text(messages, schema).content
             classification = self._parse_classification(raw_content)
@@ -294,7 +297,8 @@ class NaturalLanguageQueryService:
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "instruction": "Correct only the classification response and return one valid JSON object matching the schema.",
+                            "instruction": "Correct only the classification response. Return only one valid JSON object matching the schema, with no other text.",
+                            "previous_content": raw_content[:4000],
                             "validation_error": error_code,
                             "classification_schema": schema,
                         },
@@ -353,6 +357,11 @@ class NaturalLanguageQueryService:
             value = normalized.get(field)
             if isinstance(value, str):
                 normalized[field] = value.strip()
+        if (
+            normalized.get("classification") in {"answerable", "unanswerable"}
+            and normalized.get("clarification_question") == ""
+        ):
+            normalized["clarification_question"] = None
         try:
             return NaturalLanguageClassification.model_validate(normalized)
         except ValidationError as exc:

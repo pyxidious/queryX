@@ -14,12 +14,14 @@
   <label>Domanda in linguaggio naturale<textarea name="question" maxlength="2000" required>{{ question }}</textarea></label>
   <div class="actions"><button class="button secondary" name="execute" value="false" type="submit" data-loading-text="Generazione del piano in corso…">Genera piano</button><button class="button" name="execute" value="true" type="submit" data-loading-text="Esecuzione della query e generazione della risposta in corso…">Genera ed esegui</button></div>
 </form></section>
+{% if not hide_plan_editor and classification not in ["ambiguous", "unanswerable"] %}
 <h2>Piano JSON</h2>
 <form class="form" method="post" action="/ui/query/validate" data-query-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Piano JSON<textarea name="plan_json" required>{{ plan_json }}</textarea></label>
-  {% if classification not in ["ambiguous", "unanswerable"] %}<div class="actions"><button class="button secondary" formaction="/ui/query/validate" type="submit" data-loading-text="Validazione in corso…">Validate</button><button class="button" formaction="/ui/query/execute" type="submit" data-loading-text="Esecuzione della query in corso…">Execute</button></div>{% endif %}
+  <div class="actions"><button class="button secondary" formaction="/ui/query/validate" type="submit" data-loading-text="Validazione in corso…">Validate</button><button class="button" formaction="/ui/query/execute" type="submit" data-loading-text="Esecuzione della query in corso…">Execute</button></div>
 </form>
+{% endif %}
 {% if validation %}<section class="card"><h2>Piano valido</h2><p>Fingerprint <code>{{ validation.plan_fingerprint }}</code></p><div class="table-wrap"><table><thead><tr><th>Colonna</th><th>Tipo</th><th>Nullable</th></tr></thead><tbody>{% for field in validation.output_schema %}<tr><td>{{ field.name }}</td><td>{{ field.data_type }}</td><td>{{ "sì" if field.nullable else "no" }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
 {% if answer %}<section class="card"><h2>Risposta</h2><p>{{ answer }}</p></section>{% endif %}
 {% if result %}<section><h2>Risultato</h2><p>{{ result.row_count }} righe · {{ "%.2f"|format(result.execution_time_ms) }} ms{% if result.truncated %} · risultato troncato{% endif %}</p><div class="table-wrap"><table class="preview"><thead><tr>{% for column in result.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>{% for row in result.rows %}<tr>{% for value in row %}<td>{{ value|query_value if value is not none else "null" }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></section>{% endif %}
