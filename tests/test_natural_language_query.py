@@ -607,7 +607,7 @@ def test_invalid_json_after_retry_is_structured(
     assert captured.value.code == "invalid_llm_json" and len(client.calls) == 2
 
 
-def test_invalid_plan_and_ambiguous_question_are_rejected(
+def test_invalid_plan_is_rejected_and_planner_ambiguity_is_structured(
     nl_env: tuple[Settings, dict[str, Any], str],
 ) -> None:
     settings, assets, _ = nl_env
@@ -620,11 +620,12 @@ def test_invalid_plan_and_ambiguous_question_are_rejected(
             NaturalLanguageQueryRequest(question="orders by status")
         )
     assert plan_error.value.code == "invalid_logical_plan"
-    with pytest.raises(NaturalLanguageQueryError) as ambiguous:
-        NaturalLanguageQueryService(
-            settings, client=StubOllamaClient({"error": "ambiguous_question"})  # type: ignore[arg-type]
-        ).translate(NaturalLanguageQueryRequest(question="show me the data"))
-    assert ambiguous.value.code == "ambiguous_question"
+    ambiguous = NaturalLanguageQueryService(
+        settings, client=StubOllamaClient({"error": "ambiguous_question"})  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="show me the data"))
+    assert ambiguous.classification == "ambiguous"
+    assert ambiguous.clarification_question
+    assert ambiguous.normalized_plan is None and ambiguous.result is None
 
 
 def test_invalid_group_by_is_corrected_with_the_single_retry(
@@ -962,13 +963,14 @@ def test_api_and_ui_natural_language_flow(
     assert "Planning" in generated.text
     assert "Execution" in generated.text and "Explanation" in generated.text
     assert 'id="query-loading"' in page.text and 'aria-busy="false"' in page.text
-    assert page.text.count("data-loading-text=") == 4
+    assert page.text.count("data-loading-text=") == 2
     assert 'action="/ui/query/natural-language"' in page.text
-    assert 'action="/ui/query/validate"' in page.text
-    assert 'formaction="/ui/query/execute"' in page.text
+    assert "Piano JSON" not in page.text
+    assert 'action="/ui/query/validate"' in planned.text
+    assert 'formaction="/ui/query/execute"' in planned.text
     assert "Generazione del piano in corso" in page.text
-    assert "Validazione in corso" in page.text
-    assert "Esecuzione della query in corso" in page.text
+    assert "Validazione in corso" in planned.text
+    assert "Esecuzione della query in corso" in planned.text
     assert script.status_code == 200
     assert "button.disabled = active" in script.text
     assert "if (busy) return" in script.text

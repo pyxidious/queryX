@@ -14,7 +14,7 @@
   <label>Domanda in linguaggio naturale<textarea name="question" maxlength="2000" required>{{ question }}</textarea></label>
   <div class="actions"><button class="button secondary" name="execute" value="false" type="submit" data-loading-text="Generazione del piano in corso…">Genera piano</button><button class="button" name="execute" value="true" type="submit" data-loading-text="Esecuzione della query e generazione della risposta in corso…">Genera ed esegui</button></div>
 </form></section>
-{% if not hide_plan_editor and classification not in ["ambiguous", "unanswerable"] %}
+{% if plan_json and not hide_plan_editor and classification not in ["ambiguous", "unanswerable"] %}
 <h2>Piano JSON</h2>
 <form class="form" method="post" action="/ui/query/validate" data-query-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

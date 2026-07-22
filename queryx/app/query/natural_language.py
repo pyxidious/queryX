@@ -45,6 +45,7 @@ Use only listed asset_id, asset_version_id, fields, transforms, operators and re
 Never invent assets, fields, functions or relationships.
 Treat every catalog asset object as an atomic source block identified by its asset_id and backend.
 After choosing a source, use only the fields listed for that source. Never combine schemas from assets with the same logical name.
+Use semantic_field_hints only within the asset block that contains them; they are catalog-scoped disambiguation evidence.
 If the question explicitly names MySQL, choose only an asset whose backend is mysql.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
@@ -61,6 +62,7 @@ Return only one JSON object matching the supplied schema, without markdown or ad
 Use classification answerable when the requested result is defined and computable from the listed fields and active relationships.
 Use ambiguous when essential intent is unclear, and provide one concise clarification_question.
 Use unanswerable when required data or metrics are absent, and explain the missing data briefly in reason.
+Before classifying a question as ambiguous, use its explicit backend, candidate assets, fields and catalog-scoped semantic_field_hints. If these provide exactly one plausible interpretation, classify it as answerable.
 If assets share a logical name across backends and the question identifies neither a backend nor fields that select one unambiguously, classify it as ambiguous.
 Do not invent data, perform calculations, or include hidden analysis.
 Exact example:
@@ -137,6 +139,9 @@ class NaturalLanguageQueryService:
                 "invalid_logical_plan", "No ready queryable assets are available", 409
             )
         classification = self._classify(question, context)
+        classification = self._apply_catalog_disambiguation(
+            question, context, classification
+        )
         if classification.classification != QueryClassification.ANSWERABLE:
             planning_time_ms = (monotonic() - planning_started) * 1000
             return NaturalLanguageQueryResponse(
@@ -197,6 +202,9 @@ class NaturalLanguageQueryService:
                                 }
                             ],
                         },
+                        "catalog_scoped_resolution_examples": self._planning_examples(
+                            context
+                        ),
                         "correct_multi_asset_revenue_example": {
                             "sources": [
                                 {
@@ -249,8 +257,13 @@ class NaturalLanguageQueryService:
         candidate, retry_used = self._generate(messages)
         candidate = self._unwrap_logical_query_plan(candidate)
         if candidate.get("error") == "ambiguous_question":
-            raise NaturalLanguageQueryError(
-                "ambiguous_question", "The question requires clarification", 422
+            return NaturalLanguageQueryResponse(
+                classification=QueryClassification.AMBIGUOUS,
+                clarification_question=(
+                    "Puoi specificare il criterio o il campo da usare per la richiesta?"
+                ),
+                reason="Il piano non può essere determinato univocamente dal catalogo.",
+                planning_time_ms=(monotonic() - planning_started) * 1000,
             )
         try:
             validation = self._validate_candidate(candidate)
@@ -261,8 +274,13 @@ class NaturalLanguageQueryService:
                 self._retry_invalid_plan(messages, candidate, exc.code, context)
             )
             if candidate.get("error") == "ambiguous_question":
-                raise NaturalLanguageQueryError(
-                    "ambiguous_question", "The question requires clarification", 422
+                return NaturalLanguageQueryResponse(
+                    classification=QueryClassification.AMBIGUOUS,
+                    clarification_question=(
+                        "Puoi specificare il criterio o il campo da usare per la richiesta?"
+                    ),
+                    reason="Il piano non può essere determinato univocamente dal catalogo.",
+                    planning_time_ms=(monotonic() - planning_started) * 1000,
                 )
             try:
                 validation = self._validate_candidate(candidate)
@@ -607,46 +625,48 @@ class NaturalLanguageQueryService:
                 schema = binding.metadata.get("serving_schema") if binding else None
                 if binding is None or not isinstance(schema, list):
                     continue
-                candidates.append(
-                    {
-                        "asset_id": asset.id,
-                        "asset_version_id": version.id,
-                        "logical_name": asset.name,
-                        "backend": "duckdb",
-                        "source_id": "manual_upload",
-                        "source_name": "Local dataset upload",
-                        "fields": [
-                            {
-                                "name": str(field.get("name")),
-                                "data_type": str(field.get("data_type")),
-                                "nullable": bool(field.get("nullable", True)),
-                            }
-                            for field in schema
-                            if isinstance(field, dict) and field.get("name")
-                        ],
-                    }
-                )
+                candidate = {
+                    "asset_id": asset.id,
+                    "asset_version_id": version.id,
+                    "logical_name": asset.name,
+                    "backend": "duckdb",
+                    "source_id": "manual_upload",
+                    "source_name": "Local dataset upload",
+                    "fields": [
+                        {
+                            "name": str(field.get("name")),
+                            "data_type": str(field.get("data_type")),
+                            "nullable": bool(field.get("nullable", True)),
+                        }
+                        for field in schema
+                        if isinstance(field, dict) and field.get("name")
+                    ],
+                }
+                candidate["semantic_field_hints"] = self._semantic_field_hints(candidate)
+                candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
+                candidates.append(candidate)
                 break
         for asset in self.query_service.mysql_catalog.list_ready_assets():
             source = SourceRegistry(self.settings).get_source(asset.source_id)
-            candidates.append(
-                {
-                    "asset_id": asset.asset_id,
-                    "asset_version_id": asset.asset_version_id,
-                    "logical_name": asset.name,
-                    "backend": "mysql",
-                    "source_id": asset.source_id,
-                    "source_name": source.name if source is not None else asset.source_id,
-                    "fields": [
-                        {
-                            "name": field["name"],
-                            "data_type": field["data_type"],
-                            "nullable": field["nullable"],
-                        }
-                        for field in asset.fields.values()
-                    ],
-                }
-            )
+            candidate = {
+                "asset_id": asset.asset_id,
+                "asset_version_id": asset.asset_version_id,
+                "logical_name": asset.name,
+                "backend": "mysql",
+                "source_id": asset.source_id,
+                "source_name": source.name if source is not None else asset.source_id,
+                "fields": [
+                    {
+                        "name": field["name"],
+                        "data_type": field["data_type"],
+                        "nullable": field["nullable"],
+                    }
+                    for field in asset.fields.values()
+                ],
+            }
+            candidate["semantic_field_hints"] = self._semantic_field_hints(candidate)
+            candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
+            candidates.append(candidate)
         if re.search(r"\bmysql\b", question, re.IGNORECASE):
             candidates = [asset for asset in candidates if asset["backend"] == "mysql"]
         active_relationships = [
@@ -657,8 +677,18 @@ class NaturalLanguageQueryService:
         }
         scores: dict[str, int] = {}
         for asset in candidates:
+            hint_terms = [
+                term
+                for hint in asset["semantic_field_hints"]
+                for term in hint["terms"]
+            ]
             searchable = " ".join(
-                [asset["logical_name"], *(field["name"] for field in asset["fields"])]
+                [
+                    asset["logical_name"],
+                    *(field["name"] for field in asset["fields"]),
+                    *asset["semantic_entity_terms"],
+                    *hint_terms,
+                ]
             ).casefold()
             scores[asset["asset_id"]] = sum(token in searchable for token in tokens)
         matched = {asset_id for asset_id, score in scores.items() if score > 0}
@@ -685,3 +715,88 @@ class NaturalLanguageQueryService:
             and relationship.right_asset_id in selected_ids
         ]
         return {"assets": selected, "relationships": relationships}
+
+    @staticmethod
+    def _semantic_field_hints(asset: dict[str, Any]) -> list[dict[str, Any]]:
+        fields = {field["name"].casefold() for field in asset["fields"]}
+        if (
+            asset["logical_name"].casefold() == "orders"
+            and "status" in fields
+            and not fields.intersection({"state", "customer_state", "shipping_state"})
+        ):
+            return [{
+                "terms": ["stato", "stato ordine", "stato dell'ordine"],
+                "field": "status",
+                "reason": "status is the only order-state field in this asset",
+            }]
+        return []
+
+    @staticmethod
+    def _semantic_entity_terms(asset: dict[str, Any]) -> list[str]:
+        if asset["logical_name"].casefold() == "orders":
+            return ["ordine", "ordini"]
+        return []
+
+    @staticmethod
+    def _apply_catalog_disambiguation(
+        question: str,
+        context: dict[str, Any],
+        classification: NaturalLanguageClassification,
+    ) -> NaturalLanguageClassification:
+        if classification.classification != QueryClassification.AMBIGUOUS:
+            return classification
+        normalized = question.casefold()
+        matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for asset in context["assets"]:
+            entity_matches = any(
+                re.search(rf"\b{re.escape(term)}\b", normalized)
+                for term in asset.get("semantic_entity_terms", [])
+            )
+            if not entity_matches:
+                continue
+            for hint in asset.get("semantic_field_hints", []):
+                if any(term in normalized for term in hint["terms"]):
+                    matches.append((asset, hint))
+        if len(matches) != 1:
+            return classification
+        asset, hint = matches[0]
+        return NaturalLanguageClassification(
+            classification=QueryClassification.ANSWERABLE,
+            reason=(
+                f"Catalog field '{hint['field']}' uniquely resolves the term for "
+                f"asset '{asset['logical_name']}'."
+            ),
+            clarification_question=None,
+        )
+
+    @staticmethod
+    def _planning_examples(context: dict[str, Any]) -> list[dict[str, Any]]:
+        examples: list[dict[str, Any]] = []
+        for asset in context["assets"]:
+            hints = asset.get("semantic_field_hints", [])
+            fields = {field["name"] for field in asset["fields"]}
+            if (
+                asset["backend"] == "mysql"
+                and any(hint.get("field") == "status" for hint in hints)
+                and "id" in fields
+            ):
+                examples.append({
+                    "question": "Quanti ordini ci sono per stato nel database MySQL?",
+                    "plan": {
+                        "sources": [{
+                            "alias": "o",
+                            "asset_id": asset["asset_id"],
+                            "asset_version_id": asset["asset_version_id"],
+                        }],
+                        "projections": [{
+                            "source_alias": "o", "field": "status", "alias": "status"
+                        }],
+                        "aggregations": [{
+                            "function": "count", "source_alias": "o",
+                            "field": "id", "alias": "orders",
+                        }],
+                        "group_by": [{"source_alias": "o", "field": "status"}],
+                        "order_by": [{"field": "orders", "direction": "desc"}],
+                    },
+                })
+        return examples

@@ -541,10 +541,24 @@ class _NaturalClient:
 
 
 class _SequencedNaturalClient(_NaturalClient):
-    def __init__(self, *plans: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *plans: dict[str, Any],
+        classification: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(plans[0])
         self.plans = list(plans)
+        self.classification = classification or {
+            "classification": "answerable",
+            "reason": "I dati sono disponibili.",
+        }
         self.planning_calls: list[list[dict[str, str]]] = []
+
+    def chat_text(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any] | None = None,
+    ) -> OllamaTextResponse:
+        self.prompts.extend(message["content"] for message in messages)
+        return OllamaTextResponse(json.dumps(self.classification), {})
 
     def chat_json(
         self, messages: list[dict[str, str]], json_schema: dict[str, Any]
@@ -609,6 +623,51 @@ def test_natural_language_mysql_hint_excludes_same_named_duckdb_schema(
     assert [item.field for item in response.normalized_plan.projections] == [
         "id", "customer_id", "status", "total", "created_at"
     ]
+
+
+def test_italian_mysql_orders_count_by_status_is_catalog_disambiguated(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    _add_duckdb_orders(settings)
+    expected = _mysql_plan(assets)
+    client = _SequencedNaturalClient(
+        expected,
+        classification={
+            "classification": "ambiguous",
+            "reason": "Il termine stato potrebbe essere ambiguo.",
+            "clarification_question": "Quale stato intendi?",
+        },
+    )
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quanti ordini ci sono per stato nel database MySQL?"
+        )
+    )
+
+    assert response.classification == "answerable"
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.sources[0].asset_id == assets["orders"].asset_id
+    assert [(item.field, item.alias) for item in plan.projections] == [
+        ("status", "status")
+    ]
+    assert [
+        (item.function.value, item.field, item.alias) for item in plan.aggregations
+    ] == [("count", "id", "orders")]
+    assert [item.field for item in plan.group_by] == ["status"]
+    serialized = json.dumps(plan.model_dump(mode="json"))
+    assert "order_id" not in serialized and "order_status" not in serialized
+
+    prompt_payload = json.loads(client.planning_calls[0][1]["content"])
+    catalog_assets = prompt_payload["catalog"]["assets"]
+    assert [asset["logical_name"] for asset in catalog_assets] == ["orders"]
+    hint = catalog_assets[0]["semantic_field_hints"][0]
+    assert hint["field"] == "status" and "stato" in hint["terms"]
+    example = prompt_payload["catalog_scoped_resolution_examples"][0]["plan"]
+    assert example["sources"][0]["asset_id"] == assets["orders"].asset_id
+    assert example["group_by"] == [{"source_alias": "o", "field": "status"}]
 
 
 def test_natural_language_field_not_found_retry_receives_exact_mysql_schema(
