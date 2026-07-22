@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from queryx.app.query.models import AggregationFunction, FilterOperator, OutputField
-from queryx.app.query.validation import ValidatedPlan, _aggregation_name
+from queryx.app.query.validation import (
+    ValidatedPlan,
+    _aggregation_name,
+    _mongodb_output_name,
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,10 @@ class MongoDBQueryCompiler:
         else:
             project = {"_id": 0}
             for projection in plan.projections:
-                project[projection.alias or projection.field] = f"${projection.field}"
+                output_name = _mongodb_output_name(
+                    projection.field, projection.alias
+                )
+                project[output_name] = f"${projection.field}"
             pipeline.append({"$project": project})
 
         if plan.order_by:
@@ -81,7 +88,9 @@ class MongoDBQueryCompiler:
                 None,
             )
             group_names[(group.source_alias, group.field)] = (
-                projection.alias or projection.field if projection else group.field
+                _mongodb_output_name(projection.field, projection.alias)
+                if projection
+                else _mongodb_output_name(group.field, None)
             )
         group_id: Any = None
         if group_names:

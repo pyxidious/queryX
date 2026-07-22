@@ -52,6 +52,10 @@ For an asset whose backend is mysql, use exactly one source, no joins and no tra
 For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
 For MongoDB profiles, use preferences.newsletter for newsletter conditions when that exact field is listed; never shorten it to newsletter.
 "newsletter attiva" or "newsletter abilitata" means exactly one eq true filter; "newsletter disattiva" or "newsletter non attiva" means exactly one eq false filter. Do not add is_not_null to a boolean comparison.
+For MongoDB profiles, "lingua inglese" means exactly one preferences.language eq "en" filter and "lingua italiana" means exactly one preferences.language eq "it" filter, only when that exact field is listed.
+For MongoDB events, "per tipo" means project and group_by type together with count(_id) as events.
+For MongoDB events, "importo totale" means sum(properties.amount) as total and "importo medio" means avg(properties.amount) as avg_amount, with no projections, filters, group_by or order_by.
+For MongoDB events, an explicit numeric user such as "utente 1" means exactly one user_id eq 1 filter using a numeric value when user_id is numeric.
 For a count request, output only the requested count aggregation: do not add row projections, filters, group_by or order_by unless explicitly requested.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
@@ -623,15 +627,53 @@ class NaturalLanguageQueryService:
                     )
                     for item in candidate.get("aggregations", [])
                 )
-                if not matched or candidate.get("group_by"):
+                if not matched or (
+                    candidate.get("group_by") and not requirements.get("group_by")
+                ):
                     raise _PlanningSemanticError("metric_aggregation_mismatch")
             if requirements.get("strict_mongodb_count_shape"):
+                aggregations = candidate.get("aggregations", [])
+                expected = requirements["aggregation"]
+                expected_filter_count = 1 if required_filter is not None else 0
+                expected_group = requirements.get("group_by")
+                projections = candidate.get("projections", [])
+                group_by = candidate.get("group_by", [])
+                grouped_shape_invalid = False
+                if expected_group is not None:
+                    grouped_shape_invalid = (
+                        len(projections) != 1
+                        or not isinstance(projections[0], dict)
+                        or projections[0].get("source_alias") != alias
+                        or projections[0].get("field") != expected_group["field"]
+                        or len(group_by) != 1
+                        or not isinstance(group_by[0], dict)
+                        or group_by[0].get("source_alias") != alias
+                        or group_by[0].get("field") != expected_group["field"]
+                    )
+                else:
+                    grouped_shape_invalid = bool(projections or group_by)
+                if (
+                    len(aggregations) != 1
+                    or not isinstance(aggregations[0], dict)
+                    or aggregations[0].get("function") != "count"
+                    or aggregations[0].get("source_alias") != alias
+                    or aggregations[0].get("field") != expected["field"]
+                    or aggregations[0].get("alias") != expected["alias"]
+                    or len(candidate.get("filters", [])) != expected_filter_count
+                    or grouped_shape_invalid
+                    or (
+                        candidate.get("order_by")
+                        and not requirements.get("ordering_requested")
+                    )
+                ):
+                    raise _PlanningSemanticError("mongodb_count_intent_mismatch")
+            if requirements.get("strict_mongodb_scalar_aggregation"):
                 aggregations = candidate.get("aggregations", [])
                 expected = requirements["aggregation"]
                 if (
                     len(aggregations) != 1
                     or not isinstance(aggregations[0], dict)
-                    or aggregations[0].get("function") != "count"
+                    or aggregations[0].get("function") != expected["function"]
                     or aggregations[0].get("source_alias") != alias
                     or aggregations[0].get("field") != expected["field"]
                     or aggregations[0].get("alias") != expected["alias"]
@@ -640,7 +682,9 @@ class NaturalLanguageQueryService:
                     or candidate.get("group_by")
                     or candidate.get("order_by")
                 ):
-                    raise _PlanningSemanticError("mongodb_count_intent_mismatch")
+                    raise _PlanningSemanticError(
+                        "mongodb_scalar_aggregation_mismatch"
+                    )
         return validation
 
     @staticmethod
@@ -751,6 +795,7 @@ class NaturalLanguageQueryService:
             "mongodb_filter_mismatch",
             "mongodb_row_projection_mismatch",
             "mongodb_count_intent_mismatch",
+            "mongodb_scalar_aggregation_mismatch",
         }:
             instruction = (
                 "Regenerate only the MongoDB LogicalQueryPlan from a clean state using the exact "
@@ -1005,19 +1050,55 @@ class NaturalLanguageQueryService:
         if (
             asset.get("backend") == "mongodb"
             and asset["logical_name"].casefold() == "profiles"
-            and "preferences.newsletter" in fields
         ):
-            return [{
-                "terms": [
-                    "newsletter",
-                    "newsletter attiva",
-                    "newsletter abilitata",
-                    "newsletter disattiva",
-                    "newsletter non attiva",
-                ],
-                "field": "preferences.newsletter",
-                "reason": "the newsletter flag is nested in the observed profiles schema",
-            }]
+            hints: list[dict[str, Any]] = []
+            if "preferences.newsletter" in fields:
+                hints.append({
+                    "terms": [
+                        "newsletter",
+                        "newsletter attiva",
+                        "newsletter abilitata",
+                        "newsletter disattiva",
+                        "newsletter non attiva",
+                    ],
+                    "field": "preferences.newsletter",
+                    "reason": "the newsletter flag is nested in the observed profiles schema",
+                })
+            if "preferences.language" in fields:
+                hints.append({
+                    "terms": [
+                        "lingua",
+                        "lingua inglese",
+                        "lingua italiana",
+                        "language",
+                        "English language",
+                        "Italian language",
+                    ],
+                    "field": "preferences.language",
+                    "reason": "the language code is nested in the observed profiles schema",
+                })
+            return hints
+        if asset.get("backend") == "mongodb" and asset["logical_name"].casefold() == "events":
+            hints: list[dict[str, Any]] = []
+            if "type" in fields:
+                hints.append({
+                    "terms": ["tipo", "per tipo", "type"],
+                    "field": "type",
+                    "reason": "type is the observed event category field",
+                })
+            if "user_id" in fields:
+                hints.append({
+                    "terms": ["utente", "user", "user id"],
+                    "field": "user_id",
+                    "reason": "user_id is the observed event user field",
+                })
+            if "properties.amount" in fields:
+                hints.append({
+                    "terms": ["importo", "amount"],
+                    "field": "properties.amount",
+                    "reason": "properties.amount is the observed event amount field",
+                })
+            return hints
         if (
             asset["logical_name"].casefold() == "orders"
             and "status" in fields
@@ -1047,24 +1128,43 @@ class NaturalLanguageQueryService:
             field["name"].casefold(): str(field["data_type"]).casefold()
             for field in asset["fields"]
         }
+        numeric_tokens = ("int", "decimal", "numeric", "float", "double", "real")
+        hints: list[dict[str, Any]] = []
         total_type = fields.get("total", "")
-        if not any(
-            numeric in total_type
-            for numeric in ("int", "decimal", "numeric", "float", "double", "real")
+        if any(numeric in total_type for numeric in numeric_tokens):
+            hints.extend([
+                {
+                    "terms": ["totale medio", "media del totale", "valore medio"],
+                    "field": "total",
+                    "aggregation": "avg",
+                },
+                {
+                    "terms": ["valore totale", "somma dei totali", "totale complessivo"],
+                    "field": "total",
+                    "aggregation": "sum",
+                },
+            ])
+        amount_type = fields.get("properties.amount", "")
+        if (
+            asset.get("backend") == "mongodb"
+            and asset["logical_name"].casefold() == "events"
+            and any(numeric in amount_type for numeric in numeric_tokens)
         ):
-            return []
-        return [
-            {
-                "terms": ["totale medio", "media del totale", "valore medio"],
-                "field": "total",
-                "aggregation": "avg",
-            },
-            {
-                "terms": ["valore totale", "somma dei totali", "totale complessivo"],
-                "field": "total",
-                "aggregation": "sum",
-            },
-        ]
+            hints.extend([
+                {
+                    "terms": ["importo totale", "somma degli importi", "total amount"],
+                    "field": "properties.amount",
+                    "aggregation": "sum",
+                    "alias": "total",
+                },
+                {
+                    "terms": ["importo medio", "media degli importi", "average amount"],
+                    "field": "properties.amount",
+                    "aggregation": "avg",
+                    "alias": "avg_amount",
+                },
+            ])
+        return hints
 
     @staticmethod
     def _semantic_requirements(
@@ -1086,7 +1186,7 @@ class NaturalLanguageQueryService:
         intent = NaturalLanguageQueryService._question_intent(normalized)
         if intent is not None:
             requirements["intent"] = intent
-        if intent == "row_returning":
+        if intent in {"row_returning", "count"}:
             requirements["ordering_requested"] = (
                 NaturalLanguageQueryService._ordering_requested(normalized)
             )
@@ -1095,6 +1195,7 @@ class NaturalLanguageQueryService:
                 requirements["aggregation"] = {
                     "function": hint["aggregation"],
                     "field": hint["field"],
+                    **({"alias": hint["alias"]} if hint.get("alias") else {}),
                 }
                 break
         explicit_status = re.search(
@@ -1132,7 +1233,7 @@ class NaturalLanguageQueryService:
                 or NaturalLanguageQueryService._default_row_fields(asset)
             )
         if asset.get("backend") == "mongodb" and intent == "count":
-            fields = {str(field["name"]) for field in asset["fields"]}
+            fields = {str(field["name"]): field for field in asset["fields"]}
             if "_id" in fields:
                 requirements["aggregation"] = {
                     "function": "count",
@@ -1140,6 +1241,37 @@ class NaturalLanguageQueryService:
                     "alias": asset["logical_name"],
                 }
                 requirements["strict_mongodb_count_shape"] = True
+            if (
+                asset["logical_name"].casefold() == "events"
+                and "type" in fields
+                and re.search(r"\bper\s+tipo\b", normalized)
+            ):
+                requirements["group_by"] = {"field": "type"}
+            user_filter = NaturalLanguageQueryService._mongodb_event_user_filter(
+                normalized, fields
+            )
+            if asset["logical_name"].casefold() == "events" and user_filter:
+                requirements["filter"] = user_filter
+                requirements["exact_filter"] = True
+        if (
+            asset.get("backend") == "mongodb"
+            and asset["logical_name"].casefold() == "events"
+            and requirements.get("aggregation", {}).get("function") in {"sum", "avg"}
+            and intent != "count"
+        ):
+            requirements["strict_mongodb_scalar_aggregation"] = True
+        if (
+            asset.get("backend") == "mongodb"
+            and asset["logical_name"].casefold() == "events"
+            and intent == "row_returning"
+        ):
+            fields = {str(field["name"]): field for field in asset["fields"]}
+            amount_filter = NaturalLanguageQueryService._mongodb_event_amount_filter(
+                normalized, fields
+            )
+            if amount_filter is not None:
+                requirements["filter"] = amount_filter
+                requirements["exact_filter"] = True
         if (
             asset.get("backend") == "mongodb"
             and asset["logical_name"].casefold() == "profiles"
@@ -1148,6 +1280,7 @@ class NaturalLanguageQueryService:
             newsletter_value = NaturalLanguageQueryService._newsletter_value(
                 normalized
             )
+            language_value = NaturalLanguageQueryService._language_value(normalized)
             fields = {str(field["name"]) for field in asset["fields"]}
             if newsletter_value is not None and "preferences.newsletter" in fields:
                 requirements["filter"] = {
@@ -1171,7 +1304,58 @@ class NaturalLanguageQueryService:
                     )
                     if field in fields
                 ]
+            elif language_value is not None and "preferences.language" in fields:
+                requirements["filter"] = {
+                    "field": "preferences.language",
+                    "operator": "eq",
+                    "value": language_value,
+                }
+                requirements["exact_filter"] = True
+                requirements["strict_mongodb_row_shape"] = True
+                requirements["required_projections"] = [
+                    field
+                    for field in ("email", "preferences.language")
+                    if field in fields
+                ]
+                requirements["allowed_projections"] = list(
+                    requirements["required_projections"]
+                )
         return requirements
+
+    @staticmethod
+    def _mongodb_event_user_filter(
+        normalized_question: str, fields: dict[str, dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        field = fields.get("user_id")
+        match = re.search(r"\b(?:utente|user)\s+(\d+)\b", normalized_question)
+        if field is None or match is None:
+            return None
+        data_type = str(field.get("data_type", "")).casefold()
+        if not any(token in data_type for token in ("int", "numeric", "decimal")):
+            return None
+        return {"field": "user_id", "operator": "eq", "value": int(match.group(1))}
+
+    @staticmethod
+    def _mongodb_event_amount_filter(
+        normalized_question: str, fields: dict[str, dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        field = fields.get("properties.amount")
+        match = re.search(
+            r"\bimporto\s+(?:maggiore|superiore)\s+(?:(?:a|di)\s+)?"
+            r"(-?\d+(?:\.\d+)?)\b",
+            normalized_question,
+        )
+        if field is None or match is None:
+            return None
+        data_type = str(field.get("data_type", "")).casefold()
+        if not any(
+            token in data_type
+            for token in ("int", "numeric", "decimal", "float", "double", "real")
+        ):
+            return None
+        raw_value = match.group(1)
+        value: int | float = float(raw_value) if "." in raw_value else int(raw_value)
+        return {"field": "properties.amount", "operator": "gt", "value": value}
 
     @staticmethod
     def _newsletter_value(normalized_question: str) -> bool | None:
@@ -1185,6 +1369,20 @@ class NaturalLanguageQueryService:
             normalized_question,
         ):
             return True
+        return None
+
+    @staticmethod
+    def _language_value(normalized_question: str) -> str | None:
+        if re.search(
+            r"\b(?:lingua\s+inglese|english\s+language)\b",
+            normalized_question,
+        ):
+            return "en"
+        if re.search(
+            r"\b(?:lingua\s+italiana|italian\s+language)\b",
+            normalized_question,
+        ):
+            return "it"
         return None
 
     @staticmethod
@@ -1480,6 +1678,101 @@ class NaturalLanguageQueryService:
                                 "source_alias": "profiles",
                                 "field": "_id",
                                 "alias": "profiles",
+                            }],
+                            "group_by": [],
+                            "order_by": [],
+                        },
+                    },
+                ])
+                if "preferences.language" in fields:
+                    examples.append({
+                        "question": "Mostra i profili MongoDB con lingua inglese",
+                        "intent": "row_returning",
+                        "plan": {
+                            "sources": [{
+                                "alias": "profiles",
+                                "asset_id": asset["asset_id"],
+                                "asset_version_id": asset["asset_version_id"],
+                            }],
+                            "projections": [{
+                                "source_alias": "profiles", "field": field
+                            } for field in ("email", "preferences.language")],
+                            "filters": [{
+                                "source_alias": "profiles",
+                                "field": "preferences.language",
+                                "operator": "eq",
+                                "value": "en",
+                            }],
+                            "aggregations": [],
+                            "group_by": [],
+                            "order_by": [],
+                        },
+                    })
+            if (
+                asset["backend"] == "mongodb"
+                and asset["logical_name"].casefold() == "events"
+                and {"_id", "type", "properties.amount", "user_id"}.issubset(fields)
+            ):
+                source = {
+                    "alias": "events",
+                    "asset_id": asset["asset_id"],
+                    "asset_version_id": asset["asset_version_id"],
+                }
+                examples.extend([
+                    {
+                        "question": "Quanti eventi ci sono per tipo nel database MongoDB?",
+                        "intent": "count",
+                        "plan": {
+                            "sources": [source],
+                            "projections": [{
+                                "source_alias": "events", "field": "type"
+                            }],
+                            "filters": [],
+                            "aggregations": [{
+                                "function": "count", "source_alias": "events",
+                                "field": "_id", "alias": "events",
+                            }],
+                            "group_by": [{
+                                "source_alias": "events", "field": "type"
+                            }],
+                            "order_by": [],
+                        },
+                    },
+                    *[
+                        {
+                            "question": question,
+                            "plan": {
+                                "sources": [source],
+                                "projections": [],
+                                "filters": [],
+                                "aggregations": [{
+                                    "function": function,
+                                    "source_alias": "events",
+                                    "field": "properties.amount",
+                                    "alias": alias,
+                                }],
+                                "group_by": [],
+                                "order_by": [],
+                            },
+                        }
+                        for question, function, alias in (
+                            ("Qual è l’importo totale degli eventi MongoDB?", "sum", "total"),
+                            ("Qual è l’importo medio degli eventi MongoDB?", "avg", "avg_amount"),
+                        )
+                    ],
+                    {
+                        "question": "Quanti eventi MongoDB sono stati generati dall’utente 1?",
+                        "intent": "count",
+                        "plan": {
+                            "sources": [source],
+                            "projections": [],
+                            "filters": [{
+                                "source_alias": "events", "field": "user_id",
+                                "operator": "eq", "value": 1,
+                            }],
+                            "aggregations": [{
+                                "function": "count", "source_alias": "events",
+                                "field": "_id", "alias": "events",
                             }],
                             "group_by": [],
                             "order_by": [],

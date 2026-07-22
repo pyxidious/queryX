@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -104,7 +105,9 @@ class PlanValidator:
             relationships = self._validate_joins(normalized, resolved)
         self._validate_backend_operators(normalized, backend)
         self._validate_filters(normalized, resolved)
-        output_schema, output_names = self._validate_outputs(normalized, resolved)
+        output_schema, output_names = self._validate_outputs(
+            normalized, resolved, backend
+        )
         self._validate_group_by(normalized, resolved)
         for order in normalized.order_by:
             if order.field not in output_names:
@@ -359,7 +362,10 @@ class PlanValidator:
             self._field(source, query_filter.field)
 
     def _validate_outputs(
-        self, plan: LogicalQueryPlan, sources: dict[str, ResolvedSource]
+        self,
+        plan: LogicalQueryPlan,
+        sources: dict[str, ResolvedSource],
+        backend: str,
     ) -> tuple[list[OutputField], set[str]]:
         if not plan.projections and not plan.aggregations:
             raise QueryValidationError("empty_projection", "At least one projection or aggregation is required")
@@ -376,7 +382,11 @@ class PlanValidator:
                     "invalid_transform_type", "date_trunc_month requires a date or timestamp field",
                     details={"field": projection.field},
                 )
-            name = projection.alias or projection.field
+            name = (
+                _mongodb_output_name(projection.field, projection.alias)
+                if backend == "mongodb"
+                else projection.alias or projection.field
+            )
             self._add_output_name(names, name)
             output.append(OutputField(
                 name=name,
@@ -392,6 +402,12 @@ class PlanValidator:
                     details={"field": aggregation.field},
                 )
             name = aggregation.alias or _aggregation_name(aggregation)
+            if backend == "mongodb" and not _safe_mongodb_output_name(name):
+                raise QueryValidationError(
+                    "invalid_mongodb_output_alias",
+                    "MongoDB output aliases must be flat safe identifiers",
+                    details={"alias": name},
+                )
             self._add_output_name(names, name)
             output.append(OutputField(
                 name=name,
@@ -507,3 +523,18 @@ def _safe_mongodb_field(field: str) -> bool:
         part and not part.startswith("$") and "[]" not in part
         for part in parts
     )
+
+
+def _safe_mongodb_output_name(name: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,255}", name))
+
+
+def _mongodb_output_name(field: str, alias: str | None) -> str:
+    name = alias or field.rsplit(".", 1)[-1]
+    if not _safe_mongodb_output_name(name):
+        raise QueryValidationError(
+            "invalid_mongodb_output_alias",
+            "MongoDB output aliases must be flat safe identifiers",
+            details={"alias": name},
+        )
+    return name

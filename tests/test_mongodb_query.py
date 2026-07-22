@@ -89,7 +89,7 @@ def _profiles_events_collections() -> tuple[list[dict[str, Any]], list[dict[str,
             ("properties.device", "str"),
             ("properties.path", "str"),
             ("type", "str"),
-            ("user_id", "object_id"),
+            ("user_id", "int"),
             ("tags", "array"),
             ("items", "array"),
         ],
@@ -232,6 +232,25 @@ def _profiles_count_plan(asset: Any) -> dict[str, Any]:
     }
 
 
+def _language_plan(asset: Any, value: str) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "profiles", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "profiles", "field": "email"},
+            {"source_alias": "profiles", "field": "preferences.language"},
+        ],
+        "filters": [{
+            "source_alias": "profiles",
+            "field": "preferences.language",
+            "operator": "eq",
+            "value": value,
+        }],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+    }
+
+
 def _events_plan(asset: Any) -> dict[str, Any]:
     return {
         "sources": [{"alias": "events", "asset_id": asset.asset_id}],
@@ -240,6 +259,75 @@ def _events_plan(asset: Any) -> dict[str, Any]:
             {"source_alias": "events", "field": "created_at"},
         ],
         "filters": [],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+    }
+
+
+def _events_count_plan(asset: Any, *, grouped: bool = False) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "events", "asset_id": asset.asset_id}],
+        "projections": (
+            [{"source_alias": "events", "field": "type"}] if grouped else []
+        ),
+        "filters": [],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "events",
+            "field": "_id",
+            "alias": "events",
+        }],
+        "group_by": (
+            [{"source_alias": "events", "field": "type"}] if grouped else []
+        ),
+        "order_by": [],
+    }
+
+
+def _events_amount_metric_plan(
+    asset: Any, function: str, alias: str
+) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "events", "asset_id": asset.asset_id}],
+        "projections": [],
+        "filters": [],
+        "aggregations": [{
+            "function": function,
+            "source_alias": "events",
+            "field": "properties.amount",
+            "alias": alias,
+        }],
+        "group_by": [],
+        "order_by": [],
+    }
+
+
+def _events_user_count_plan(asset: Any, value: int | str) -> dict[str, Any]:
+    plan = _events_count_plan(asset)
+    plan["filters"] = [{
+        "source_alias": "events",
+        "field": "user_id",
+        "operator": "eq",
+        "value": value,
+    }]
+    return plan
+
+
+def _events_amount_rows_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "events", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "events", "field": "type"},
+            {"source_alias": "events", "field": "user_id"},
+            {"source_alias": "events", "field": "properties.amount"},
+        ],
+        "filters": [{
+            "source_alias": "events",
+            "field": "properties.amount",
+            "operator": "gt",
+            "value": 100,
+        }],
         "aggregations": [],
         "group_by": [],
         "order_by": [],
@@ -572,6 +660,52 @@ def test_mongodb_executor_connection_timeout_and_close(
             "mongodb://unused", 1, client_factory=lambda: timeout_client
         ).execute(compiled)
     assert timeout.value.code == "query_timeout" and timeout_client.closed is True
+
+
+@pytest.mark.parametrize(
+    ("payload_factory", "nested_field", "output_name", "output_value"),
+    [
+        (_language_plan, "preferences.language", "language", "en"),
+        (_newsletter_plan, "preferences.newsletter", "newsletter", True),
+    ],
+)
+def test_mongodb_nested_projection_uses_flat_implicit_alias_and_real_value(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    payload_factory: Any,
+    nested_field: str,
+    output_name: str,
+    output_value: Any,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    payload = payload_factory(assets["profiles"], output_value)
+    if nested_field == "preferences.newsletter":
+        payload["projections"] = [{
+            "source_alias": "profiles", "field": nested_field
+        }]
+    validated = service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    compiled = service.mongodb_compiler.compile(validated)
+
+    assert compiled.pipeline[0] == {"$match": {nested_field: output_value}}
+    expected_project = {"_id": 0}
+    for projection in payload["projections"]:
+        expected_project[projection["field"].rsplit(".", 1)[-1]] = (
+            f"${projection['field']}"
+        )
+    assert compiled.pipeline[1] == {"$project": expected_project}
+    assert compiled.pipeline[-1] == {"$limit": settings.query_default_limit + 1}
+    assert output_name in [field.name for field in compiled.output_schema]
+
+    document = {
+        projection["field"].rsplit(".", 1)[-1]: (
+            output_value if projection["field"] == nested_field else "a@example.test"
+        )
+        for projection in payload["projections"]
+    }
+    columns, rows, truncated, _ = MongoDBQueryExecutor(
+        "mongodb://unused", 1, client_factory=lambda: _Client([document])
+    ).execute(compiled)
+    assert rows[0][columns.index(output_name)] == output_value
+    assert truncated is False
 
 
 class _NaturalClient:
@@ -967,3 +1101,212 @@ def test_natural_language_mongodb_english_query_and_explanation_language(
     assert response.normalized_plan.filters[0].value is True
     explanation_prompt = client.explanation_calls[0][0]["content"]
     assert "same language" in explanation_prompt
+
+
+def test_natural_language_mongodb_english_language_filter_is_required_once(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    invalid = _language_plan(assets["profiles"], "en")
+    invalid["filters"] = []
+    corrected = _language_plan(assets["profiles"], "en")
+    client = _SequencedNaturalClient(
+        invalid,
+        corrected,
+        explanation="I profili trovati usano la lingua inglese.",
+    )
+    executions = 0
+
+    def execute(compiled: Any) -> Any:
+        nonlocal executions
+        executions += 1
+        return (["email", "language"], [["a@example.test", "en"]], False, 1.0)
+
+    monkeypatch.setattr(service.mongodb_executor, "execute", execute)
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Mostra i profili MongoDB con lingua inglese", execute=True
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None and len(plan.filters) == 1
+    assert (
+        plan.filters[0].field,
+        plan.filters[0].operator.value,
+        plan.filters[0].value,
+    ) == ("preferences.language", "eq", "en")
+    assert [item.field for item in plan.projections] == [
+        "email", "preferences.language"
+    ]
+    assert response.result is not None
+    assert response.result.columns == ["email", "language"]
+    assert response.result.rows == [["a@example.test", "en"]]
+    assert response.answer == "I profili trovati usano la lingua inglese."
+    assert executions == 1
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "missing_explicit_filter"
+
+
+def test_natural_language_mongodb_italian_language_maps_to_it(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(_language_plan(assets["profiles"], "it"))
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra i profili MongoDB con lingua italiana"
+        )
+    )
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.filters[0].value == "it"
+    assert [field.name for field in response.output_schema] == ["email", "language"]
+
+
+def test_natural_language_mongodb_events_count_per_type_requires_group_by(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    scalar = _events_count_plan(assets["events"])
+    grouped = _events_count_plan(assets["events"], grouped=True)
+    client = _SequencedNaturalClient(scalar, grouped)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quanti eventi ci sono per tipo nel database MongoDB?"
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert [item.field for item in plan.projections] == ["type"]
+    assert [item.field for item in plan.group_by] == ["type"]
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "_id", "events")
+    ]
+    assert plan.filters == [] and plan.order_by == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_count_intent_mismatch"
+
+
+def test_natural_language_mongodb_total_count_is_distinct_from_grouped_count(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _events_count_plan(assets["events"]),
+        _events_count_plan(assets["events"], grouped=True),
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+
+    total = service.translate(NaturalLanguageQueryRequest(
+        question="Quanti eventi ci sono nel database MongoDB?"
+    ))
+    grouped = service.translate(NaturalLanguageQueryRequest(
+        question="Quanti eventi ci sono per tipo nel database MongoDB?"
+    ))
+
+    assert total.normalized_plan is not None and total.normalized_plan.group_by == []
+    assert total.normalized_plan.projections == []
+    assert grouped.normalized_plan is not None
+    assert [item.field for item in grouped.normalized_plan.group_by] == ["type"]
+    assert len(client.planning_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("question", "function", "alias"),
+    [
+        ("Qual è l’importo totale degli eventi MongoDB?", "sum", "total"),
+        ("Qual è l’importo medio degli eventi MongoDB?", "avg", "avg_amount"),
+    ],
+)
+def test_natural_language_mongodb_event_amount_scalar_aggregation_has_no_order(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    question: str,
+    function: str,
+    alias: str,
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    invalid = _events_amount_metric_plan(assets["events"], function, alias)
+    invalid["order_by"] = [{"field": alias, "direction": "desc"}]
+    corrected = _events_amount_metric_plan(assets["events"], function, alias)
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question=question)
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        (function, "properties.amount", alias)
+    ]
+    assert plan.projections == [] and plan.filters == []
+    assert plan.group_by == [] and plan.order_by == []
+    assert [field.name for field in response.output_schema] == [alias]
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_scalar_aggregation_mismatch"
+
+
+def test_natural_language_mongodb_filtered_event_count_uses_numeric_literal(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, query_service, assets = mongodb_profiles_env
+    invalid = _events_user_count_plan(assets["events"], "1")
+    corrected = _events_user_count_plan(assets["events"], 1)
+    client = _SequencedNaturalClient(invalid, corrected)
+    executions = 0
+
+    def execute(compiled: Any) -> Any:
+        nonlocal executions
+        executions += 1
+        return (["events"], [[1]], False, 1.0)
+
+    monkeypatch.setattr(query_service.mongodb_executor, "execute", execute)
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=query_service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Quanti eventi MongoDB sono stati generati dall’utente 1?",
+        execute=True,
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None and len(plan.filters) == 1
+    assert plan.filters[0].field == "user_id"
+    assert plan.filters[0].operator.value == "eq"
+    assert plan.filters[0].value == 1
+    assert isinstance(plan.filters[0].value, int)
+    assert plan.projections == [] and plan.group_by == [] and plan.order_by == []
+    assert response.result is not None and response.result.rows == [[1]]
+    assert executions == 1
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "missing_explicit_filter"
+
+
+def test_natural_language_mongodb_amount_filter_remains_row_returning(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(_events_amount_rows_plan(assets["events"]))
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra gli eventi MongoDB con importo maggiore di 100"
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None and plan.aggregations == [] and plan.group_by == []
+    assert len(plan.filters) == 1
+    assert (
+        plan.filters[0].field,
+        plan.filters[0].operator.value,
+        plan.filters[0].value,
+    ) == ("properties.amount", "gt", 100)
+    assert [item.field for item in plan.projections] == [
+        "type", "user_id", "properties.amount"
+    ]
