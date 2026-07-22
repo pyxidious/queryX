@@ -136,7 +136,11 @@ class OllamaClient:
         }
         return OllamaResponse(content=parsed, metrics=metrics)
 
-    def chat_text(self, messages: list[dict[str, str]]) -> OllamaTextResponse:
+    def chat_text(
+        self,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any] | None = None,
+    ) -> OllamaTextResponse:
         self.ensure_model()
         payload = {
             "model": self.model,
@@ -149,6 +153,8 @@ class OllamaClient:
                 "num_ctx": self.num_ctx,
             },
         }
+        if json_schema is not None:
+            payload["format"] = json_schema
         started = monotonic()
         response = self._request("POST", "/api/chat", payload)
         duration_ms = int((monotonic() - started) * 1000)

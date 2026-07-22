@@ -52,7 +52,19 @@ class StubOllamaClient:
     def chat_json(
         self, messages: list[dict[str, str]], json_schema: dict[str, Any]
     ) -> OllamaResponse:
-        if "classification" in json_schema.get("properties", {}):
+        self.calls.append((messages, json_schema))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, dict)
+        return OllamaResponse(response, {})
+
+    def chat_text(
+        self,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any] | None = None,
+    ) -> OllamaTextResponse:
+        if json_schema and "classification" in json_schema.get("properties", {}):
             self.classification_calls.append((messages, json_schema))
             response = (
                 self.classifications.pop(0)
@@ -61,15 +73,8 @@ class StubOllamaClient:
             )
             if isinstance(response, Exception):
                 raise response
-            return OllamaResponse(response, {})
-        self.calls.append((messages, json_schema))
-        response = self.responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        assert isinstance(response, dict)
-        return OllamaResponse(response, {})
-
-    def chat_text(self, messages: list[dict[str, str]]) -> OllamaTextResponse:
+            content = response if isinstance(response, str) else json.dumps(response)
+            return OllamaTextResponse(content, {})
         self.calls.append((messages, {}))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -214,6 +219,104 @@ def test_classification_uses_catalog_before_answerable_planning(
     assert "order_status" in classification_prompt
     assert "logical_query_plan_schema" not in classification_prompt
     assert "physical_location" not in classification_prompt
+    assert 'Input: "Quali sono i clienti migliori?"' in classification_prompt
+    assert "Per migliori intendi i clienti con più ordini" in classification_prompt
+
+
+@pytest.mark.parametrize(
+    "raw_classification",
+    [
+        json.dumps({
+            "classification": "ambiguous",
+            "reason": "Il criterio non è specificato.",
+            "clarification_question": "Intendi più ordini o maggiore spesa?",
+        }),
+        json.dumps({
+            "classification_result": {
+                "classification": "ambiguous",
+                "reason": "Il criterio non è specificato.",
+                "clarification_question": "Intendi più ordini o maggiore spesa?",
+            }
+        }),
+        """```json
+        {"classification":"ambiguous","reason":"Il criterio non è specificato.","clarification_question":"Intendi più ordini o maggiore spesa?"}
+        ```""",
+    ],
+)
+def test_classification_parser_accepts_direct_wrapper_and_json_fence(
+    nl_env: tuple[Settings, dict[str, Any], str], raw_classification: str,
+) -> None:
+    settings, _, _ = nl_env
+    client = StubOllamaClient(classifications=[raw_classification])
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Quali sono i clienti migliori?")
+    )
+
+    assert response.classification == "ambiguous"
+    assert response.clarification_question == "Intendi più ordini o maggiore spesa?"
+    assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    "raw_classification",
+    [
+        json.dumps({
+            "classification": "ambiguous",
+            "reason": "Il criterio non è specificato.",
+            "clarification_question": "Quale criterio?",
+            "extra": "not allowed",
+        }),
+        json.dumps({
+            "classification": "ambiguous",
+            "reason": "Il criterio non è specificato.",
+        }),
+        "prefix " + json.dumps({
+            "classification": "answerable",
+            "reason": "I dati sono disponibili.",
+        }),
+    ],
+)
+def test_classification_parser_rejects_extra_missing_and_surrounding_text(
+    nl_env: tuple[Settings, dict[str, Any], str], raw_classification: str,
+) -> None:
+    settings, _, _ = nl_env
+    client = StubOllamaClient(
+        classifications=[raw_classification, raw_classification]
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+            NaturalLanguageQueryRequest(question="Quali sono i clienti migliori?")
+        )
+
+    assert captured.value.code == "invalid_classification"
+    assert len(client.classification_calls) == 2
+    assert client.calls == []
+
+
+def test_classification_retry_can_recover_with_explicit_schema_error(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, _, _ = nl_env
+    client = StubOllamaClient(classifications=[
+        "not JSON",
+        json.dumps({
+            "classification": "ambiguous",
+            "reason": "Il criterio non è specificato.",
+            "clarification_question": "Quale criterio vuoi usare?",
+        }),
+    ])
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question="Quali sono i clienti migliori?")
+    )
+
+    assert response.classification == "ambiguous"
+    assert len(client.classification_calls) == 2
+    retry = json.loads(client.classification_calls[1][0][-1]["content"])
+    assert retry["validation_error"] == "invalid_json"
+    assert "classification_schema" in retry
 
 
 @pytest.mark.parametrize(

@@ -212,6 +212,11 @@ class NaturalLanguageClassification(StrictModel):
     def require_clarification(self) -> NaturalLanguageClassification:
         if self.classification == QueryClassification.AMBIGUOUS and not self.clarification_question:
             raise ValueError("ambiguous classification requires clarification_question")
+        if (
+            self.classification != QueryClassification.AMBIGUOUS
+            and self.clarification_question is not None
+        ):
+            raise ValueError("clarification_question is only allowed for ambiguous classification")
         return self
 
 

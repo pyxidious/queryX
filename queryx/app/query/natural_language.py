@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from time import monotonic
 from typing import Any
@@ -32,6 +33,7 @@ from queryx.app.query.validation import QueryValidationError
 
 _MAX_CONTEXT_ASSETS = 12
 _MAX_EXPLANATION_ROWS = 10
+logger = logging.getLogger(__name__)
 _QUERY_LANGUAGE = re.compile(
     r"\b(select|insert|update|delete|drop|alter|create|pragma|attach|detach|copy|call)\b",
     re.IGNORECASE,
@@ -54,7 +56,16 @@ Use classification answerable when the requested result is defined and computabl
 Use ambiguous when essential intent is unclear, and provide one concise clarification_question.
 Use unanswerable when required data or metrics are absent, and explain the missing data briefly in reason.
 Do not invent data, perform calculations, or include hidden analysis.
+Exact example:
+Input: "Quali sono i clienti migliori?"
+Output: {"classification":"ambiguous","reason":"Il criterio di migliore non è specificato.","clarification_question":"Per migliori intendi i clienti con più ordini, maggiore spesa o un altro criterio?"}
 """
+
+
+class _ClassificationParseError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class NaturalLanguageQueryError(RuntimeError):
@@ -269,21 +280,36 @@ class NaturalLanguageQueryService:
         ]
         schema = NaturalLanguageClassification.model_json_schema()
         try:
-            candidate = self.client.chat_json(messages, schema).content
-        except OllamaInvalidResponseError:
+            raw_content = self.client.chat_text(messages, schema).content
+            classification = self._parse_classification(raw_content)
+        except (OllamaInvalidResponseError, _ClassificationParseError) as first_error:
+            error_code = (
+                first_error.code
+                if isinstance(first_error, _ClassificationParseError)
+                else "missing_message_content"
+            )
             retry_messages = [
                 *messages,
                 {
                     "role": "user",
-                    "content": "The previous response was not valid JSON. Return only one valid classification JSON object.",
+                    "content": json.dumps(
+                        {
+                            "instruction": "Correct only the classification response and return one valid JSON object matching the schema.",
+                            "validation_error": error_code,
+                            "classification_schema": schema,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                 },
             ]
             try:
-                candidate = self.client.chat_json(retry_messages, schema).content
-            except OllamaInvalidResponseError as exc:
+                raw_content = self.client.chat_text(retry_messages, schema).content
+                classification = self._parse_classification(raw_content)
+            except (OllamaInvalidResponseError, _ClassificationParseError) as exc:
                 raise NaturalLanguageQueryError(
                     "invalid_classification",
-                    "Ollama returned invalid classification JSON after one retry",
+                    "Ollama returned an invalid classification after one retry",
                     502,
                 ) from exc
             except OllamaTimeoutError as exc:
@@ -302,12 +328,35 @@ class NaturalLanguageQueryService:
             raise NaturalLanguageQueryError(
                 "llm_unavailable", "Ollama is unavailable", 503
             ) from exc
+        return classification
+
+    @staticmethod
+    def _parse_classification(raw_content: str) -> NaturalLanguageClassification:
+        logger.debug("Ollama classifier message.content=%r", raw_content[:4000])
+        content = raw_content.strip()
+        fenced = re.fullmatch(r"```json\s*(.*?)\s*```", content, re.DOTALL)
+        if fenced:
+            content = fenced.group(1).strip()
         try:
-            return NaturalLanguageClassification.model_validate(candidate)
+            candidate = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise _ClassificationParseError("invalid_json") from exc
+        if not isinstance(candidate, dict):
+            raise _ClassificationParseError("classification_must_be_object")
+        if set(candidate) == {"classification_result"}:
+            wrapped = candidate["classification_result"]
+            if not isinstance(wrapped, dict):
+                raise _ClassificationParseError("invalid_classification_wrapper")
+            candidate = wrapped
+        normalized = dict(candidate)
+        for field in ("classification", "reason", "clarification_question"):
+            value = normalized.get(field)
+            if isinstance(value, str):
+                normalized[field] = value.strip()
+        try:
+            return NaturalLanguageClassification.model_validate(normalized)
         except ValidationError as exc:
-            raise NaturalLanguageQueryError(
-                "invalid_classification", "Ollama returned an invalid classification", 502
-            ) from exc
+            raise _ClassificationParseError("classification_schema_invalid") from exc
 
     def _explain(
         self, question: str, result: Any
