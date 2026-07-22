@@ -23,7 +23,7 @@
 </form>
 {% endif %}
 {% if validation %}<section class="card"><h2>Piano valido</h2><p>Fingerprint <code>{{ validation.plan_fingerprint }}</code></p><div class="table-wrap"><table><thead><tr><th>Colonna</th><th>Tipo</th><th>Nullable</th></tr></thead><tbody>{% for field in validation.output_schema %}<tr><td>{{ field.name }}</td><td>{{ field.data_type }}</td><td>{{ "sì" if field.nullable else "no" }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
-{% if answer %}<section class="card"><h2>Risposta</h2><p>{{ answer }}</p></section>{% endif %}
+{% if answer and classification == "answerable" %}<section class="card"><h2>Risposta</h2><p>{{ answer }}</p></section>{% endif %}
 {% if result %}<section><h2>Risultato</h2><p>{{ result.row_count }} righe · {{ "%.2f"|format(result.execution_time_ms) }} ms{% if result.truncated %} · risultato troncato{% endif %}</p><div class="table-wrap"><table class="preview"><thead><tr>{% for column in result.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>{% for row in result.rows %}<tr>{% for value in row %}<td>{{ value|query_value if value is not none else "null" }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></section>{% endif %}
 </div>
 <script src="/ui/static/queryx-query.js?v=2" defer></script>

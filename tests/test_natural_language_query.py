@@ -1080,7 +1080,10 @@ def test_ui_renders_ambiguous_and_unanswerable_without_plan_actions(
     assert "Quali sono i clienti migliori?" in ambiguous.text
     assert "Richiesta non calcolabile" in unanswerable.text
     assert "dati di costo non presenti" in unanswerable.text
+    assert unanswerable.text.count("dati di costo non presenti") == 1
+    assert "<h2>Risposta</h2>" not in unanswerable.text
     assert "Qual è il profitto totale?" in unanswerable.text
+    assert "<h2>Risposta</h2>" not in ambiguous.text
     for response in (ambiguous, unanswerable):
         assert "Piano JSON" not in response.text
         assert 'name="plan_json"' not in response.text
