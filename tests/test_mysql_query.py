@@ -608,6 +608,24 @@ def _mysql_paid_count_plan(asset: Any) -> dict[str, Any]:
     }
 
 
+def _mysql_row_plan(
+    asset: Any,
+    fields: tuple[str, ...],
+    filter_item: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "o", "asset_id": asset.asset_id}],
+        "projections": [
+            {"source_alias": "o", "field": field} for field in fields
+        ],
+        "filters": (
+            [{"source_alias": "o", **filter_item}]
+            if filter_item is not None
+            else []
+        ),
+    }
+
+
 def _add_duckdb_orders(settings: Settings) -> None:
     stream = tempfile.SpooledTemporaryFile()
     stream.write(b"order_id,order_status,order_purchase_timestamp\na1,paid,2024-01-01 10:00:00\n")
@@ -847,6 +865,178 @@ def test_natural_language_same_name_without_backend_keeps_asset_schemas_atomic(
     assert "order_id" in by_backend["duckdb"] and "order_id" not in by_backend["mysql"]
     assert "total" in by_backend["mysql"] and "total" not in by_backend["duckdb"]
     assert response.normalized_plan.sources[0].asset_id == assets["orders"].asset_id
+
+
+@pytest.mark.parametrize(
+    ("question", "fields", "filter_item"),
+    [
+        (
+            "Mostra id, stato e totale degli ordini MySQL",
+            ("id", "status", "total"),
+            None,
+        ),
+        (
+            "Mostra gli ordini MySQL con totale inferiore a 100",
+            ("id", "customer_id", "status", "total", "created_at"),
+            {"field": "total", "operator": "lt", "value": 100},
+        ),
+        (
+            "Mostra gli ordini MySQL con stato pending",
+            ("id", "customer_id", "status", "total", "created_at"),
+            {"field": "status", "operator": "eq", "value": "pending"},
+        ),
+    ],
+)
+def test_natural_language_mysql_row_intent_uses_only_projections_and_filter(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    question: str,
+    fields: tuple[str, ...],
+    filter_item: dict[str, Any] | None,
+) -> None:
+    settings, _, assets = mysql_query_env
+    client = _SequencedNaturalClient(
+        _mysql_row_plan(assets["orders"], fields, filter_item)
+    )
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question=question)
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert [projection.field for projection in plan.projections] == list(fields)
+    assert plan.aggregations == [] and plan.group_by == []
+    expected_filters = [] if filter_item is None else [filter_item]
+    assert [
+        {
+            "field": item.field,
+            "operator": item.operator.value,
+            "value": item.value,
+        }
+        for item in plan.filters
+    ] == expected_filters
+    assert len(client.planning_calls) == 1
+
+
+def test_natural_language_mysql_row_intent_retry_preserves_intent(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    incorrect = _mysql_paid_count_plan(assets["orders"])
+    incorrect["filters"][0]["value"] = "pending"
+    corrected = _mysql_row_plan(
+        assets["orders"],
+        ("id", "customer_id", "status", "total", "created_at"),
+        {"field": "status", "operator": "eq", "value": "pending"},
+    )
+    client = _SequencedNaturalClient(incorrect, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra gli ordini MySQL con stato pending"
+        )
+    )
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.aggregations == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "row_intent_mismatch"
+    assert feedback["query_intent"] == "row_returning"
+    assert "row-returning" in feedback["instruction"]
+    assert feedback["validation_code"] != "unrequested_categories"
+
+
+@pytest.mark.parametrize(
+    ("question", "filter_item"),
+    [
+        (
+            "Mostra gli ordini MySQL con totale inferiore a 100",
+            {"field": "total", "operator": "lt", "value": 100},
+        ),
+        (
+            "Mostra gli ordini MySQL con stato pending",
+            {"field": "status", "operator": "eq", "value": "pending"},
+        ),
+    ],
+)
+def test_natural_language_mysql_filtered_rows_return_matching_order(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    filter_item: dict[str, Any],
+) -> None:
+    settings, query_service, assets = mysql_query_env
+    fields = ("id", "customer_id", "status", "total", "created_at")
+    client = _SequencedNaturalClient(
+        _mysql_row_plan(assets["orders"], fields, filter_item),
+        explanation="L'ordine richiesto ha id 2.",
+    )
+    monkeypatch.setattr(
+        query_service.mysql_executor,
+        "execute",
+        lambda compiled: (
+            list(fields),
+            [[2, 20, "pending", 75, "2024-01-02 10:00:00"]],
+            False,
+            1.0,
+        ),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=query_service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question=question, execute=True))
+
+    assert response.result is not None
+    assert response.result.rows[0][0] == 2
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.aggregations == []
+
+
+def test_natural_language_mysql_count_filter_and_consecutive_request_isolation(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, query_service, assets = mysql_query_env
+    row_plan = _mysql_row_plan(
+        assets["orders"], ("id", "status", "total")
+    )
+    count_plan = _mysql_paid_count_plan(assets["orders"])
+    count_plan["filters"][0]["value"] = "pending"
+    client = _SequencedNaturalClient(
+        row_plan,
+        count_plan,
+        explanation="È presente 1 ordine MySQL con stato pending.",
+    )
+    monkeypatch.setattr(
+        query_service.mysql_executor,
+        "execute",
+        lambda compiled: (["orders"], [[1]], False, 1.0),
+    )
+    service = NaturalLanguageQueryService(
+        settings, client=client, query_service=query_service  # type: ignore[arg-type]
+    )
+
+    first = service.translate(
+        NaturalLanguageQueryRequest(
+            question="Mostra id, stato e totale degli ordini MySQL"
+        )
+    )
+    second = service.translate(
+        NaturalLanguageQueryRequest(
+            question="Quanti ordini MySQL hanno stato pending?", execute=True
+        )
+    )
+
+    assert first.normalized_plan is not None
+    assert first.normalized_plan.aggregations == []
+    assert second.normalized_plan is not None
+    assert second.normalized_plan.projections == []
+    assert second.normalized_plan.group_by == []
+    assert [item.function.value for item in second.normalized_plan.aggregations] == [
+        "count"
+    ]
+    assert second.result is not None and second.result.rows == [[1]]
+    assert second.answer == "È presente 1 ordine MySQL con stato pending."
 
 
 def test_natural_language_context_includes_ready_mysql_asset_without_connection_details(

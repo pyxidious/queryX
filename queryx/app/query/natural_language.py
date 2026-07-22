@@ -52,6 +52,9 @@ For an asset whose backend is mysql, use exactly one source, no joins and no tra
 For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
+Treat "mostra", "elenca", "visualizza" and "dammi gli ordini" as row-returning intent: use projections and filters, with no aggregation or group_by unless the question explicitly requests an aggregate.
+Treat "quanti", "conta" and "numero di" as count intent. Never turn a row-returning request into a count.
+When the user explicitly lists fields, project exactly those fields and do not add filters, aggregations or categories that were not requested.
 Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
 An explicit categorical condition such as "stato paid" is a filter on the matching field, not a request to group by every category. For a filtered count, do not project or group by that field unless explicitly requested.
 An aggregation is already an output column and must not be duplicated in projections.
@@ -506,6 +509,7 @@ class NaturalLanguageQueryService:
     def _validate_candidate_semantics(
         self, candidate: dict[str, Any], question: str, context: dict[str, Any]
     ) -> Any:
+        validation = self._validate_candidate(candidate)
         requirements = self._semantic_requirements(question, context)
         sources = candidate.get("sources", [])
         selected = next(
@@ -521,21 +525,23 @@ class NaturalLanguageQueryService:
             raise _PlanningSemanticError("semantic_asset_mismatch")
         if selected is not None:
             alias = selected.get("alias")
+            intent = requirements.get("intent")
             required_filter = requirements.get("filter")
             if required_filter is not None:
                 matched_filter = any(
                     isinstance(item, dict)
                     and item.get("source_alias") == alias
                     and item.get("field") == required_filter["field"]
-                    and item.get("operator") == "eq"
-                    and str(item.get("value", "")).casefold()
-                    == required_filter["value"].casefold()
+                    and item.get("operator") == required_filter["operator"]
+                    and self._semantic_values_equal(
+                        item.get("value"), required_filter["value"]
+                    )
                     for item in candidate.get("filters", [])
                 )
                 if not matched_filter:
                     raise _PlanningSemanticError("missing_explicit_filter")
                 category_field = required_filter["field"]
-                if any(
+                if intent == "count" and any(
                     isinstance(item, dict) and item.get("field") == category_field
                     for item in [
                         *candidate.get("projections", []),
@@ -543,6 +549,20 @@ class NaturalLanguageQueryService:
                     ]
                 ):
                     raise _PlanningSemanticError("unrequested_categories")
+            if intent == "row_returning":
+                if candidate.get("aggregations") or candidate.get("group_by"):
+                    raise _PlanningSemanticError("row_intent_mismatch")
+                expected_filters = 1 if required_filter is not None else 0
+                if len(candidate.get("filters", [])) != expected_filters:
+                    raise _PlanningSemanticError("row_filter_mismatch")
+                required_fields = requirements.get("projections", [])
+                projected_fields = [
+                    item.get("field")
+                    for item in candidate.get("projections", [])
+                    if isinstance(item, dict) and item.get("source_alias") == alias
+                ]
+                if projected_fields != required_fields:
+                    raise _PlanningSemanticError("row_projection_mismatch")
             aggregation = requirements.get("aggregation")
             if aggregation is not None:
                 matched = any(
@@ -558,7 +578,13 @@ class NaturalLanguageQueryService:
                 )
                 if not matched or candidate.get("group_by"):
                     raise _PlanningSemanticError("metric_aggregation_mismatch")
-        return self._validate_candidate(candidate)
+        return validation
+
+    @staticmethod
+    def _semantic_values_equal(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, str):
+            return isinstance(actual, str) and actual.casefold() == expected.casefold()
+        return actual == expected
 
     @staticmethod
     def _unwrap_logical_query_plan(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -607,7 +633,22 @@ class NaturalLanguageQueryService:
                 "name, and return only the corrected plan object."
             )
         semantic_requirements = self._semantic_requirements(question, context)
-        if validation_code in {
+        if (
+            semantic_requirements.get("intent") == "row_returning"
+            and validation_code in {
+                "missing_explicit_filter",
+                "row_intent_mismatch",
+                "row_filter_mismatch",
+                "row_projection_mismatch",
+            }
+        ):
+            instruction = (
+                "Correct only the LogicalQueryPlan while preserving the original row-returning "
+                "intent. Use exactly the required projections and filter, with no aggregations "
+                "or group_by. Do not reuse a count or category structure from another request. "
+                "Return only the corrected plan object."
+            )
+        elif validation_code in {
             "missing_explicit_filter",
             "unrequested_categories",
             "filtered_count_mismatch",
@@ -641,6 +682,7 @@ class NaturalLanguageQueryService:
                         "instruction": instruction,
                         "previous_plan": candidate,
                         "validation_code": validation_code,
+                        "query_intent": semantic_requirements.get("intent"),
                         "semantic_requirements": semantic_requirements,
                         "selected_assets": [
                             {
@@ -919,6 +961,13 @@ class NaturalLanguageQueryService:
             return {}
         asset = assets[0]
         requirements: dict[str, Any] = {"asset_id": asset["asset_id"]}
+        intent = (
+            NaturalLanguageQueryService._question_intent(normalized)
+            if asset.get("backend") == "mysql"
+            else None
+        )
+        if intent is not None:
+            requirements["intent"] = intent
         for hint in asset.get("semantic_metric_hints", []):
             if any(term in normalized for term in hint["terms"]):
                 requirements["aggregation"] = {
@@ -926,10 +975,10 @@ class NaturalLanguageQueryService:
                     "field": hint["field"],
                 }
                 break
-        explicit_status = re.search(r"\bstato\s+([\w-]+)", normalized)
-        if explicit_status and explicit_status.group(1) not in {
-            "nel", "per", "degli", "dell", "ordine"
-        }:
+        explicit_status = re.search(
+            r"\b(?:con|ha|hanno)\s+(?:lo\s+)?stato\s+([\w-]+)", normalized
+        )
+        if explicit_status:
             status_fields = {
                 hint["field"]
                 for hint in asset.get("semantic_field_hints", [])
@@ -941,12 +990,102 @@ class NaturalLanguageQueryService:
                     "operator": "eq",
                     "value": explicit_status.group(1),
                 }
-                requirements["aggregation"] = {
-                    "function": "count",
-                    "field": "id",
-                    "alias": "orders",
-                }
+                if intent == "count":
+                    requirements["aggregation"] = {
+                        "function": "count",
+                        "field": "id",
+                        "alias": "orders",
+                    }
+        if intent == "row_returning":
+            numeric_filter = NaturalLanguageQueryService._numeric_filter(
+                normalized, asset
+            )
+            if numeric_filter is not None:
+                requirements["filter"] = numeric_filter
+            requirements["projections"] = (
+                NaturalLanguageQueryService._explicit_projection_fields(
+                    normalized, asset
+                )
+                or NaturalLanguageQueryService._default_row_fields(asset)
+            )
         return requirements
+
+    @staticmethod
+    def _question_intent(normalized_question: str) -> str | None:
+        if re.search(r"\b(quanti|conta|numero\s+di)\b", normalized_question):
+            return "count"
+        if re.search(
+            r"\b(mostra|elenca|visualizza|dammi\s+gli\s+ordini)\b",
+            normalized_question,
+        ):
+            return "row_returning"
+        return None
+
+    @staticmethod
+    def _explicit_projection_fields(
+        normalized_question: str, asset: dict[str, Any]
+    ) -> list[str]:
+        match = re.search(
+            r"\b(?:mostra|elenca|visualizza)\s+(.+?)\s+"
+            r"(?:degli|delle|dei)\s+ordini\b",
+            normalized_question,
+        )
+        if match is None:
+            return []
+        field_clause = match.group(1)
+        candidates: list[tuple[int, str]] = []
+        for field in asset["fields"]:
+            name = str(field["name"])
+            terms = {name.casefold(), name.casefold().replace("_", " ")}
+            if name.casefold() == "total":
+                terms.add("totale")
+            for hint in asset.get("semantic_field_hints", []):
+                if hint.get("field") == name:
+                    terms.update(str(term).casefold() for term in hint.get("terms", []))
+            positions = [
+                found.start()
+                for term in terms
+                if (found := re.search(rf"\b{re.escape(term)}\b", field_clause))
+            ]
+            if positions:
+                candidates.append((min(positions), name))
+        return [name for _, name in sorted(candidates)]
+
+    @staticmethod
+    def _default_row_fields(asset: dict[str, Any]) -> list[str]:
+        available = {str(field["name"]) for field in asset["fields"]}
+        return [
+            name
+            for name in ("id", "customer_id", "status", "total", "created_at")
+            if name in available
+        ]
+
+    @staticmethod
+    def _numeric_filter(
+        normalized_question: str, asset: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        fields = {
+            str(field["name"]).casefold(): str(field["data_type"]).casefold()
+            for field in asset["fields"]
+        }
+        if "total" not in fields or not any(
+            token in fields["total"]
+            for token in ("int", "decimal", "numeric", "float", "double", "real")
+        ):
+            return None
+        comparisons = (
+            (r"\btotale\s+(?:inferiore|minore)\s+(?:(?:a|di)\s+)?(-?\d+(?:\.\d+)?)", "lt"),
+            (r"\btotale\s+(?:superiore|maggiore)\s+(?:(?:a|di)\s+)?(-?\d+(?:\.\d+)?)", "gt"),
+        )
+        for pattern, operator in comparisons:
+            match = re.search(pattern, normalized_question)
+            if match is not None:
+                raw_value = match.group(1)
+                value: int | float = (
+                    float(raw_value) if "." in raw_value else int(raw_value)
+                )
+                return {"field": "total", "operator": operator, "value": value}
+        return None
 
     @staticmethod
     def _apply_catalog_disambiguation(
@@ -1070,4 +1209,42 @@ class NaturalLanguageQueryService:
                         }],
                     },
                 })
+                for question, projections, filters in (
+                    (
+                        "Mostra id, stato e totale degli ordini MySQL",
+                        ("id", "status", "total"),
+                        (),
+                    ),
+                    (
+                        "Mostra gli ordini MySQL con totale inferiore a 100",
+                        ("id", "customer_id", "status", "total", "created_at"),
+                        ({"field": "total", "operator": "lt", "value": 100},),
+                    ),
+                    (
+                        "Mostra gli ordini MySQL con stato pending",
+                        ("id", "customer_id", "status", "total", "created_at"),
+                        ({"field": "status", "operator": "eq", "value": "pending"},),
+                    ),
+                ):
+                    examples.append({
+                        "question": question,
+                        "intent": "row_returning",
+                        "plan": {
+                            "sources": [{
+                                "alias": "o",
+                                "asset_id": asset["asset_id"],
+                                "asset_version_id": asset["asset_version_id"],
+                            }],
+                            "projections": [
+                                {"source_alias": "o", "field": field}
+                                for field in projections
+                            ],
+                            "filters": [
+                                {"source_alias": "o", **filter_item}
+                                for filter_item in filters
+                            ],
+                            "aggregations": [],
+                            "group_by": [],
+                        },
+                    })
         return examples
