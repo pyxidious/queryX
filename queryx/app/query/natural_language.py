@@ -64,6 +64,7 @@ Treat "quanti", "conta" and "numero di" as count intent. Never turn a row-return
 When the user explicitly lists fields, project exactly those fields and do not add filters, aggregations or categories that were not requested.
 For row-returning requests, leave order_by empty unless the user explicitly asks for ordering.
 Every source_alias in projections, filters, aggregations, group_by and joins must exactly match an alias declared in sources.
+Every MongoDB aggregation must include source_alias, using exactly the alias declared by its source.
 Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
 An explicit categorical condition such as "stato paid" is a filter on the matching field, not a request to group by every category. For a filtered count, do not project or group by that field unless explicitly requested.
 An aggregation is already an output column and must not be duplicated in projections.
@@ -535,7 +536,6 @@ class NaturalLanguageQueryService:
     def _validate_candidate_semantics(
         self, candidate: dict[str, Any], question: str, context: dict[str, Any]
     ) -> Any:
-        validation = self._validate_candidate(candidate)
         requirements = self._semantic_requirements(question, context)
         sources = candidate.get("sources", [])
         selected = next(
@@ -549,6 +549,29 @@ class NaturalLanguageQueryService:
         )
         if requirements.get("asset_id") and selected is None:
             raise _PlanningSemanticError("semantic_asset_mismatch")
+        selected_asset = next(
+            (
+                asset
+                for asset in context["assets"]
+                if asset.get("asset_id") == requirements.get("asset_id")
+            ),
+            None,
+        )
+        if (
+            selected is not None
+            and selected_asset is not None
+            and selected_asset.get("backend") == "mongodb"
+        ):
+            declared_alias = selected.get("alias")
+            if not isinstance(declared_alias, str) or any(
+                not isinstance(aggregation, dict)
+                or aggregation.get("source_alias") != declared_alias
+                for aggregation in candidate.get("aggregations", [])
+            ):
+                raise _PlanningSemanticError(
+                    "mongodb_aggregation_source_alias_mismatch"
+                )
+        validation = self._validate_candidate(candidate)
         if selected is not None:
             alias = selected.get("alias")
             intent = requirements.get("intent")
@@ -747,6 +770,13 @@ class NaturalLanguageQueryService:
                 "all references consistently use the intended alias, correct that declaration; "
                 "otherwise use an exact declared_source_alias. Preserve the original intent, "
                 "fields, filters, aggregations and ordering. Return only the corrected plan object."
+            )
+        elif validation_code == "mongodb_aggregation_source_alias_mismatch":
+            instruction = (
+                "Correct only MongoDB aggregation source_alias values. Every aggregation must "
+                "include source_alias set exactly to the alias declared in sources. Preserve "
+                "the numeric filter and keep projections, group_by and order_by unchanged. "
+                "Return only the corrected plan object."
             )
         semantic_requirements = self._semantic_requirements(question, context)
         if (

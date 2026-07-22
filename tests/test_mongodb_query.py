@@ -1310,3 +1310,53 @@ def test_natural_language_mongodb_amount_filter_remains_row_returning(
     assert [item.field for item in plan.projections] == [
         "type", "user_id", "properties.amount"
     ]
+
+
+def test_natural_language_mongodb_filtered_count_adds_aggregation_source_alias(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    invalid = _events_user_count_plan(assets["events"], 1)
+    invalid["aggregations"][0].pop("source_alias")
+    corrected = _events_user_count_plan(assets["events"], 1)
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quanti eventi MongoDB sono stati generati dall’utente 1?"
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.aggregations[0].source_alias == plan.sources[0].alias == "events"
+    assert plan.filters[0].field == "user_id"
+    assert plan.filters[0].value == 1
+    assert isinstance(plan.filters[0].value, int)
+    assert plan.projections == [] and plan.group_by == [] and plan.order_by == []
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_aggregation_source_alias_mismatch"
+
+
+def test_natural_language_mongodb_filtered_count_validates_and_executes(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, query_service, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(_events_user_count_plan(assets["events"], 1))
+    monkeypatch.setattr(
+        query_service.mongodb_executor,
+        "execute",
+        lambda compiled: (["events"], [[1]], False, 1.0),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client, query_service=query_service  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Quanti eventi MongoDB sono stati generati dall’utente 1?",
+        execute=True,
+    ))
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.aggregations[0].source_alias == "events"
+    assert response.result is not None and response.result.rows == [[1]]
