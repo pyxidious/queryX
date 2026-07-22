@@ -17,6 +17,7 @@ from queryx.app.ingestion.service import IngestionService
 from queryx.app.llm.ollama_client import (
     OllamaInvalidResponseError,
     OllamaResponse,
+    OllamaTextResponse,
     OllamaTimeoutError,
     OllamaUnavailableError,
 )
@@ -36,7 +37,7 @@ from queryx.app.ui import routes as ui_routes
 
 
 class StubOllamaClient:
-    def __init__(self, *responses: dict[str, Any] | Exception) -> None:
+    def __init__(self, *responses: dict[str, Any] | str | Exception) -> None:
         self.responses = list(responses)
         self.calls: list[tuple[list[dict[str, str]], dict[str, Any]]] = []
 
@@ -47,7 +48,16 @@ class StubOllamaClient:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
+        assert isinstance(response, dict)
         return OllamaResponse(response, {})
+
+    def chat_text(self, messages: list[dict[str, str]]) -> OllamaTextResponse:
+        self.calls.append((messages, {}))
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        assert isinstance(response, str)
+        return OllamaTextResponse(response, {})
 
 
 @pytest.fixture(scope="module")
@@ -411,10 +421,7 @@ def test_execute_false_does_not_execute_and_true_uses_existing_service(
 
     client = StubOllamaClient(
         _single_plan(assets),
-        {
-            "answer": "Delivered has two orders and shipped has one.",
-            "thinking": "must not propagate",
-        },
+        "  Delivered has two orders and shipped has one.  ",
     )
     execute = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
     original_execute = execute.query_service.execute
@@ -441,6 +448,7 @@ def test_execute_false_does_not_execute_and_true_uses_existing_service(
     }
     assert explanation_payload["question"] == "orders by status"
     assert "thinking" not in response.model_dump(mode="json")
+    assert response.explanation_warning is None
 
 
 def test_explanation_failure_does_not_fail_successful_query(
@@ -458,6 +466,22 @@ def test_explanation_failure_does_not_fail_successful_query(
     assert response.result is not None and response.result.row_count == 2
     assert response.answer is None
     assert response.explanation_time_ms is not None
+    assert response.explanation_warning is not None
+    assert response.explanation_warning.code == "explanation_unavailable"
+
+
+def test_empty_explanation_content_returns_warning_and_keeps_result(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    response = NaturalLanguageQueryService(
+        settings, client=StubOllamaClient(_single_plan(assets), "   ")  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="orders by status", execute=True))
+
+    assert response.result is not None
+    assert response.answer is None
+    assert response.explanation_warning is not None
+    assert response.explanation_warning.code == "explanation_unavailable"
 
 
 def test_explanation_uses_bounded_rows_and_marks_truncation(
@@ -466,7 +490,7 @@ def test_explanation_uses_bounded_rows_and_marks_truncation(
     settings, assets, _ = nl_env
     client = StubOllamaClient(
         _single_plan(assets),
-        {"answer": "Prima frase. Seconda frase. Terza frase. Quarta frase."},
+        "Prima frase. Seconda frase. Terza frase. Quarta frase.",
     )
     service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
     result = QueryExecutionResult(
@@ -558,21 +582,58 @@ def test_api_and_ui_natural_language_flow(
     assert api_response.status_code == 200
     assert "normalized_plan" in api_response.json() and "result" not in api_response.json()
 
+    api_execute_service = NaturalLanguageQueryService(
+        settings,
+        client=StubOllamaClient(  # type: ignore[arg-type]
+            _single_plan(assets), "Delivered è lo stato più frequente."
+        ),
+    )
+    monkeypatch.setattr(
+        api_routes,
+        "_natural_language_query_service",
+        lambda settings=None: api_execute_service,
+    )
+
+    async def exercise_api_execute() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            return await client.post(
+                "/query/natural-language",
+                json={"question": "orders by status", "execute": True},
+            )
+
+    api_execute_response = asyncio.run(exercise_api_execute())
+    assert api_execute_response.status_code == 200
+    assert api_execute_response.json()["answer"] == "Delivered è lo stato più frequente."
+
     ui_service = NaturalLanguageQueryService(
         settings,
         client=StubOllamaClient(  # type: ignore[arg-type]
             _single_plan(assets),
-            {"answer": "Delivered ha due ordini; shipped ne ha uno."},
+            _single_plan(assets),
+            "Delivered ha due ordini; shipped ne ha uno.",
         ),
     )
     monkeypatch.setattr(ui_routes, "NaturalLanguageQueryService", lambda settings: ui_service)
 
-    async def exercise_ui() -> tuple[httpx.Response, httpx.Response]:
+    async def exercise_ui() -> tuple[
+        httpx.Response, httpx.Response, httpx.Response,
+        httpx.Response, httpx.Response, httpx.Response,
+    ]:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=create_app()), base_url="http://test"
         ) as client:
             page = await client.get("/ui/query")
             token = re.search(r'name="csrf_token" value="([^"]+)"', page.text).group(1)  # type: ignore[union-attr]
+            planned = await client.post(
+                "/ui/query/natural-language",
+                data={
+                    "csrf_token": token,
+                    "question": "orders by status",
+                    "execute": "false",
+                },
+            )
             generated = await client.post(
                 "/ui/query/natural-language",
                 data={
@@ -581,10 +642,26 @@ def test_api_and_ui_natural_language_flow(
                     "execute": "true",
                 },
             )
-            return page, generated
+            plan_json = json.dumps(_single_plan(assets))
+            validated = await client.post(
+                "/ui/query/validate",
+                data={"csrf_token": token, "plan_json": plan_json},
+            )
+            executed = await client.post(
+                "/ui/query/execute",
+                data={"csrf_token": token, "plan_json": plan_json},
+            )
+            script = await client.get("/ui/static/queryx-query.js")
+            return page, planned, generated, validated, executed, script
 
-    page, generated = asyncio.run(exercise_ui())
-    assert page.status_code == generated.status_code == 200
+    page, planned, generated, validated, executed, script = asyncio.run(exercise_ui())
+    assert {
+        page.status_code,
+        planned.status_code,
+        generated.status_code,
+        validated.status_code,
+        executed.status_code,
+    } == {200}
     assert "Domanda in linguaggio naturale" in page.text
     assert "Genera piano" in page.text and "Genera ed esegui" in page.text
     assert "Piano generato e validato" in generated.text
@@ -593,6 +670,23 @@ def test_api_and_ui_natural_language_flow(
     assert "Delivered ha due ordini" in generated.text
     assert "Planning" in generated.text
     assert "Execution" in generated.text and "Explanation" in generated.text
+    assert 'id="query-loading"' in page.text and 'aria-busy="false"' in page.text
+    assert page.text.count("data-loading-text=") == 4
+    assert 'action="/ui/query/natural-language"' in page.text
+    assert 'action="/ui/query/validate"' in page.text
+    assert 'formaction="/ui/query/execute"' in page.text
+    assert "Generazione del piano in corso" in page.text
+    assert "Validazione in corso" in page.text
+    assert "Esecuzione della query in corso" in page.text
+    assert script.status_code == 200
+    assert "button.disabled = active" in script.text
+    assert "if (busy) return" in script.text
+    assert script.text.count("setBusy(false)") == 2
+    assert script.text.index("event.preventDefault()") < script.text.index("setBusy(true")
+    assert script.text.index("setBusy(true") < script.text.index("await fetch")
+    assert 'document.addEventListener("submit", submit)' in script.text
+    assert "workspace.replaceWith(replacement)" in script.text
+    assert "document.write" not in script.text and ".submit()" not in script.text
 
 
 def test_invalid_generated_plan_remains_visible_in_ui(

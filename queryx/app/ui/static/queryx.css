@@ -81,6 +81,10 @@ textarea { min-height: 20rem; font-family: ui-monospace, SFMono-Regular, Consola
 input[type="file"] { padding: .5rem; }
 .muted, .empty { color: var(--muted); }
 .error-page { max-width: 680px; margin: 5rem auto; text-align: center; }
+.query-loading { position: sticky; top: .5rem; z-index: 10; display: flex; align-items: center; gap: .65rem; padding: .8rem 1rem; margin-bottom: 1rem; border: 1px solid #84adff; border-radius: .5rem; background: var(--progress-bg); color: var(--progress); font-weight: 700; }
+.query-loading[hidden] { display: none; }
+.query-spinner { width: 1.1rem; height: 1.1rem; border: 2px solid #84adff; border-top-color: var(--progress); border-radius: 50%; animation: query-spin .8s linear infinite; }
+@keyframes query-spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 720px) {
   .topbar, .page-heading { align-items: flex-start; flex-direction: column; }
@@ -91,4 +95,5 @@ input[type="file"] { padding: .5rem; }
 
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
+  .query-spinner { animation: none; }
 }

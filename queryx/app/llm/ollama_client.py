@@ -41,6 +41,12 @@ class OllamaResponse:
 
 
 @dataclass(frozen=True)
+class OllamaTextResponse:
+    content: str
+    metrics: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class OllamaClient:
     base_url: str
     model: str
@@ -129,6 +135,38 @@ class OllamaClient:
             "request_duration_ms": duration_ms,
         }
         return OllamaResponse(content=parsed, metrics=metrics)
+
+    def chat_text(self, messages: list[dict[str, str]]) -> OllamaTextResponse:
+        self.ensure_model()
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "keep_alive": self.keep_alive,
+            "think": self.think,
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx,
+            },
+        }
+        started = monotonic()
+        response = self._request("POST", "/api/chat", payload)
+        duration_ms = int((monotonic() - started) * 1000)
+        logger.info("Ollama text chat completed in %sms", duration_ms)
+        message = response.get("message", {})
+        raw_content = message.get("content")
+        if not isinstance(raw_content, str):
+            raise OllamaInvalidResponseError("Ollama response did not include message.content")
+        metrics = {
+            "total_duration": response.get("total_duration"),
+            "load_duration": response.get("load_duration"),
+            "prompt_eval_count": response.get("prompt_eval_count"),
+            "eval_count": response.get("eval_count"),
+            "prompt_eval_duration": response.get("prompt_eval_duration"),
+            "generation_duration": response.get("eval_duration"),
+            "request_duration_ms": duration_ms,
+        }
+        return OllamaTextResponse(content=raw_content, metrics=metrics)
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base_url.rstrip('/')}{path}"

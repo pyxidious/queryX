@@ -197,6 +197,11 @@ class NaturalLanguageQueryRequest(StrictModel):
     execute: bool = False
 
 
+class NaturalLanguageWarning(StrictModel):
+    code: str
+    message: str
+
+
 class NaturalLanguageQueryResponse(StrictModel):
     normalized_plan: LogicalQueryPlan
     output_schema: list[OutputField]
@@ -206,3 +211,4 @@ class NaturalLanguageQueryResponse(StrictModel):
     planning_time_ms: float = Field(ge=0)
     execution_time_ms: float | None = Field(default=None, ge=0)
     explanation_time_ms: float | None = Field(default=None, ge=0)
+    explanation_warning: NaturalLanguageWarning | None = None

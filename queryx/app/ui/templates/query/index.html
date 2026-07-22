@@ -1,21 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
+<div id="query-workspace" aria-busy="false">
+<div id="query-loading" class="query-loading" role="status" aria-live="polite" hidden><span class="query-spinner" aria-hidden="true"></span><span data-loading-message>Operazione in corso…</span></div>
 <div class="page-heading"><div><p class="eyebrow">Strumento tecnico</p><h1>Logical Query Plan</h1><p class="muted">Inserisci esclusivamente un piano JSON. QueryX compila internamente una SELECT DuckDB bounded; SQL e path non sono accettati.</p></div></div>
 {% if error %}<div class="alert alert-danger"><strong>{{ error.code }}</strong>: {{ error.message }}{% if error.issues %}<ul>{% for issue in error.issues %}<li><code>{{ issue.path }}</code>: {{ issue.message }}</li>{% endfor %}</ul>{% endif %}</div>{% endif %}
+{% if explanation_warning %}<div class="alert alert-warning"><strong>{{ explanation_warning.code }}</strong>: {{ explanation_warning.message }}</div>{% endif %}
 {% if generated %}<div class="alert alert-success">Piano generato e validato.</div>{% endif %}
 {% if generated %}<p class="muted">Planning {{ "%.2f"|format(planning_time_ms) }} ms{% if execution_time_ms is not none %} · Execution {{ "%.2f"|format(execution_time_ms) }} ms{% endif %}{% if explanation_time_ms is not none %} · Explanation {{ "%.2f"|format(explanation_time_ms) }} ms{% endif %}</p>{% endif %}
-<section class="card"><h2>Domanda in linguaggio naturale</h2><form class="form" method="post" action="/ui/query/natural-language">
+<section class="card"><h2>Domanda in linguaggio naturale</h2><form class="form" method="post" action="/ui/query/natural-language" data-query-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Domanda in linguaggio naturale<textarea name="question" maxlength="2000" required>{{ question }}</textarea></label>
-  <div class="actions"><button class="button secondary" name="execute" value="false" type="submit">Genera piano</button><button class="button" name="execute" value="true" type="submit">Genera ed esegui</button></div>
+  <div class="actions"><button class="button secondary" name="execute" value="false" type="submit" data-loading-text="Generazione del piano in corso…">Genera piano</button><button class="button" name="execute" value="true" type="submit" data-loading-text="Esecuzione della query e generazione della risposta in corso…">Genera ed esegui</button></div>
 </form></section>
 <h2>Piano JSON</h2>
-<form class="form" method="post">
+<form class="form" method="post" action="/ui/query/validate" data-query-form>
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Piano JSON<textarea name="plan_json" required>{{ plan_json }}</textarea></label>
-  <div class="actions"><button class="button secondary" formaction="/ui/query/validate" type="submit">Validate</button><button class="button" formaction="/ui/query/execute" type="submit">Execute</button></div>
+  <div class="actions"><button class="button secondary" formaction="/ui/query/validate" type="submit" data-loading-text="Validazione in corso…">Validate</button><button class="button" formaction="/ui/query/execute" type="submit" data-loading-text="Esecuzione della query in corso…">Execute</button></div>
 </form>
 {% if validation %}<section class="card"><h2>Piano valido</h2><p>Fingerprint <code>{{ validation.plan_fingerprint }}</code></p><div class="table-wrap"><table><thead><tr><th>Colonna</th><th>Tipo</th><th>Nullable</th></tr></thead><tbody>{% for field in validation.output_schema %}<tr><td>{{ field.name }}</td><td>{{ field.data_type }}</td><td>{{ "sì" if field.nullable else "no" }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
 {% if answer %}<section class="card"><h2>Risposta</h2><p>{{ answer }}</p></section>{% endif %}
 {% if result %}<section><h2>Risultato</h2><p>{{ result.row_count }} righe · {{ "%.2f"|format(result.execution_time_ms) }} ms{% if result.truncated %} · risultato troncato{% endif %}</p><div class="table-wrap"><table class="preview"><thead><tr>{% for column in result.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>{% for row in result.rows %}<tr>{% for value in row %}<td>{{ value|query_value if value is not none else "null" }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></section>{% endif %}
+</div>
+<script src="/ui/static/queryx-query.js?v=2" defer></script>
 {% endblock %}

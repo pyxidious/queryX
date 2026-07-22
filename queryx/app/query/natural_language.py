@@ -21,6 +21,7 @@ from queryx.app.query.models import (
     LogicalQueryPlan,
     NaturalLanguageQueryRequest,
     NaturalLanguageQueryResponse,
+    NaturalLanguageWarning,
 )
 from queryx.app.query.service import QueryService
 from queryx.app.query.storage import QueryStorage
@@ -209,10 +210,11 @@ class NaturalLanguageQueryService:
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
         answer: str | None = None
+        explanation_warning: NaturalLanguageWarning | None = None
         explanation_time_ms: float | None = None
         if result is not None:
             explanation_started = monotonic()
-            answer = self._explain(question, result)
+            answer, explanation_warning = self._explain(question, result)
             explanation_time_ms = (monotonic() - explanation_started) * 1000
         return NaturalLanguageQueryResponse(
             normalized_plan=validation.normalized_plan,
@@ -223,11 +225,14 @@ class NaturalLanguageQueryService:
             planning_time_ms=planning_time_ms,
             execution_time_ms=result.execution_time_ms if result is not None else None,
             explanation_time_ms=explanation_time_ms,
+            explanation_warning=explanation_warning,
         )
 
-    def _explain(self, question: str, result: Any) -> str | None:
+    def _explain(
+        self, question: str, result: Any
+    ) -> tuple[str | None, NaturalLanguageWarning | None]:
         if result.row_count == 0:
-            return "La query non ha restituito risultati."
+            return "La query non ha restituito risultati.", None
         serialized = result.model_dump(mode="json")
         payload = {
             "question": question,
@@ -243,8 +248,8 @@ class NaturalLanguageQueryService:
                     "Write a concise natural-language answer of at most three sentences, based "
                     "exclusively on the supplied result values. Do not perform or request new "
                     "calculations. Do not include reasoning or hidden analysis. If truncated is "
-                    "true, clearly state that the displayed result is truncated. Return only a "
-                    "JSON object with the answer field."
+                    "true, clearly state that the displayed result is truncated. Return only "
+                    "the answer text."
                 ),
             },
             {
@@ -252,23 +257,22 @@ class NaturalLanguageQueryService:
                 "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             },
         ]
-        schema = {
-            "type": "object",
-            "properties": {"answer": {"type": "string", "maxLength": 2000}},
-            "required": ["answer"],
-            "additionalProperties": False,
-        }
         try:
-            generated = self.client.chat_json(messages, schema).content
+            raw_answer = self.client.chat_text(messages).content.strip()
         except OllamaError:
-            return None
-        raw_answer = generated.get("answer")
-        if not isinstance(raw_answer, str) or not raw_answer.strip():
-            return None
+            return None, NaturalLanguageWarning(
+                code="explanation_unavailable",
+                message="The query succeeded, but its natural-language explanation is unavailable.",
+            )
+        if not raw_answer:
+            return None, NaturalLanguageWarning(
+                code="explanation_unavailable",
+                message="The query succeeded, but Ollama returned an empty explanation.",
+            )
         answer = self._limit_sentences(raw_answer, 2 if result.truncated else 3)
         if result.truncated:
             answer = f"{answer} Il risultato mostrato è troncato."
-        return answer
+        return answer, None
 
     @staticmethod
     def _limit_sentences(answer: str, maximum: int) -> str:

@@ -59,6 +59,7 @@ _CSRF_COOKIE = "queryx_ui_csrf"
 _STATIC_FILES = {
     "queryx.css": "text/css; charset=utf-8",
     "queryx-polling.js": "text/javascript; charset=utf-8",
+    "queryx-query.js": "text/javascript; charset=utf-8",
 }
 
 
@@ -97,6 +98,7 @@ def _query_context(
     question: str = "", generated: bool = False, answer: str | None = None,
     planning_time_ms: float | None = None, execution_time_ms: float | None = None,
     explanation_time_ms: float | None = None,
+    explanation_warning: Any | None = None,
 ) -> dict[str, Any]:
     return {
         "title": "Query tecnica", "plan_json": plan_json,
@@ -105,6 +107,7 @@ def _query_context(
         "planning_time_ms": planning_time_ms,
         "execution_time_ms": execution_time_ms,
         "explanation_time_ms": explanation_time_ms,
+        "explanation_warning": explanation_warning,
     }
 
 
@@ -605,6 +608,7 @@ async def natural_language_query_ui(
                 planning_time_ms=response.planning_time_ms,
                 execution_time_ms=response.execution_time_ms,
                 explanation_time_ms=response.explanation_time_ms,
+                explanation_warning=response.explanation_warning,
             ),
         )
     except ValidationError:

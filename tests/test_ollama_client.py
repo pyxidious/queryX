@@ -72,6 +72,34 @@ def test_chat_payload_places_think_at_top_level_and_discards_thinking(
     assert Settings().ollama_timeout_seconds == OllamaClient("http://ollama", "model").timeout_seconds == 300
 
 
+def test_text_chat_extracts_content_and_ignores_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Any, timeout: int) -> _Response:
+        if request.full_url.endswith("/api/tags"):
+            return _Response({"models": [{"name": "qwen3.5:9b"}]})
+        captured.append(json.loads(request.data))
+        return _Response({
+            "message": {
+                "content": "  Risposta basata sul risultato.  ",
+                "thinking": "reasoning riservato",
+            }
+        })
+
+    monkeypatch.setattr(client_module, "urlopen", fake_urlopen)
+    response = OllamaClient(
+        "http://ollama:11434", "qwen3.5:9b", think=False
+    ).chat_text([{"role": "user", "content": "spiega"}])
+
+    assert response.content == "  Risposta basata sul risultato.  "
+    assert "thinking" not in response.metrics
+    assert "reasoning riservato" not in repr(response)
+    assert captured[0]["think"] is False
+    assert "format" not in captured[0]
+
+
 @pytest.mark.parametrize(
     "failure",
     [TimeoutError("slow"), URLError(socket.timeout("slow"))],
