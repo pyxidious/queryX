@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     mongodb_user: str = "queryx"
     mongodb_password: str = "queryx"
     mongodb_enabled: bool = True
+    mongodb_query_timeout_seconds: float = Field(default=10, gt=0, le=300)
 
     catalog_db_path: Path = Path("data/queryx_catalog.sqlite3")
     data_raw_dir: Path = Path("data/raw")

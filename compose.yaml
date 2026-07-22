@@ -6,6 +6,7 @@ services:
     environment:
       QUERYX_EXECUTION_MODE: worker
       MYSQL_QUERY_TIMEOUT_SECONDS: ${MYSQL_QUERY_TIMEOUT_SECONDS:-10}
+      MONGODB_QUERY_TIMEOUT_SECONDS: ${MONGODB_QUERY_TIMEOUT_SECONDS:-10}
     ports:
       - "8000:8000"
     extra_hosts:
@@ -26,6 +27,7 @@ services:
     environment:
       QUERYX_EXECUTION_MODE: worker
       MYSQL_QUERY_TIMEOUT_SECONDS: ${MYSQL_QUERY_TIMEOUT_SECONDS:-10}
+      MONGODB_QUERY_TIMEOUT_SECONDS: ${MONGODB_QUERY_TIMEOUT_SECONDS:-10}
     volumes:
       - queryx_catalog:/app/data
     restart: unless-stopped

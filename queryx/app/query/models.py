@@ -83,6 +83,7 @@ class FilterOperator(StrEnum):
     LT = "lt"
     LTE = "lte"
     IN = "in"
+    NOT_IN = "not_in"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
     BETWEEN = "between"
@@ -96,10 +97,10 @@ class QueryFilter(StrictModel):
 
     @model_validator(mode="after")
     def validate_operand(self) -> QueryFilter:
-        if self.operator == FilterOperator.IN and (
+        if self.operator in {FilterOperator.IN, FilterOperator.NOT_IN} and (
             not isinstance(self.value, list) or not self.value
         ):
-            raise ValueError("operator 'in' requires a non-empty list")
+            raise ValueError(f"operator '{self.operator}' requires a non-empty list")
         if self.operator == FilterOperator.BETWEEN and (
             not isinstance(self.value, list) or len(self.value) != 2
         ):

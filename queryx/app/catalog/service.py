@@ -15,12 +15,14 @@ from queryx.app.catalog.models import (
 )
 from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.catalog.mysql_promotion import MySQLAssetPromoter
+from queryx.app.catalog.mongodb_promotion import MongoDBAssetPromoter
 
 
 class CatalogService:
     def __init__(self, storage: CatalogStorage) -> None:
         self.storage = storage
         self.mysql_promoter = MySQLAssetPromoter(storage.db_path)
+        self.mongodb_promoter = MongoDBAssetPromoter(storage.db_path)
 
     def save_scan(self, sources: list[SourceMetadata]) -> CatalogSnapshot:
         return self.storage.save_snapshot(sources)
@@ -34,15 +36,21 @@ class CatalogService:
     def save_run(self, run: ScanRun) -> ScanRun:
         saved = self.storage.save_scan_run(run)
         for result in saved.results:
-            if result.database_type != "mysql":
-                continue
             source = self.storage.get_source(result.source_id)
             if source is None or not source.enabled:
                 continue
-            if result.scan_status == "completed":
-                self.mysql_promoter.promote(result, source.database)
-            else:
-                self.mysql_promoter.mark_source_not_current(result.source_id)
+            promoter = (
+                self.mysql_promoter
+                if result.database_type == "mysql"
+                else self.mongodb_promoter
+                if result.database_type == "mongodb"
+                else None
+            )
+            if promoter is not None:
+                if result.scan_status == "completed":
+                    promoter.promote(result, source.database)
+                else:
+                    promoter.mark_source_not_current(result.source_id)
         return saved
 
     def backfill_mysql_assets(self, sources: list[DataSource]) -> None:
@@ -53,6 +61,15 @@ class CatalogService:
             if latest is None or latest.scan_status != "completed":
                 continue
             self.mysql_promoter.promote(latest, source.database)
+
+    def backfill_mongodb_assets(self, sources: list[DataSource]) -> None:
+        for source in sources:
+            if source.database_type != "mongodb" or not source.enabled:
+                continue
+            latest = self.storage.get_latest_source_result(source.id)
+            if latest is None or latest.scan_status != "completed":
+                continue
+            self.mongodb_promoter.promote(latest, source.database)
 
     def acquire_source_scan(self, source_id: str, token: str) -> bool:
         return self.storage.acquire_source_scan(source_id, token)

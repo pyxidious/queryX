@@ -47,7 +47,9 @@ Treat every catalog asset object as an atomic source block identified by its ass
 After choosing a source, use only the fields listed for that source. Never combine schemas from assets with the same logical name.
 Use semantic_field_hints only within the asset block that contains them; they are catalog-scoped disambiguation evidence.
 If the question explicitly names MySQL, choose only an asset whose backend is mysql.
+If the question explicitly names MongoDB, choose only an asset whose backend is mongodb.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
+For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
 Use the minimum number of assets and joins required to answer the question, and do not add unrequested metrics.
 For record-display requests, project only fields directly useful to the request instead of inventing a complete projection.
 Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
@@ -782,8 +784,25 @@ class NaturalLanguageQueryService:
             candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
             candidate["semantic_metric_hints"] = self._semantic_metric_hints(candidate)
             candidates.append(candidate)
+        for asset in self.query_service.mongodb_catalog.list_ready_assets():
+            source = SourceRegistry(self.settings).get_source(asset.source_id)
+            candidate = {
+                "asset_id": asset.asset_id,
+                "asset_version_id": asset.asset_version_id,
+                "logical_name": asset.name,
+                "backend": "mongodb",
+                "source_id": asset.source_id,
+                "source_name": source.name if source is not None else asset.source_id,
+                "fields": list(asset.fields.values()),
+            }
+            candidate["semantic_field_hints"] = self._semantic_field_hints(candidate)
+            candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
+            candidate["semantic_metric_hints"] = self._semantic_metric_hints(candidate)
+            candidates.append(candidate)
         if re.search(r"\bmysql\b", question, re.IGNORECASE):
             candidates = [asset for asset in candidates if asset["backend"] == "mysql"]
+        elif re.search(r"\bmongo(?:db)?\b", question, re.IGNORECASE):
+            candidates = [asset for asset in candidates if asset["backend"] == "mongodb"]
         active_relationships = [
             relationship for relationship in self.storage.list_relationships(False)
         ]

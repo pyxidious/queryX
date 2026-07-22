@@ -22,6 +22,7 @@ class AssetKind(StrEnum):
     FILE = "file"
     TABLE = "table"
     MYSQL_TABLE = "mysql_table"
+    MONGODB_COLLECTION = "mongodb_collection"
     COLLECTION = "collection"
     GRAPH = "graph"
 

@@ -5,14 +5,14 @@ import logging
 from fastapi import FastAPI
 
 from queryx.app.api.routes import router
-from queryx.app.catalog.bootstrap import backfill_mysql_assets
+from queryx.app.catalog.bootstrap import backfill_virtual_assets
 from queryx.app.core.config import get_settings
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     logging.basicConfig(level=settings.log_level)
-    backfill_mysql_assets(settings)
+    backfill_virtual_assets(settings)
 
     app = FastAPI(title=settings.app_name, version="0.1.0")
     app.state.settings = settings

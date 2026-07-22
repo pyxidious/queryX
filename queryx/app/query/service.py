@@ -13,6 +13,9 @@ from queryx.app.query.executor import DuckDBQueryExecutor, QueryExecutionError
 from queryx.app.query.mysql_catalog import MySQLCatalogAssets
 from queryx.app.query.mysql_compiler import MySQLQueryCompiler
 from queryx.app.query.mysql_executor import MySQLQueryExecutor
+from queryx.app.query.mongodb_catalog import MongoDBCatalogAssets
+from queryx.app.query.mongodb_compiler import MongoDBQueryCompiler
+from queryx.app.query.mongodb_executor import MongoDBQueryExecutor
 from queryx.app.query.models import (
     AssetRelationship,
     AssetRelationshipCreate,
@@ -89,10 +92,14 @@ class QueryService:
         self.mysql_catalog = MySQLCatalogAssets(
             CatalogStorage(settings.catalog_db_path), SourceRegistry(settings)
         )
+        self.mongodb_catalog = MongoDBCatalogAssets(
+            CatalogStorage(settings.catalog_db_path), SourceRegistry(settings)
+        )
         self.validator = PlanValidator(
             self.ingestion, self.processing, self.storage,
             settings.query_default_limit, settings.query_max_limit,
             self.mysql_catalog,
+            self.mongodb_catalog,
         )
         self.compiler = DuckDBQueryCompiler(settings.duckdb_schema)
         self.executor = DuckDBQueryExecutor(
@@ -102,6 +109,10 @@ class QueryService:
         self.mysql_compiler = MySQLQueryCompiler()
         self.mysql_executor = MySQLQueryExecutor(
             settings.mysql_url, settings.mysql_query_timeout_seconds
+        )
+        self.mongodb_compiler = MongoDBQueryCompiler()
+        self.mongodb_executor = MongoDBQueryExecutor(
+            settings.mongodb_url, settings.mongodb_query_timeout_seconds
         )
 
     def parse(self, payload: LogicalQueryPlan | dict[str, Any]) -> LogicalQueryPlan:
@@ -133,6 +144,9 @@ class QueryService:
         if backend == "mysql":
             compiled = self.mysql_compiler.compile(validated)
             executor = self.mysql_executor
+        elif backend == "mongodb":
+            compiled = self.mongodb_compiler.compile(validated)
+            executor = self.mongodb_executor
         else:
             compiled = self.compiler.compile(validated)
             executor = self.executor

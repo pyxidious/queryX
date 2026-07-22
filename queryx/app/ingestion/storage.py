@@ -736,6 +736,94 @@ class IngestionStorage:
                     ),
                 )
 
+    def sync_mongodb_assets(
+        self, source_id: str, promoted: list[dict[str, Any]]
+    ) -> None:
+        """Synchronize virtual MongoDB collection assets without storage bindings."""
+        now = _now().isoformat()
+        current_ids = {item["asset_id"] for item in promoted}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assets = connection.execute(
+                "SELECT id FROM data_assets WHERE asset_kind = 'mongodb_collection'"
+            ).fetchall()
+            for asset_row in assets:
+                latest = connection.execute(
+                    """SELECT technical_metadata_json FROM asset_versions
+                       WHERE asset_id = ? ORDER BY version_number DESC LIMIT 1""",
+                    (asset_row["id"],),
+                ).fetchone()
+                metadata = _loads(latest["technical_metadata_json"], {}) if latest else {}
+                if metadata.get("source_id") != source_id:
+                    continue
+                if asset_row["id"] not in current_ids:
+                    connection.execute(
+                        "UPDATE asset_versions SET status = 'stale' WHERE asset_id = ? AND status = 'ready'",
+                        (asset_row["id"],),
+                    )
+                    connection.execute(
+                        "UPDATE data_assets SET updated_at = ? WHERE id = ?",
+                        (now, asset_row["id"]),
+                    )
+
+            for item in promoted:
+                description = f"Virtual MongoDB collection {source_id}.{item['name']}"
+                connection.execute(
+                    """INSERT INTO data_assets (
+                           id, name, asset_kind, description, created_at, updated_at
+                       ) VALUES (?, ?, 'mongodb_collection', ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           name = excluded.name,
+                           asset_kind = 'mongodb_collection',
+                           description = excluded.description,
+                           updated_at = excluded.updated_at""",
+                    (item["asset_id"], item["name"], description, now, now),
+                )
+                existing = connection.execute(
+                    "SELECT id FROM asset_versions WHERE id = ? AND asset_id = ?",
+                    (item["version_id"], item["asset_id"]),
+                ).fetchone()
+                connection.execute(
+                    "UPDATE asset_versions SET status = 'stale' WHERE asset_id = ? AND status = 'ready' AND id <> ?",
+                    (item["asset_id"], item["version_id"]),
+                )
+                if existing is not None:
+                    connection.execute(
+                        """UPDATE asset_versions
+                           SET source_fingerprint = ?, schema_fingerprint = ?, status = 'ready',
+                               technical_metadata_json = ? WHERE id = ?""",
+                        (
+                            item["schema_fingerprint"],
+                            item["schema_fingerprint"],
+                            _dumps(item["technical_metadata"]),
+                            item["version_id"],
+                        ),
+                    )
+                    continue
+                version_number = int(
+                    connection.execute(
+                        "SELECT COALESCE(MAX(version_number), 0) + 1 FROM asset_versions WHERE asset_id = ?",
+                        (item["asset_id"],),
+                    ).fetchone()[0]
+                )
+                connection.execute(
+                    """INSERT INTO asset_versions (
+                           id, asset_id, version_number, source_fingerprint,
+                           schema_fingerprint, recipe_fingerprint, status, created_at,
+                           technical_metadata_json, inspection_json, drift_json,
+                           planned_location, format
+                       ) VALUES (?, ?, ?, ?, ?, NULL, 'ready', ?, ?, NULL, NULL, NULL, NULL)""",
+                    (
+                        item["version_id"],
+                        item["asset_id"],
+                        version_number,
+                        item["schema_fingerprint"],
+                        item["schema_fingerprint"],
+                        now,
+                        _dumps(item["technical_metadata"]),
+                    ),
+                )
+
     def list_assets(self) -> list[DataAsset]:
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM data_assets ORDER BY created_at DESC, id").fetchall()

@@ -14,7 +14,9 @@ from queryx.app.query.models import (
     AssetRelationship,
     LogicalQueryPlan,
     OutputField,
+    FilterOperator,
 )
+from queryx.app.query.mongodb_catalog import MongoDBCatalogAssetError, MongoDBCatalogAssets
 from queryx.app.query.mysql_catalog import MySQLCatalogAssetError, MySQLCatalogAssets
 from queryx.app.query.storage import QueryStorage
 
@@ -62,6 +64,7 @@ class PlanValidator:
         self, ingestion: IngestionStorage, processing: ProcessingStorage,
         query_storage: QueryStorage, default_limit: int, max_limit: int,
         mysql_assets: MySQLCatalogAssets | None = None,
+        mongodb_assets: MongoDBCatalogAssets | None = None,
     ) -> None:
         self.ingestion = ingestion
         self.processing = processing
@@ -69,6 +72,7 @@ class PlanValidator:
         self.default_limit = default_limit
         self.max_limit = max_limit
         self.mysql_assets = mysql_assets
+        self.mongodb_assets = mongodb_assets
 
     def validate(self, plan: LogicalQueryPlan) -> ValidatedPlan:
         aliases = [source.alias for source in plan.sources]
@@ -92,8 +96,12 @@ class PlanValidator:
         if backend == "mysql":
             self._validate_mysql_scope(normalized)
             relationships: dict[str, AssetRelationship] = {}
+        elif backend == "mongodb":
+            self._validate_mongodb_scope(normalized)
+            relationships = {}
         else:
             relationships = self._validate_joins(normalized, resolved)
+        self._validate_backend_operators(normalized, backend)
         self._validate_filters(normalized, resolved)
         output_schema, output_names = self._validate_outputs(normalized, resolved)
         self._validate_group_by(normalized, resolved)
@@ -129,6 +137,25 @@ class PlanValidator:
                     schema=mysql_asset.schema,
                     source_id=mysql_asset.source_id,
                 )
+        if self.mongodb_assets is not None:
+            try:
+                mongodb_asset = self.mongodb_assets.resolve(
+                    source.asset_id, source.asset_version_id
+                )
+            except MongoDBCatalogAssetError as exc:
+                raise QueryValidationError(exc.code, exc.message) from exc
+            if mongodb_asset is not None:
+                return ResolvedSource(
+                    alias=source.alias,
+                    asset_id=mongodb_asset.asset_id,
+                    asset_version_id=mongodb_asset.asset_version_id,
+                    binding=None,
+                    relation=mongodb_asset.collection,
+                    fields=mongodb_asset.fields,
+                    backend="mongodb",
+                    schema=mongodb_asset.database,
+                    source_id=mongodb_asset.source_id,
+                )
         asset = self.ingestion.get_asset(source.asset_id)
         if asset is None:
             raise QueryValidationError(
@@ -139,6 +166,12 @@ class PlanValidator:
             raise QueryValidationError(
                 "mysql_source_not_ready",
                 "The MySQL catalog source is not current and ready",
+                details={"asset_id": source.asset_id},
+            )
+        if str(asset.asset_kind) == "mongodb_collection":
+            raise QueryValidationError(
+                "mongodb_source_not_ready",
+                "The MongoDB catalog source is not current and ready",
                 details={"asset_id": source.asset_id},
             )
         if source.asset_version_id:
@@ -192,6 +225,55 @@ class PlanValidator:
             raise QueryValidationError(
                 "mysql_transform_not_supported",
                 "Transforms are not supported for MySQL queries yet",
+            )
+
+    @staticmethod
+    def _validate_mongodb_scope(plan: LogicalQueryPlan) -> None:
+        if len(plan.sources) != 1:
+            raise QueryValidationError(
+                "mongodb_multi_source_not_supported",
+                "MongoDB queries currently support exactly one source",
+            )
+        if plan.joins:
+            raise QueryValidationError(
+                "mongodb_joins_not_supported", "MongoDB joins are not supported yet"
+            )
+        if any(item.transform is not None for item in [*plan.projections, *plan.group_by]):
+            raise QueryValidationError(
+                "mongodb_transform_not_supported",
+                "Transforms are not supported for MongoDB queries yet",
+            )
+
+    @staticmethod
+    def _validate_backend_operators(plan: LogicalQueryPlan, backend: str) -> None:
+        if backend == "mongodb":
+            allowed = {
+                FilterOperator.EQ,
+                FilterOperator.NEQ,
+                FilterOperator.GT,
+                FilterOperator.GTE,
+                FilterOperator.LT,
+                FilterOperator.LTE,
+                FilterOperator.IN,
+                FilterOperator.NOT_IN,
+                FilterOperator.IS_NULL,
+                FilterOperator.IS_NOT_NULL,
+            }
+            for query_filter in plan.filters:
+                if query_filter.operator not in allowed:
+                    raise QueryValidationError(
+                        "mongodb_operator_not_supported",
+                        "Filter operator is not supported by MongoDB queries",
+                    )
+                if not _safe_mongodb_value(query_filter.value):
+                    raise QueryValidationError(
+                        "invalid_mongodb_filter_value",
+                        "MongoDB filter values must be scalar or lists of scalars",
+                    )
+        elif any(item.operator == FilterOperator.NOT_IN for item in plan.filters):
+            raise QueryValidationError(
+                "operator_not_supported",
+                "Filter operator is not supported by this query backend",
             )
 
     def _validate_joins(
@@ -373,3 +455,11 @@ def _aggregation_type(aggregation: Aggregation, field_type: str) -> str:
     if aggregation.function == AggregationFunction.AVG:
         return "DOUBLE"
     return field_type
+
+
+def _safe_mongodb_value(value: Any) -> bool:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return True
+    if isinstance(value, list):
+        return bool(value) and all(_safe_mongodb_value(item) for item in value)
+    return False
