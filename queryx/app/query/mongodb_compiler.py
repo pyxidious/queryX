@@ -106,6 +106,7 @@ class MongoDBQueryCompiler:
     @staticmethod
     def _predicate(field: str, operator: FilterOperator, value: Any) -> dict[str, Any]:
         operators = {
+            FilterOperator.NE: "$ne",
             FilterOperator.NEQ: "$ne",
             FilterOperator.GT: "$gt",
             FilterOperator.GTE: "$gte",

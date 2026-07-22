@@ -265,6 +265,44 @@ def test_mongodb_rejects_arbitrary_operators_pipeline_values_and_scope(
         service.validate(_plan(asset, limit=settings.query_max_limit + 1))
     assert maximum.value.code == "query_limit_exceeded"
 
+    multi_source = _plan(
+        asset,
+        sources=[
+            {"alias": "a", "asset_id": asset.asset_id},
+            {"alias": "b", "asset_id": asset.asset_id},
+        ],
+        projections=[{"source_alias": "a", "field": "status"}],
+        filters=[],
+        order_by=[],
+    )
+    with pytest.raises(QueryValidationError) as multiple:
+        service.validate(multi_source)
+    assert multiple.value.code == "mongodb_multi_source_not_supported"
+    joined = _plan(
+        asset,
+        joins=[{
+            "relationship_id": "forbidden",
+            "left_alias": "o",
+            "right_alias": "o",
+        }],
+    )
+    with pytest.raises(QueryValidationError) as join:
+        service.validate(joined)
+    assert join.value.code == "mongodb_joins_not_supported"
+    transformed = _plan(asset)
+    transformed["projections"][0]["transform"] = "date_trunc_month"
+    with pytest.raises(QueryValidationError) as transform:
+        service.validate(transformed)
+    assert transform.value.code == "mongodb_transform_not_supported"
+
+    ne_plan = _plan(asset, filters=[{
+        "source_alias": "o", "field": "status", "operator": "ne", "value": "cancelled"
+    }])
+    ne_validated = service.validator.validate(LogicalQueryPlan.model_validate(ne_plan))
+    assert service.mongodb_compiler.compile(ne_validated).pipeline[0] == {
+        "$match": {"status": {"$ne": "cancelled"}}
+    }
+
 
 def test_mongodb_routing_and_audit_do_not_store_rows_or_filter_values(
     mongodb_env: tuple[Settings, QueryService, Any], monkeypatch: pytest.MonkeyPatch,

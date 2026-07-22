@@ -77,6 +77,7 @@ class Projection(FieldExpression):
 
 class FilterOperator(StrEnum):
     EQ = "eq"
+    NE = "ne"
     NEQ = "neq"
     GT = "gt"
     GTE = "gte"

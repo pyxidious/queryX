@@ -243,12 +243,24 @@ class PlanValidator:
                 "mongodb_transform_not_supported",
                 "Transforms are not supported for MongoDB queries yet",
             )
+        fields = [
+            *(item.field for item in plan.projections),
+            *(item.field for item in plan.filters),
+            *(item.field for item in plan.group_by),
+            *(item.field for item in plan.aggregations if item.field is not None),
+        ]
+        if any(not _safe_mongodb_field(field) for field in fields):
+            raise QueryValidationError(
+                "invalid_mongodb_field",
+                "MongoDB fields must be explicitly observed safe field paths",
+            )
 
     @staticmethod
     def _validate_backend_operators(plan: LogicalQueryPlan, backend: str) -> None:
         if backend == "mongodb":
             allowed = {
                 FilterOperator.EQ,
+                FilterOperator.NE,
                 FilterOperator.NEQ,
                 FilterOperator.GT,
                 FilterOperator.GTE,
@@ -270,7 +282,10 @@ class PlanValidator:
                         "invalid_mongodb_filter_value",
                         "MongoDB filter values must be scalar or lists of scalars",
                     )
-        elif any(item.operator == FilterOperator.NOT_IN for item in plan.filters):
+        elif any(
+            item.operator in {FilterOperator.NE, FilterOperator.NOT_IN}
+            for item in plan.filters
+        ):
             raise QueryValidationError(
                 "operator_not_supported",
                 "Filter operator is not supported by this query backend",
@@ -463,3 +478,11 @@ def _safe_mongodb_value(value: Any) -> bool:
     if isinstance(value, list):
         return bool(value) and all(_safe_mongodb_value(item) for item in value)
     return False
+
+
+def _safe_mongodb_field(field: str) -> bool:
+    parts = field.split(".")
+    return bool(parts) and all(
+        part and not part.startswith("$") and "[]" not in part
+        for part in parts
+    )
