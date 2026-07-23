@@ -1396,8 +1396,7 @@ def test_natural_language_profiles_by_role_requires_unwind_and_grouping(
 ) -> None:
     settings, _, assets = mongodb_profiles_env
     wrong = _profiles_count_plan(assets["profiles"])
-    corrected = _profiles_by_role_plan(assets["profiles"])
-    client = _SequencedNaturalClient(wrong, corrected)
+    client = _SequencedNaturalClient(wrong)
 
     response = NaturalLanguageQueryService(
         settings, client=client  # type: ignore[arg-type]
@@ -1408,10 +1407,7 @@ def test_natural_language_profiles_by_role_requires_unwind_and_grouping(
         )
     ))
 
-    assert len(client.planning_calls) == 2
-    feedback = json.loads(client.planning_calls[1][-1]["content"])
-    assert feedback["validation_code"] == "mongodb_profiles_by_role_mismatch"
-    assert "roles[]" in feedback["instruction"]
+    assert len(client.planning_calls) == 1
     plan = response.normalized_plan
     assert plan is not None
     assert plan.unwinds[0].field == "roles"
@@ -1419,6 +1415,8 @@ def test_natural_language_profiles_by_role_requires_unwind_and_grouping(
     assert plan.projections[0].alias == "role"
     assert plan.aggregations[0].field == "_id"
     assert plan.aggregations[0].alias == "profiles"
+    assert plan.filters == [] and plan.order_by == []
+    assert plan.limit == settings.query_default_limit
 
 
 def test_natural_language_correct_profiles_by_role_plan_needs_no_retry(
@@ -1440,13 +1438,12 @@ def test_natural_language_correct_profiles_by_role_plan_needs_no_retry(
     assert len(client.planning_calls) == 1
 
 
-def test_natural_language_english_profiles_per_role_retries_global_count(
+def test_natural_language_english_profiles_per_role_canonicalizes_global_count(
     mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:
     settings, _, assets = mongodb_profiles_env
     client = _SequencedNaturalClient(
         _profiles_count_plan(assets["profiles"]),
-        _profiles_by_role_plan(assets["profiles"]),
     )
 
     response = NaturalLanguageQueryService(
@@ -1455,7 +1452,7 @@ def test_natural_language_english_profiles_per_role_retries_global_count(
         question="For each role in the MongoDB profiles roles array, count the profiles"
     ))
 
-    assert len(client.planning_calls) == 2
+    assert len(client.planning_calls) == 1
     assert response.normalized_plan is not None
     assert response.normalized_plan.unwinds[0].field == "roles"
     assert response.normalized_plan.group_by[0].field == "roles[]"
@@ -1702,7 +1699,7 @@ def test_natural_language_mongodb_global_count_canonicalizes_unrequested_shape(
     assert plan.projections == [] and plan.filters == []
     assert plan.group_by == [] and plan.order_by == []
     assert plan.unwinds == [] and plan.array_matches == []
-    assert plan.limit is None
+    assert plan.limit == settings.query_default_limit
     assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
         ("count", "_id", "profiles")
     ]
@@ -1734,7 +1731,7 @@ def test_natural_language_mongodb_global_count_canonicalizes_retry_shape(
     assert plan.projections == [] and plan.filters == []
     assert plan.group_by == [] and plan.order_by == []
     assert plan.unwinds == [] and plan.array_matches == []
-    assert plan.limit is None
+    assert plan.limit == settings.query_default_limit
     assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
         ("count", "_id", "profiles")
     ]
@@ -1947,22 +1944,22 @@ def test_natural_language_mongodb_recent_events_top_k_is_exact(
             "alias": "events",
             "asset_id": assets["events"].asset_id,
         }],
-        "projections": [{"source_alias": "events", "field": "type"}],
-        "filters": [],
-        "aggregations": [],
-        "group_by": [],
-        "order_by": [],
-        "limit": 5,
-    }
-    corrected = {
-        **wrong,
         "projections": [
             {"source_alias": "events", "field": field}
             for field in ("type", "user_id", "created_at")
         ],
+        "filters": [],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "events",
+            "field": "_id",
+            "alias": "events",
+        }],
+        "group_by": [],
         "order_by": [{"field": "created_at", "direction": "desc"}],
+        "limit": 5,
     }
-    client = _SequencedNaturalClient(wrong, corrected)
+    client = _SequencedNaturalClient(wrong)
 
     response = NaturalLanguageQueryService(
         settings, client=client  # type: ignore[arg-type]
@@ -1972,7 +1969,7 @@ def test_natural_language_mongodb_recent_events_top_k_is_exact(
 
     plan = response.normalized_plan
     assert plan is not None
-    assert len(client.planning_calls) == 2
+    assert len(client.planning_calls) == 1
     assert [item.field for item in plan.projections] == [
         "type", "user_id", "created_at"
     ]

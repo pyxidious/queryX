@@ -1049,6 +1049,25 @@ class NaturalLanguageQueryService:
             return self._canonicalize_mongodb_global_count(
                 candidate, question, context
             )
+        if validation_code == "mongodb_profiles_by_role_mismatch":
+            return self._canonicalize_mongodb_profiles_by_role(
+                candidate, question, context
+            )
+        if validation_code in {
+            "invalid_group_by",
+            "metric_aggregation_mismatch",
+            "mongodb_events_recent_top_k_mismatch",
+            "row_intent_mismatch",
+            "row_projection_mismatch",
+            "row_filter_mismatch",
+            "row_order_by_mismatch",
+            "row_limit_mismatch",
+        }:
+            recent_candidate = self._canonicalize_mongodb_recent_events_top_k(
+                candidate, question, context
+            )
+            if recent_candidate != candidate:
+                return recent_candidate
         if validation_code != "invalid_group_by":
             return candidate
 
@@ -1287,6 +1306,203 @@ class NaturalLanguageQueryService:
             source_alias,
             aggregation["field"],
             aggregation["alias"],
+        )
+        return canonical
+
+    def _canonicalize_mongodb_profiles_by_role(
+        self,
+        candidate: dict[str, Any],
+        question: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        requirements = self._semantic_requirements(question, context)
+        asset_id = requirements.get("asset_id")
+        if not (
+            requirements.get("intent") == "count"
+            and requirements.get("mongodb_array_shape_code")
+            == "mongodb_profiles_by_role_mismatch"
+            and isinstance(asset_id, str)
+            and requirements.get("unwind") == {"field": "roles"}
+            and requirements.get("projection")
+            == {"field": "roles[]", "alias": "role"}
+            and requirements.get("aggregation")
+            == {"function": "count", "field": "_id", "alias": "profiles"}
+            and requirements.get("group_by") == {"field": "roles[]"}
+            and requirements.get("filter") is None
+            and not requirements.get("ordering_requested")
+        ):
+            logger.info(
+                "Skipped MongoDB profiles-by-role canonicalization "
+                "reason=non_grouped_or_ambiguous_intent"
+            )
+            return candidate
+
+        selected_asset = next(
+            (
+                asset
+                for asset in context.get("assets", [])
+                if isinstance(asset, dict) and asset.get("asset_id") == asset_id
+            ),
+            None,
+        )
+        catalog_fields = {
+            str(field.get("name"))
+            for field in selected_asset.get("fields", [])
+            if isinstance(field, dict)
+        } if isinstance(selected_asset, dict) else set()
+        if not (
+            isinstance(selected_asset, dict)
+            and selected_asset.get("backend") == "mongodb"
+            and {"_id", "roles", "roles[]"}.issubset(catalog_fields)
+        ):
+            logger.info(
+                "Skipped MongoDB profiles-by-role canonicalization "
+                "reason=asset_or_fields_not_catalogued"
+            )
+            return candidate
+
+        sources = candidate.get("sources", [])
+        if (
+            len(sources) != 1
+            or not isinstance(sources[0], dict)
+            or sources[0].get("asset_id") != asset_id
+            or not isinstance(sources[0].get("alias"), str)
+        ):
+            logger.info(
+                "Skipped MongoDB profiles-by-role canonicalization "
+                "reason=unsupported_source_shape"
+            )
+            return candidate
+
+        source = sources[0]
+        source_alias = source["alias"]
+        canonical = {
+            **candidate,
+            "sources": [source],
+            "joins": [],
+            "unwinds": [{
+                "source_alias": source_alias,
+                "field": "roles",
+                "preserve_null_and_empty_arrays": False,
+            }],
+            "array_matches": [],
+            "projections": [{
+                "source_alias": source_alias,
+                "field": "roles[]",
+                "alias": "role",
+            }],
+            "filters": [],
+            "aggregations": [{
+                "function": "count",
+                "source_alias": source_alias,
+                "field": "_id",
+                "alias": "profiles",
+            }],
+            "group_by": [{
+                "source_alias": source_alias,
+                "field": "roles[]",
+            }],
+            "order_by": [],
+            "limit": None,
+        }
+        logger.info(
+            "Canonicalized MongoDB profiles by role source_alias=%s",
+            source_alias,
+        )
+        return canonical
+
+    def _canonicalize_mongodb_recent_events_top_k(
+        self,
+        candidate: dict[str, Any],
+        question: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        requirements = self._semantic_requirements(question, context)
+        asset_id = requirements.get("asset_id")
+        projections = requirements.get("projections")
+        order_by = requirements.get("order_by")
+        limit = requirements.get("limit")
+        if not (
+            requirements.get("intent") == "row_returning"
+            and requirements.get("strict_mongodb_recent_top_k") is True
+            and isinstance(asset_id, str)
+            and projections == ["type", "user_id", "created_at"]
+            and order_by == {"field": "created_at", "direction": "desc"}
+            and isinstance(limit, int)
+            and not isinstance(limit, bool)
+            and 0 < limit <= self.settings.query_max_limit
+            and requirements.get("filter") is None
+            and requirements.get("group_by") is None
+            and requirements.get("mongodb_array_shape_code") is None
+        ):
+            return candidate
+
+        selected_asset = next(
+            (
+                asset
+                for asset in context.get("assets", [])
+                if isinstance(asset, dict) and asset.get("asset_id") == asset_id
+            ),
+            None,
+        )
+        catalog_fields = {
+            str(field.get("name"))
+            for field in selected_asset.get("fields", [])
+            if isinstance(field, dict)
+        } if isinstance(selected_asset, dict) else set()
+        if not (
+            isinstance(selected_asset, dict)
+            and selected_asset.get("backend") == "mongodb"
+            and set(projections).issubset(catalog_fields)
+        ):
+            logger.info(
+                "Skipped MongoDB recent-events canonicalization "
+                "reason=asset_or_fields_not_catalogued"
+            )
+            return candidate
+
+        sources = candidate.get("sources", [])
+        if (
+            len(sources) != 1
+            or not isinstance(sources[0], dict)
+            or sources[0].get("asset_id") != asset_id
+            or not isinstance(sources[0].get("alias"), str)
+        ):
+            logger.info(
+                "Skipped MongoDB recent-events canonicalization "
+                "reason=unsupported_source_shape"
+            )
+            return candidate
+
+        source = sources[0]
+        source_alias = source["alias"]
+        canonical = {
+            **candidate,
+            "sources": [source],
+            "joins": [],
+            "unwinds": [],
+            "array_matches": [],
+            "projections": [
+                {
+                    "source_alias": source_alias,
+                    "field": field,
+                    "alias": field,
+                }
+                for field in projections
+            ],
+            "filters": [],
+            "aggregations": [],
+            "group_by": [],
+            "order_by": [{
+                "field": order_by["field"],
+                "direction": order_by["direction"],
+            }],
+            "limit": limit,
+        }
+        logger.info(
+            "Canonicalized MongoDB recent events top-k source_alias=%s limit=%s",
+            source_alias,
+            limit,
         )
         return canonical
 
