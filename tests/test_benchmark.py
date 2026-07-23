@@ -348,11 +348,23 @@ def test_main_honors_repeat_count_without_real_http(
         }
 
     monkeypatch.setattr(benchmark_run, "run_case", fake_run)
+    report_calls = []
+
+    def fake_reports(**kwargs):
+        report_calls.append(kwargs)
+        return (
+            output_dir / "benchmark-mock.report.it.md",
+            output_dir / "benchmark-mock.report.en.md",
+        )
+
+    monkeypatch.setattr(benchmark_run, "generate_reports", fake_reports)
     assert benchmark_run.main([
         "--cases", str(cases_path), "--output-dir", str(output_dir),
         "--model-label", "mock",
     ]) == 0
     assert calls == ["repeated", "repeated", "repeated"]
+    assert report_calls[0]["languages"] == ["it", "en"]
+    assert report_calls[0]["output_dir"] == output_dir
     details_path = next(output_dir.glob("*.json"))
     if details_path.name.endswith(".summary.json"):
         details_path = next(path for path in output_dir.glob("*.json") if not path.name.endswith(".summary.json"))

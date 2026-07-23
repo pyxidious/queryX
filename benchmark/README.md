@@ -91,6 +91,32 @@ Ogni run produce:
 - JSON dettagliato con un record logico per caso e l'array delle ripetizioni;
 - CSV con una riga per singola ripetizione;
 - summary JSON con casi logici, richieste effettive, metriche e breakdown.
+- report Markdown italiano e inglese, con lo stesso prefisso temporale degli altri artefatti.
+
+I report sono deterministici e derivano soltanto da detailed JSON e summary JSON: non effettuano chiamate a LLM, database o API e non modificano metriche o criteri pass/fail. Includono sintesi, metriche complessive, latenze, breakdown per backend/operazione/difficoltà, consistenza delle ripetizioni e dei gruppi equivalenti, copertura della ground truth, casi falliti, limiti, riproducibilità e appendice dei casi.
+
+Il default genera entrambe le lingue; il parametro opzionale accetta `it`, `en` oppure `it,en`:
+
+```bash
+python -m benchmark.run \
+  --base-url http://127.0.0.1:8000 \
+  --cases benchmark/cases.json \
+  --output-dir benchmark/results \
+  --model-label qwen3.5-9b-100k \
+  --report-languages it,en
+```
+
+Un run storico può essere documentato senza ripetere le inferenze:
+
+```bash
+python -m benchmark.report \
+  --summary benchmark/results/benchmark-<label>-<timestamp>.summary.json \
+  --details benchmark/results/benchmark-<label>-<timestamp>.json \
+  --output-dir benchmark/results \
+  --languages it,en
+```
+
+La modalità standalone verifica compatibilità di `model_label`, numero di casi e `base_url` quando disponibili. I campi assenti nei vecchi artefatti sono mostrati come `n/d` o `n/a`.
 
 Errori HTTP, timeout e fallimenti dei casi vengono registrati e il runner prosegue. L'exit code è diverso da zero soltanto se fallisce il runner stesso.
 

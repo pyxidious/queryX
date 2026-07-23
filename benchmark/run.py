@@ -16,6 +16,8 @@ from typing import Any
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from benchmark.report import generate_reports, parse_languages
+
 
 DEFAULT_TIMEOUT_SECONDS = 330.0
 DEFAULT_TOLERANCE = 1e-6
@@ -720,6 +722,7 @@ def _write_outputs(
     *,
     model_label: str,
     base_url: str,
+    cases_file: Path | None = None,
 ) -> tuple[Path, Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -728,8 +731,13 @@ def _write_outputs(
     details_path = output_dir / f"{stem}.json"
     csv_path = output_dir / f"{stem}.csv"
     summary_path = output_dir / f"{stem}.summary.json"
+    metadata = {
+        "model_label": model_label,
+        "base_url": base_url,
+        **({"cases_file": str(cases_file)} if cases_file is not None else {}),
+    }
     details_path.write_text(
-        json.dumps({"model_label": model_label, "base_url": base_url, "records": records}, indent=2, ensure_ascii=False),
+        json.dumps({**metadata, "records": records}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     csv_records = _metric_records(records)
@@ -748,6 +756,7 @@ def _write_outputs(
             {
                 "model_label": model_label,
                 "base_url": base_url,
+                **({"cases_file": str(cases_file)} if cases_file is not None else {}),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 **summary,
             },
@@ -766,6 +775,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path(__file__).with_name("results"))
     parser.add_argument("--model-label", default="configured-model")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--report-languages", default="it,en")
     return parser.parse_args(argv)
 
 
@@ -801,7 +811,15 @@ def main(argv: list[str] | None = None) -> int:
             summarize_records(records),
             model_label=args.model_label,
             base_url=base_url,
+            cases_file=args.cases,
         )
+        report_paths = generate_reports(
+            summary_path=paths[2],
+            details_path=paths[0],
+            output_dir=args.output_dir,
+            languages=parse_languages(args.report_languages),
+        )
+        paths = (*paths, *report_paths)
     except Exception as exc:
         print(f"benchmark runner failed: {exc}", file=sys.stderr)
         return 2
