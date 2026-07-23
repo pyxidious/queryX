@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -25,6 +26,8 @@ from queryx.app.main import create_app
 from queryx.app.processing.service import ProcessingService
 from queryx.app.query.models import (
     AssetRelationshipCreate,
+    LogicalQueryPlan,
+    NaturalLanguageClassification,
     NaturalLanguageQueryRequest,
     QueryExecutionResult,
 )
@@ -480,6 +483,42 @@ def test_exact_logical_query_plan_wrapper_is_unwrapped(
     assert response.normalized_plan.group_by[0].field == "order_status"
 
 
+def test_planner_uses_direct_pydantic_schema_without_top_level_oneof(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(_single_plan(assets))
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    supplied_schema = client.calls[0][1]
+    plan_schema = LogicalQueryPlan.model_json_schema()
+    classification_schema = NaturalLanguageClassification.model_json_schema()
+    legacy_schema = {
+        "oneOf": [
+            plan_schema,
+            {
+                "type": "object",
+                "properties": {"error": {"const": "ambiguous_question"}},
+                "required": ["error"],
+                "additionalProperties": False,
+            },
+        ]
+    }
+    assert response.normalized_plan is not None
+    assert supplied_schema == plan_schema
+    assert "oneOf" not in supplied_schema
+    assert supplied_schema.get("$defs")
+    assert "#/$defs/QuerySource" == supplied_schema["properties"]["sources"][
+        "items"
+    ]["$ref"]
+    assert classification_schema.get("$defs")
+    assert "oneOf" not in classification_schema
+    assert set(legacy_schema) == {"oneOf"}
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -607,7 +646,7 @@ def test_invalid_json_after_retry_is_structured(
     assert captured.value.code == "invalid_llm_json" and len(client.calls) == 2
 
 
-def test_invalid_plan_is_rejected_and_planner_ambiguity_is_structured(
+def test_invalid_plan_is_rejected(
     nl_env: tuple[Settings, dict[str, Any], str],
 ) -> None:
     settings, assets, _ = nl_env
@@ -620,12 +659,6 @@ def test_invalid_plan_is_rejected_and_planner_ambiguity_is_structured(
             NaturalLanguageQueryRequest(question="orders by status")
         )
     assert plan_error.value.code == "invalid_logical_plan"
-    ambiguous = NaturalLanguageQueryService(
-        settings, client=StubOllamaClient({"error": "ambiguous_question"})  # type: ignore[arg-type]
-    ).translate(NaturalLanguageQueryRequest(question="show me the data"))
-    assert ambiguous.classification == "ambiguous"
-    assert ambiguous.clarification_question
-    assert ambiguous.normalized_plan is None and ambiguous.result is None
 
 
 def test_invalid_group_by_is_corrected_with_the_single_retry(
@@ -676,13 +709,37 @@ def test_second_invalid_plan_is_rejected_before_execution(
 
 def test_ollama_unavailable_is_structured(
     nl_env: tuple[Settings, dict[str, Any], str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     settings, _, _ = nl_env
+    caplog.set_level(logging.WARNING, logger="queryx.app.query.natural_language")
     with pytest.raises(NaturalLanguageQueryError) as captured:
         NaturalLanguageQueryService(
             settings, client=StubOllamaClient(OllamaUnavailableError("offline"))  # type: ignore[arg-type]
         ).translate(NaturalLanguageQueryRequest(question="orders by status"))
     assert captured.value.code == "llm_unavailable"
+    assert "stage=planning" in caplog.text
+    assert "exception_type=OllamaUnavailableError" in caplog.text
+
+
+def test_classifier_unavailable_logs_real_exception_type(
+    nl_env: tuple[Settings, dict[str, Any], str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, _, _ = nl_env
+    caplog.set_level(logging.WARNING, logger="queryx.app.query.natural_language")
+    client = StubOllamaClient(
+        classifications=[OllamaUnavailableError("offline")]
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(
+            settings, client=client  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    assert captured.value.code == "llm_unavailable"
+    assert "stage=classification" in caplog.text
+    assert "exception_type=OllamaUnavailableError" in caplog.text
 
 
 def test_ollama_timeout_is_distinct_from_unavailability(

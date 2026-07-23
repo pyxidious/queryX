@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
+from io import BytesIO
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -11,6 +13,7 @@ from queryx.app.core.config import Settings
 from queryx.app.llm import ollama_client as client_module
 from queryx.app.llm.ollama_client import (
     OllamaClient,
+    OllamaInvalidResponseError,
     OllamaTimeoutError,
     OllamaUnavailableError,
 )
@@ -28,6 +31,14 @@ class _Response:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode()
+
+
+class _RawResponse(_Response):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def read(self) -> bytes:
+        return self.body
 
 
 def test_chat_payload_places_think_at_top_level_and_discards_thinking(
@@ -125,4 +136,51 @@ def test_non_timeout_network_failure_remains_unavailable(
 
     monkeypatch.setattr(client_module, "urlopen", fail_urlopen)
     with pytest.raises(OllamaUnavailableError):
+        OllamaClient("http://ollama:11434", "model").tags()
+
+
+def test_http_400_is_invalid_response_and_logs_only_safe_limited_detail(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    def fail_urlopen(request: Any, timeout: int) -> _Response:
+        body = json.dumps({
+            "error": "invalid format; prompt=secret customer data; option unsupported"
+        }).encode()
+        raise HTTPError(request.full_url, 400, "bad request", {}, BytesIO(body))
+
+    monkeypatch.setattr(client_module, "urlopen", fail_urlopen)
+    caplog.set_level(logging.WARNING, logger=client_module.__name__)
+
+    with pytest.raises(OllamaInvalidResponseError, match="HTTP 400"):
+        OllamaClient("http://ollama:11434", "model").tags()
+
+    logged = caplog.text
+    assert "status=400" in logged
+    assert "prompt=<redacted>" in logged
+    assert "secret customer data" not in logged
+    assert "http://ollama" not in logged
+
+
+def test_http_500_remains_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_urlopen(request: Any, timeout: int) -> _Response:
+        body = json.dumps({"error": "runner unavailable"}).encode()
+        raise HTTPError(request.full_url, 500, "server error", {}, BytesIO(body))
+
+    monkeypatch.setattr(client_module, "urlopen", fail_urlopen)
+    with pytest.raises(OllamaUnavailableError, match="HTTP error 500"):
+        OllamaClient("http://ollama:11434", "model").tags()
+
+
+def test_invalid_json_response_body_is_invalid_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        client_module,
+        "urlopen",
+        lambda request, timeout: _RawResponse(b"not-json"),
+    )
+
+    with pytest.raises(OllamaInvalidResponseError, match="invalid JSON"):
         OllamaClient("http://ollama:11434", "model").tags()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import socket
 from dataclasses import dataclass
 from time import monotonic
@@ -11,6 +12,11 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
+_MAX_ERROR_DETAIL_CHARS = 512
+_SENSITIVE_ERROR_FIELD = re.compile(
+    r"(?i)\b(prompt|messages?|content|authorization|token|password|api[_-]?key)\b"
+    r"\s*[:=]\s*[^,;]+"
+)
 
 
 class OllamaError(RuntimeError):
@@ -191,7 +197,24 @@ class OllamaClient:
                 f"Ollama request timed out after {self.timeout_seconds} seconds"
             ) from exc
         except HTTPError as exc:
-            raise OllamaUnavailableError(f"Ollama HTTP error {exc.code}") from exc
+            detail = self._safe_http_error_detail(exc)
+            logger.warning(
+                "Ollama HTTP error status=%s path=%s detail=%r",
+                exc.code,
+                path,
+                detail,
+            )
+            if 400 <= exc.code < 500:
+                raise OllamaInvalidResponseError(
+                    f"Ollama rejected the request with HTTP {exc.code}"
+                ) from exc
+            if exc.code >= 500:
+                raise OllamaUnavailableError(
+                    f"Ollama HTTP error {exc.code}"
+                ) from exc
+            raise OllamaInvalidResponseError(
+                f"Unexpected Ollama HTTP status {exc.code}"
+            ) from exc
         except URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
                 raise OllamaTimeoutError(
@@ -205,3 +228,21 @@ class OllamaClient:
         if not isinstance(parsed, dict):
             raise OllamaInvalidResponseError("Ollama response must be a JSON object")
         return parsed
+
+    @staticmethod
+    def _safe_http_error_detail(exc: HTTPError) -> str:
+        try:
+            raw = exc.read(_MAX_ERROR_DETAIL_CHARS * 2)
+        except OSError:
+            return "<unreadable>"
+        try:
+            body = raw.decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            return f"<non-json body: {len(raw)} bytes>"
+        error = parsed.get("error") if isinstance(parsed, dict) else None
+        if not isinstance(error, str):
+            return "<JSON body without string error>"
+        normalized = " ".join(error.split())
+        redacted = _SENSITIVE_ERROR_FIELD.sub(r"\1=<redacted>", normalized)
+        return redacted[:_MAX_ERROR_DETAIL_CHARS]

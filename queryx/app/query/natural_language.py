@@ -15,7 +15,9 @@ from queryx.app.llm.ollama_client import (
     OllamaClient,
     OllamaError,
     OllamaInvalidResponseError,
+    OllamaModelNotFoundError,
     OllamaTimeoutError,
+    OllamaUnavailableError,
 )
 from queryx.app.processing.storage import ProcessingStorage
 from queryx.app.query.models import (
@@ -75,7 +77,6 @@ Aggregation aliases may be referenced by order_by, but must never be used as sou
 Every order_by field must exactly match an existing projection output name or aggregation alias.
 When aggregations are present, every non-aggregated projection must appear identically in group_by, with the same source_alias, field and transform.
 For product categories ranked by revenue, use only products and order_items, join them through their active catalog relationship, project product_category_name, sum order_items.price as revenue, group by product_category_name, and order by revenue descending. Do not include orders.
-If the question cannot be resolved unambiguously from the catalog, return {"error":"ambiguous_question"}.
 """
 _CLASSIFICATION_PROMPT = """Classify whether the user question can be answered from the supplied catalog.
 Return only one JSON object matching the supplied schema, without markdown or additional keys.
@@ -293,28 +294,6 @@ class NaturalLanguageQueryService:
         ]
         candidate, retry_used = self._generate(messages)
         candidate = self._unwrap_logical_query_plan(candidate)
-        if candidate.get("error") == "ambiguous_question":
-            requirements = self._semantic_requirements(question, context)
-            if requirements.get("aggregation") and not retry_used:
-                candidate = self._unwrap_logical_query_plan(
-                    self._retry_invalid_plan(
-                        messages,
-                        candidate,
-                        "catalog_resolved_question",
-                        context,
-                        question,
-                    )
-                )
-                retry_used = True
-            else:
-                return NaturalLanguageQueryResponse(
-                    classification=QueryClassification.AMBIGUOUS,
-                    clarification_question=(
-                        "Puoi specificare il criterio o il campo da usare per la richiesta?"
-                    ),
-                    reason="Il piano non può essere determinato univocamente dal catalogo.",
-                    planning_time_ms=(monotonic() - planning_started) * 1000,
-                )
         try:
             validation = self._validate_candidate_semantics(
                 candidate, question, context
@@ -327,15 +306,6 @@ class NaturalLanguageQueryService:
                     messages, candidate, exc.code, context, question
                 )
             )
-            if candidate.get("error") == "ambiguous_question":
-                return NaturalLanguageQueryResponse(
-                    classification=QueryClassification.AMBIGUOUS,
-                    clarification_question=(
-                        "Puoi specificare il criterio o il campo da usare per la richiesta?"
-                    ),
-                    reason="Il piano non può essere determinato univocamente dal catalogo.",
-                    planning_time_ms=(monotonic() - planning_started) * 1000,
-                )
             try:
                 validation = self._validate_candidate_semantics(
                     candidate, question, context
@@ -419,18 +389,14 @@ class NaturalLanguageQueryService:
                 raise NaturalLanguageQueryError(
                     "llm_timeout", "Ollama classification request timed out", 504
                 ) from exc
-            except OllamaError as exc:
-                raise NaturalLanguageQueryError(
-                    "llm_unavailable", "Ollama is unavailable", 503
-                ) from exc
+            except (OllamaUnavailableError, OllamaModelNotFoundError) as exc:
+                raise self._llm_unavailable(exc, "classification_retry") from exc
         except OllamaTimeoutError as exc:
             raise NaturalLanguageQueryError(
                 "llm_timeout", "Ollama classification request timed out", 504
             ) from exc
-        except OllamaError as exc:
-            raise NaturalLanguageQueryError(
-                "llm_unavailable", "Ollama is unavailable", 503
-            ) from exc
+        except (OllamaUnavailableError, OllamaModelNotFoundError) as exc:
+            raise self._llm_unavailable(exc, "classification") from exc
         return classification
 
     @staticmethod
@@ -940,17 +906,7 @@ class NaturalLanguageQueryService:
                 ) from exc
 
     def _request(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        schema = {
-            "oneOf": [
-                LogicalQueryPlan.model_json_schema(),
-                {
-                    "type": "object",
-                    "properties": {"error": {"const": "ambiguous_question"}},
-                    "required": ["error"],
-                    "additionalProperties": False,
-                },
-            ]
-        }
+        schema = LogicalQueryPlan.model_json_schema()
         try:
             return self.client.chat_json(messages, schema).content
         except OllamaInvalidResponseError:
@@ -959,10 +915,22 @@ class NaturalLanguageQueryService:
             raise NaturalLanguageQueryError(
                 "llm_timeout", "Ollama request timed out", 504
             ) from exc
-        except OllamaError as exc:
-            raise NaturalLanguageQueryError(
-                "llm_unavailable", "Ollama is unavailable", 503
-            ) from exc
+        except (OllamaUnavailableError, OllamaModelNotFoundError) as exc:
+            raise self._llm_unavailable(exc, "planning") from exc
+
+    @staticmethod
+    def _llm_unavailable(
+        exc: OllamaUnavailableError | OllamaModelNotFoundError,
+        stage: str,
+    ) -> NaturalLanguageQueryError:
+        logger.warning(
+            "Ollama failure mapped to llm_unavailable stage=%s exception_type=%s",
+            stage,
+            type(exc).__name__,
+        )
+        return NaturalLanguageQueryError(
+            "llm_unavailable", "Ollama is unavailable", 503
+        )
 
     @staticmethod
     def _safe_debug_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
