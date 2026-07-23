@@ -82,23 +82,23 @@
       "rows_prefix": [
         [
           "beleza_saude",
-          1258681.339999992
+          1258681.34
         ],
         [
           "relogios_presentes",
-          1205005.6799999964
+          1205005.68
         ],
         [
           "cama_mesa_banho",
-          1036988.6799999892
+          1036988.68
         ],
         [
           "esporte_lazer",
-          988048.9699999961
+          988048.97
         ],
         [
           "informatica_acessorios",
-          911954.3199999969
+          911954.32
         ]
       ],
       "unordered": false
@@ -246,7 +246,7 @@
     "expected_result": {
       "rows": [
         [
-          13591643.699998675
+          13591643.7
         ]
       ]
     },
@@ -269,23 +269,23 @@
       "rows_prefix": [
         [
           "beleza_saude",
-          1258681.339999992
+          1258681.34
         ],
         [
           "relogios_presentes",
-          1205005.6799999964
+          1205005.68
         ],
         [
           "cama_mesa_banho",
-          1036988.6799999892
+          1036988.68
         ],
         [
           "esporte_lazer",
-          988048.9699999961
+          988048.97
         ],
         [
           "informatica_acessorios",
-          911954.3199999969
+          911954.32
         ]
       ],
       "unordered": false
@@ -1103,23 +1103,23 @@
       "rows_prefix": [
         [
           "beleza_saude",
-          1258681.339999992
+          1258681.34
         ],
         [
           "relogios_presentes",
-          1205005.6799999964
+          1205005.68
         ],
         [
           "cama_mesa_banho",
-          1036988.6799999892
+          1036988.68
         ],
         [
           "esporte_lazer",
-          988048.9699999961
+          988048.97
         ],
         [
           "informatica_acessorios",
-          911954.3199999969
+          911954.32
         ]
       ],
       "unordered": false

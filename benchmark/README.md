@@ -53,6 +53,17 @@ docker compose exec queryx python -m benchmark.generate_ground_truth
 
 `benchmark` è incluso nell'immagine e montato in `/app/benchmark`, quindi l'aggiornamento di `cases.json` e gli artefatti sotto `results/` persistono direttamente nel checkout host. Lo script individua `cases.json` relativamente al package, aggiorna esclusivamente gli `expected_result` già predisposti e non modifica alcun dato sorgente. Usa `MYSQL_URL`, `MONGODB_URL` e `DUCKDB_PATH` della configurazione QueryX, apre DuckDB in modalità read-only e non stampa credenziali.
 
+Prima della scrittura, i numeri vengono normalizzati ricorsivamente. Interi, booleani, `null` e stringhe restano invariati; float e `Decimal` finiti sono quantizzati a sei cifre decimali con `ROUND_HALF_UP`. Un valore distante al massimo da un singolo quantum `1e-6` da un confine decimale più corto viene canonicalizzato a quel confine, eliminando il rumore di accumulazione DuckDB senza superare la tolleranza esistente. `NaN` e infinito sono rifiutati perché non appartengono al JSON standard. Il file è serializzato conservando ordine di casi e chiavi, con una sola newline finale, e sostituito atomicamente tramite un temporaneo nella stessa directory.
+
+Di conseguenza, a dataset invariato due esecuzioni consecutive producono `cases.json` byte-per-byte identici:
+
+```bash
+make ground-truth
+cp benchmark/cases.json /tmp/queryx-cases-first.json
+make ground-truth
+cmp -s benchmark/cases.json /tmp/queryx-cases-first.json
+```
+
 Path alternativi possono essere indicati senza dipendere dalla working directory:
 
 ```bash

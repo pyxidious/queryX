@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import stat
 import sys
+import tempfile
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +29,78 @@ DEFAULT_CASES_PATH = PACKAGE_DIR / "cases.json"
 
 class GroundTruthError(RuntimeError):
     """An expected operational failure with a concise user-facing message."""
+
+
+@dataclass(frozen=True)
+class UpdateReport:
+    processed: int
+    changed: int
+    unchanged: int
+
+
+_SIX_DECIMALS = Decimal("0.000001")
+_FIVE_DECIMALS = Decimal("0.00001")
+
+
+def _numeric_error(case_id: str, path: str, reason: str) -> GroundTruthError:
+    return GroundTruthError(
+        f"Invalid numeric ground truth for case_id={case_id} at {path}: {reason}"
+    )
+
+
+def _normalized_decimal(value: Decimal, *, case_id: str, path: str) -> int | float:
+    if not value.is_finite():
+        raise _numeric_error(case_id, path, "NaN and Infinity are not supported")
+    try:
+        quantized = value.quantize(_SIX_DECIMALS, rounding=ROUND_HALF_UP)
+        shorter = quantized.quantize(_FIVE_DECIMALS, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise _numeric_error(case_id, path, "value cannot be quantized") from exc
+    # A value one 1e-6 quantum away from a shorter decimal boundary is binary
+    # accumulation noise at the benchmark's existing tolerance. Canonicalizing
+    # that boundary makes equivalent DuckDB sums byte-for-byte stable.
+    if shorter != 0 and abs(quantized - shorter) <= _SIX_DECIMALS:
+        quantized = shorter
+    if quantized == quantized.to_integral_value():
+        return int(quantized)
+    normalized = float(quantized)
+    if not math.isfinite(normalized):
+        raise _numeric_error(case_id, path, "normalized value is not finite")
+    return normalized
+
+
+def normalize_numeric(
+    value: Any, *, case_id: str, path: str = "expected_result"
+) -> Any:
+    """Recursively canonicalize JSON numbers without changing other values."""
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal):
+        return _normalized_decimal(value, case_id=case_id, path=path)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _numeric_error(case_id, path, "NaN and Infinity are not supported")
+        return _normalized_decimal(Decimal(str(value)), case_id=case_id, path=path)
+    if isinstance(value, list):
+        return [
+            normalize_numeric(item, case_id=case_id, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            normalize_numeric(item, case_id=case_id, path=f"{path}[{index}]")
+            for index, item in enumerate(value)
+        )
+    if isinstance(value, dict):
+        return {
+            key: normalize_numeric(
+                item, case_id=case_id, path=f"{path}.{key}"
+            )
+            for key, item in value.items()
+        }
+    return value
 
 
 def _configured_duckdb_path(settings: Settings) -> Path:
@@ -276,8 +353,9 @@ def _updated_expected_result(
 
 def update_cases(
     cases: list[dict[str, Any]], ground_truth: dict[str, Any]
-) -> int:
-    updated = 0
+) -> UpdateReport:
+    processed = 0
+    changed = 0
     seen: set[str] = set()
     for case in cases:
         case_id = case.get("id")
@@ -288,29 +366,75 @@ def update_cases(
             raise GroundTruthError(
                 f"Ground-truth case has no expected_result structure: {case_id}"
             )
-        case["expected_result"] = _updated_expected_result(
-            current, ground_truth[case_id]
+        normalized_current = normalize_numeric(current, case_id=str(case_id))
+        candidate = _updated_expected_result(current, ground_truth[case_id])
+        normalized_candidate = normalize_numeric(
+            candidate, case_id=str(case_id)
         )
+        case["expected_result"] = normalized_candidate
+        if normalized_candidate != normalized_current:
+            changed += 1
         seen.add(str(case_id))
-        updated += 1
+        processed += 1
     missing = set(ground_truth) - seen
     if missing:
         raise GroundTruthError(
             "Ground-truth case IDs are missing from cases.json: "
             + ", ".join(sorted(missing))
         )
-    return updated
+    return UpdateReport(
+        processed=processed,
+        changed=changed,
+        unchanged=processed - changed,
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
+    temporary_path: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        rendered = (
+            json.dumps(
+                payload,
+                indent=2,
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            + "\n"
         )
+        original_stat = path.stat() if path.exists() else None
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if original_stat is not None:
+            os.chmod(temporary_path, stat.S_IMODE(original_stat.st_mode))
+            try:
+                os.chown(temporary_path, original_stat.st_uid, original_stat.st_gid)
+            except PermissionError:
+                pass
+        os.replace(temporary_path, path)
+        temporary_path = None
     except OSError as exc:
         raise GroundTruthError(f"Cannot write ground-truth file: {path}") from exc
+    except ValueError as exc:
+        raise GroundTruthError(
+            f"Cannot serialize non-standard JSON ground truth: {path}"
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -341,11 +465,18 @@ def main(argv: list[str] | None = None) -> int:
         cases = _check_cases_path(cases_path)
         settings = Settings(_env_file=PROJECT_DIR / ".env")
         ground_truth = generate(settings)
-        updated = update_cases(cases, ground_truth)
+        report = update_cases(cases, ground_truth)
         _write_json(cases_path, cases)
         if args.output is not None:
-            _write_json(args.output.expanduser().resolve(), ground_truth)
-        print(f"Updated {updated} ground-truth cases in {cases_path}.")
+            normalized_output = {
+                case_id: normalize_numeric(payload, case_id=case_id)
+                for case_id, payload in ground_truth.items()
+            }
+            _write_json(args.output.expanduser().resolve(), normalized_output)
+        print(f"Ground-truth cases processed: {report.processed}")
+        print(f"Ground-truth values changed: {report.changed}")
+        print(f"Ground-truth values unchanged: {report.unchanged}")
+        print(f"Output: {cases_path}")
         if args.output is not None:
             print(f"Wrote standalone ground truth to {args.output.expanduser().resolve()}.")
         return 0
