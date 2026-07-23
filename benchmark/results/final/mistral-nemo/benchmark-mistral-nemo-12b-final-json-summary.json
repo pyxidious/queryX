@@ -1,0 +1,1932 @@
+{
+  "model_label": "mistral-nemo-12b-final-json",
+  "base_url": "http://127.0.0.1:8000",
+  "cases_file": "/app/benchmark/cases.json",
+  "generated_at": "2026-07-23T20:04:14.407814+00:00",
+  "total_cases": 72,
+  "total_executions": 100,
+  "executed_queries": 41,
+  "passed_cases": 41,
+  "pass_rate": 0.5694444444444444,
+  "classification_accuracy": 0.5694444444444444,
+  "backend_selection_accuracy": 0.5272727272727272,
+  "valid_plan_rate": 0.5272727272727272,
+  "execution_accuracy": 0.5576923076923077,
+  "latency_ms": {
+    "planning": {
+      "median": 9251.49821049854,
+      "p95": 18333.574591000797
+    },
+    "execution": {
+      "median": 20.27106699824799,
+      "p95": 154.61827399849426
+    },
+    "explanation": {
+      "median": 375.88491100177635,
+      "p95": 1293.5365919984179
+    },
+    "total": {
+      "median": 10265.93428949127,
+      "p95": 21988.684201001888
+    }
+  },
+  "repeat_consistency_rate": 0.7142857142857143,
+  "semantic_consistency_rate": 0.5833333333333334,
+  "structural_hallucination_rate": 0.0,
+  "forced_answer_rate": 0.0,
+  "prudent_refusal_rate": 0.6363636363636364,
+  "timeout_rate": 0.0,
+  "error_rate": 0.32,
+  "result_verified_cases": 27,
+  "result_verified_executions": 43,
+  "result_verified_rate": 0.375,
+  "result_accuracy": 0.3953488372093023,
+  "result_accuracy_by_backend": {
+    "duckdb": {
+      "verified_executions": 10,
+      "result_accuracy": 0.1
+    },
+    "mongodb": {
+      "verified_executions": 24,
+      "result_accuracy": 0.375
+    },
+    "mysql": {
+      "verified_executions": 9,
+      "result_accuracy": 0.7777777777777778
+    }
+  },
+  "result_accuracy_by_operation_type": {
+    "aggregation": {
+      "verified_executions": 6,
+      "result_accuracy": 0.5
+    },
+    "count": {
+      "verified_executions": 14,
+      "result_accuracy": 0.42857142857142855
+    },
+    "group_by": {
+      "verified_executions": 17,
+      "result_accuracy": 0.4117647058823529
+    },
+    "multi_asset": {
+      "verified_executions": 5,
+      "result_accuracy": 0.0
+    },
+    "sort": {
+      "verified_executions": 1,
+      "result_accuracy": 1.0
+    }
+  },
+  "by_category": {
+    "duckdb": {
+      "total_cases": 12,
+      "total_executions": 18,
+      "executed_queries": 6,
+      "passed_cases": 6,
+      "pass_rate": 0.5,
+      "classification_accuracy": 0.5,
+      "backend_selection_accuracy": 0.5,
+      "valid_plan_rate": 0.5,
+      "execution_accuracy": 0.5,
+      "latency_ms": {
+        "planning": {
+          "median": 9022.040628013201,
+          "p95": 17378.09943400498
+        },
+        "execution": {
+          "median": 21.414574002847075,
+          "p95": 154.61827399849426
+        },
+        "explanation": {
+          "median": 0.1220794947585091,
+          "p95": 779.3491280026501
+        },
+        "total": {
+          "median": 10156.276004498068,
+          "p95": 17488.861570993322
+        }
+      },
+      "repeat_consistency_rate": 0.3333333333333333,
+      "semantic_consistency_rate": 0.75,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.3888888888888889,
+      "result_verified_cases": 5,
+      "result_verified_executions": 9,
+      "result_verified_rate": 0.4166666666666667,
+      "result_accuracy": 0.1111111111111111,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 9,
+          "result_accuracy": 0.1111111111111111
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "group_by": {
+          "verified_executions": 3,
+          "result_accuracy": 0.0
+        },
+        "multi_asset": {
+          "verified_executions": 4,
+          "result_accuracy": 0.0
+        },
+        "sort": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "missing_data": {
+      "total_cases": 6,
+      "total_executions": 6,
+      "executed_queries": 0,
+      "passed_cases": 2,
+      "pass_rate": 0.3333333333333333,
+      "classification_accuracy": 0.3333333333333333,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1866.7853505030507,
+          "p95": 4106.6075779963285
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 1916.6768779978156,
+          "p95": 4158.449675000156
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.3333333333333333,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "mongodb": {
+      "total_cases": 12,
+      "total_executions": 16,
+      "executed_queries": 10,
+      "passed_cases": 8,
+      "pass_rate": 0.6666666666666666,
+      "classification_accuracy": 0.6666666666666666,
+      "backend_selection_accuracy": 0.6666666666666666,
+      "valid_plan_rate": 0.6666666666666666,
+      "execution_accuracy": 0.6666666666666666,
+      "latency_ms": {
+        "planning": {
+          "median": 11749.20733649924,
+          "p95": 17267.732509004418
+        },
+        "execution": {
+          "median": 58.16244500601897,
+          "p95": 263.6578300007386
+        },
+        "explanation": {
+          "median": 263.38684899383225,
+          "p95": 2463.4968640020816
+        },
+        "total": {
+          "median": 11458.458408502338,
+          "p95": 18229.402287004632
+        }
+      },
+      "repeat_consistency_rate": 0.5,
+      "semantic_consistency_rate": 0.6666666666666666,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.375,
+      "result_verified_cases": 4,
+      "result_verified_executions": 8,
+      "result_verified_rate": 0.3333333333333333,
+      "result_accuracy": 0.375,
+      "result_accuracy_by_backend": {
+        "mongodb": {
+          "verified_executions": 8,
+          "result_accuracy": 0.375
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "count": {
+          "verified_executions": 3,
+          "result_accuracy": 0.0
+        },
+        "group_by": {
+          "verified_executions": 4,
+          "result_accuracy": 0.75
+        }
+      }
+    },
+    "mongodb_array": {
+      "total_cases": 7,
+      "total_executions": 13,
+      "executed_queries": 6,
+      "passed_cases": 2,
+      "pass_rate": 0.2857142857142857,
+      "classification_accuracy": 0.2857142857142857,
+      "backend_selection_accuracy": 0.2857142857142857,
+      "valid_plan_rate": 0.2857142857142857,
+      "execution_accuracy": 0.2857142857142857,
+      "latency_ms": {
+        "planning": {
+          "median": 20075.94061150303,
+          "p95": 21894.902115993318
+        },
+        "execution": {
+          "median": 30.77135799685493,
+          "p95": 43.26960899925325
+        },
+        "explanation": {
+          "median": 679.1766289970838,
+          "p95": 1297.128367004916
+        },
+        "total": {
+          "median": 19081.928902989603,
+          "p95": 23274.04087499599
+        }
+      },
+      "repeat_consistency_rate": 0.6666666666666666,
+      "semantic_consistency_rate": 0.3333333333333333,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.5384615384615384,
+      "result_verified_cases": 7,
+      "result_verified_executions": 13,
+      "result_verified_rate": 1.0,
+      "result_accuracy": 0.46153846153846156,
+      "result_accuracy_by_backend": {
+        "mongodb": {
+          "verified_executions": 13,
+          "result_accuracy": 0.46153846153846156
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "count": {
+          "verified_executions": 4,
+          "result_accuracy": 0.75
+        },
+        "group_by": {
+          "verified_executions": 8,
+          "result_accuracy": 0.375
+        }
+      }
+    },
+    "mysql": {
+      "total_cases": 12,
+      "total_executions": 14,
+      "executed_queries": 11,
+      "passed_cases": 9,
+      "pass_rate": 0.75,
+      "classification_accuracy": 0.75,
+      "backend_selection_accuracy": 0.75,
+      "valid_plan_rate": 0.75,
+      "execution_accuracy": 0.75,
+      "latency_ms": {
+        "planning": {
+          "median": 12630.63975249679,
+          "p95": 17535.18897399772
+        },
+        "execution": {
+          "median": 18.207518995041028,
+          "p95": 185.25290800607763
+        },
+        "explanation": {
+          "median": 374.63119700259995,
+          "p95": 689.7368730133167
+        },
+        "total": {
+          "median": 11298.975418503687,
+          "p95": 17619.610609996016
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 0.5,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.14285714285714285,
+      "result_verified_cases": 5,
+      "result_verified_executions": 7,
+      "result_verified_rate": 0.4166666666666667,
+      "result_accuracy": 0.8571428571428571,
+      "result_accuracy_by_backend": {
+        "mysql": {
+          "verified_executions": 7,
+          "result_accuracy": 0.8571428571428571
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 2,
+          "result_accuracy": 1.0
+        },
+        "count": {
+          "verified_executions": 4,
+          "result_accuracy": 0.75
+        },
+        "group_by": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "reformulation": {
+      "total_cases": 3,
+      "total_executions": 3,
+      "executed_queries": 1,
+      "passed_cases": 1,
+      "pass_rate": 0.3333333333333333,
+      "classification_accuracy": 0.3333333333333333,
+      "backend_selection_accuracy": 0.3333333333333333,
+      "valid_plan_rate": 0.3333333333333333,
+      "execution_accuracy": 0.5,
+      "latency_ms": {
+        "planning": {
+          "median": 9106.466019002255,
+          "p95": 9106.466019002255
+        },
+        "execution": {
+          "median": 27.772106986958534,
+          "p95": 27.772106986958534
+        },
+        "explanation": {
+          "median": 483.7866729940288,
+          "p95": 483.7866729940288
+        },
+        "total": {
+          "median": 9694.86642999982,
+          "p95": 12201.04871300282
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.6666666666666666,
+      "result_verified_cases": 2,
+      "result_verified_executions": 2,
+      "result_verified_rate": 0.6666666666666666,
+      "result_accuracy": 0.5,
+      "result_accuracy_by_backend": {
+        "mongodb": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "mysql": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        },
+        "count": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        }
+      }
+    },
+    "robustness": {
+      "total_cases": 9,
+      "total_executions": 15,
+      "executed_queries": 7,
+      "passed_cases": 3,
+      "pass_rate": 0.3333333333333333,
+      "classification_accuracy": 0.3333333333333333,
+      "backend_selection_accuracy": 0.3333333333333333,
+      "valid_plan_rate": 0.3333333333333333,
+      "execution_accuracy": 0.42857142857142855,
+      "latency_ms": {
+        "planning": {
+          "median": 9428.14183649898,
+          "p95": 10597.068893999676
+        },
+        "execution": {
+          "median": 12.196511001093313,
+          "p95": 30.50442400854081
+        },
+        "explanation": {
+          "median": 0.19264098955318332,
+          "p95": 509.2523430066649
+        },
+        "total": {
+          "median": 9860.170847008703,
+          "p95": 13060.80165199819
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.4666666666666667,
+      "result_verified_cases": 4,
+      "result_verified_executions": 4,
+      "result_verified_rate": 0.4444444444444444,
+      "result_accuracy": 0.0,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "mongodb": {
+          "verified_executions": 2,
+          "result_accuracy": 0.0
+        },
+        "mysql": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "count": {
+          "verified_executions": 2,
+          "result_accuracy": 0.0
+        },
+        "group_by": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "multi_asset": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        }
+      }
+    },
+    "uncertainty": {
+      "total_cases": 11,
+      "total_executions": 15,
+      "executed_queries": 0,
+      "passed_cases": 10,
+      "pass_rate": 0.9090909090909091,
+      "classification_accuracy": 0.9090909090909091,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1930.6952050028485,
+          "p95": 3608.9300729945535
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2008.5821230022702,
+          "p95": 18175.524122998468
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 1.0,
+      "timeout_rate": 0.0,
+      "error_rate": 0.06666666666666667,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    }
+  },
+  "by_backend": {
+    "duckdb": {
+      "total_cases": 17,
+      "total_executions": 25,
+      "executed_queries": 7,
+      "passed_cases": 7,
+      "pass_rate": 0.4117647058823529,
+      "classification_accuracy": 0.4117647058823529,
+      "backend_selection_accuracy": 0.4117647058823529,
+      "valid_plan_rate": 0.4117647058823529,
+      "execution_accuracy": 0.5,
+      "latency_ms": {
+        "planning": {
+          "median": 9022.040628013201,
+          "p95": 17378.09943400498
+        },
+        "execution": {
+          "median": 17.40140200126916,
+          "p95": 154.61827399849426
+        },
+        "explanation": {
+          "median": 0.13455399312078953,
+          "p95": 779.3491280026501
+        },
+        "total": {
+          "median": 10680.791806007619,
+          "p95": 14244.114310000441
+        }
+      },
+      "repeat_consistency_rate": 0.5,
+      "semantic_consistency_rate": 0.75,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.48,
+      "result_verified_cases": 6,
+      "result_verified_executions": 10,
+      "result_verified_rate": 0.35294117647058826,
+      "result_accuracy": 0.1,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 10,
+          "result_accuracy": 0.1
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "group_by": {
+          "verified_executions": 3,
+          "result_accuracy": 0.0
+        },
+        "multi_asset": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        },
+        "sort": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "mongodb": {
+      "total_cases": 23,
+      "total_executions": 35,
+      "executed_queries": 19,
+      "passed_cases": 11,
+      "pass_rate": 0.4782608695652174,
+      "classification_accuracy": 0.4782608695652174,
+      "backend_selection_accuracy": 0.4782608695652174,
+      "valid_plan_rate": 0.4782608695652174,
+      "execution_accuracy": 0.4782608695652174,
+      "latency_ms": {
+        "planning": {
+          "median": 14159.397636991343,
+          "p95": 21894.902115993318
+        },
+        "execution": {
+          "median": 18.4078759921249,
+          "p95": 263.6578300007386
+        },
+        "explanation": {
+          "median": 614.5472689968301,
+          "p95": 2463.4968640020816
+        },
+        "total": {
+          "median": 12748.798172993702,
+          "p95": 23206.23067500128
+        }
+      },
+      "repeat_consistency_rate": 0.6666666666666666,
+      "semantic_consistency_rate": 0.5,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.45714285714285713,
+      "result_verified_cases": 14,
+      "result_verified_executions": 24,
+      "result_verified_rate": 0.6086956521739131,
+      "result_accuracy": 0.375,
+      "result_accuracy_by_backend": {
+        "mongodb": {
+          "verified_executions": 24,
+          "result_accuracy": 0.375
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 2,
+          "result_accuracy": 0.0
+        },
+        "count": {
+          "verified_executions": 9,
+          "result_accuracy": 0.3333333333333333
+        },
+        "group_by": {
+          "verified_executions": 13,
+          "result_accuracy": 0.46153846153846156
+        }
+      }
+    },
+    "mysql": {
+      "total_cases": 15,
+      "total_executions": 19,
+      "executed_queries": 15,
+      "passed_cases": 11,
+      "pass_rate": 0.7333333333333333,
+      "classification_accuracy": 0.7333333333333333,
+      "backend_selection_accuracy": 0.7333333333333333,
+      "valid_plan_rate": 0.7333333333333333,
+      "execution_accuracy": 0.7333333333333333,
+      "latency_ms": {
+        "planning": {
+          "median": 9917.726962994493,
+          "p95": 17535.18897399772
+        },
+        "execution": {
+          "median": 27.032898011384532,
+          "p95": 185.25290800607763
+        },
+        "explanation": {
+          "median": 377.8887029911857,
+          "p95": 689.7368730133167
+        },
+        "total": {
+          "median": 10328.980224003317,
+          "p95": 17619.610609996016
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 0.5,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.15789473684210525,
+      "result_verified_cases": 7,
+      "result_verified_executions": 9,
+      "result_verified_rate": 0.4666666666666667,
+      "result_accuracy": 0.7777777777777778,
+      "result_accuracy_by_backend": {
+        "mysql": {
+          "verified_executions": 9,
+          "result_accuracy": 0.7777777777777778
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 3,
+          "result_accuracy": 1.0
+        },
+        "count": {
+          "verified_executions": 5,
+          "result_accuracy": 0.6
+        },
+        "group_by": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "unknown": {
+      "total_cases": 17,
+      "total_executions": 21,
+      "executed_queries": 0,
+      "passed_cases": 12,
+      "pass_rate": 0.7058823529411765,
+      "classification_accuracy": 0.7058823529411765,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1904.5805705100065,
+          "p95": 3608.9300729945535
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 1960.8906069915975,
+          "p95": 4158.449675000156
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.6363636363636364,
+      "timeout_rate": 0.0,
+      "error_rate": 0.047619047619047616,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    }
+  },
+  "by_operation_type": {
+    "aggregation": {
+      "total_cases": 7,
+      "total_executions": 9,
+      "executed_queries": 6,
+      "passed_cases": 4,
+      "pass_rate": 0.5714285714285714,
+      "classification_accuracy": 0.5714285714285714,
+      "backend_selection_accuracy": 0.5714285714285714,
+      "valid_plan_rate": 0.5714285714285714,
+      "execution_accuracy": 0.5714285714285714,
+      "latency_ms": {
+        "planning": {
+          "median": 9106.466019002255,
+          "p95": 9254.360270992038
+        },
+        "execution": {
+          "median": 28.472514997702092,
+          "p95": 30.50442400854081
+        },
+        "explanation": {
+          "median": 507.6712350055459,
+          "p95": 676.5277980011888
+        },
+        "total": {
+          "median": 9812.795735007967,
+          "p95": 12218.200004004757
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.2222222222222222,
+      "result_verified_cases": 6,
+      "result_verified_executions": 6,
+      "result_verified_rate": 0.8571428571428571,
+      "result_accuracy": 0.5,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "mongodb": {
+          "verified_executions": 2,
+          "result_accuracy": 0.0
+        },
+        "mysql": {
+          "verified_executions": 3,
+          "result_accuracy": 1.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 6,
+          "result_accuracy": 0.5
+        }
+      }
+    },
+    "count": {
+      "total_cases": 10,
+      "total_executions": 16,
+      "executed_queries": 7,
+      "passed_cases": 3,
+      "pass_rate": 0.3,
+      "classification_accuracy": 0.3,
+      "backend_selection_accuracy": 0.3,
+      "valid_plan_rate": 0.3,
+      "execution_accuracy": 0.3,
+      "latency_ms": {
+        "planning": {
+          "median": 14159.397636991343,
+          "p95": 18333.574591000797
+        },
+        "execution": {
+          "median": 20.27106699824799,
+          "p95": 43.26960899925325
+        },
+        "explanation": {
+          "median": 526.6760529921157,
+          "p95": 616.5464669902576
+        },
+        "total": {
+          "median": 11031.365357499453,
+          "p95": 19081.928902989603
+        }
+      },
+      "repeat_consistency_rate": 0.6666666666666666,
+      "semantic_consistency_rate": 0.3333333333333333,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.5625,
+      "result_verified_cases": 8,
+      "result_verified_executions": 14,
+      "result_verified_rate": 0.8,
+      "result_accuracy": 0.42857142857142855,
+      "result_accuracy_by_backend": {
+        "mongodb": {
+          "verified_executions": 9,
+          "result_accuracy": 0.3333333333333333
+        },
+        "mysql": {
+          "verified_executions": 5,
+          "result_accuracy": 0.6
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "count": {
+          "verified_executions": 14,
+          "result_accuracy": 0.42857142857142855
+        }
+      }
+    },
+    "filter": {
+      "total_cases": 12,
+      "total_executions": 14,
+      "executed_queries": 14,
+      "passed_cases": 12,
+      "pass_rate": 1.0,
+      "classification_accuracy": 1.0,
+      "backend_selection_accuracy": 1.0,
+      "valid_plan_rate": 1.0,
+      "execution_accuracy": 1.0,
+      "latency_ms": {
+        "planning": {
+          "median": 10717.703736001567,
+          "p95": 17535.18897399772
+        },
+        "execution": {
+          "median": 11.88815600471571,
+          "p95": 154.61827399849426
+        },
+        "explanation": {
+          "median": 0.09670599683886394,
+          "p95": 0.43141000787727535
+        },
+        "total": {
+          "median": 10798.40450300253,
+          "p95": 17619.610609996016
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "group_by": {
+      "total_cases": 11,
+      "total_executions": 21,
+      "executed_queries": 7,
+      "passed_cases": 3,
+      "pass_rate": 0.2727272727272727,
+      "classification_accuracy": 0.2727272727272727,
+      "backend_selection_accuracy": 0.2727272727272727,
+      "valid_plan_rate": 0.2727272727272727,
+      "execution_accuracy": 0.3333333333333333,
+      "latency_ms": {
+        "planning": {
+          "median": 17267.732509004418,
+          "p95": 21894.902115993318
+        },
+        "execution": {
+          "median": 66.04946999868844,
+          "p95": 263.6578300007386
+        },
+        "explanation": {
+          "median": 689.7368730133167,
+          "p95": 1297.128367004916
+        },
+        "total": {
+          "median": 17579.157938002027,
+          "p95": 23206.23067500128
+        }
+      },
+      "repeat_consistency_rate": 0.6,
+      "semantic_consistency_rate": 0.5,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.6666666666666666,
+      "result_verified_cases": 9,
+      "result_verified_executions": 17,
+      "result_verified_rate": 0.8181818181818182,
+      "result_accuracy": 0.4117647058823529,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 3,
+          "result_accuracy": 0.0
+        },
+        "mongodb": {
+          "verified_executions": 13,
+          "result_accuracy": 0.46153846153846156
+        },
+        "mysql": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "group_by": {
+          "verified_executions": 17,
+          "result_accuracy": 0.4117647058823529
+        }
+      }
+    },
+    "multi_asset": {
+      "total_cases": 3,
+      "total_executions": 5,
+      "executed_queries": 0,
+      "passed_cases": 0,
+      "pass_rate": 0.0,
+      "classification_accuracy": 0.0,
+      "backend_selection_accuracy": 0.0,
+      "valid_plan_rate": 0.0,
+      "execution_accuracy": 0.0,
+      "latency_ms": {
+        "planning": {
+          "median": 2158.612651997828,
+          "p95": 2698.7029779993463
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2206.028378001065,
+          "p95": 2749.3600220041117
+        }
+      },
+      "repeat_consistency_rate": 0.0,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 3,
+      "result_verified_executions": 5,
+      "result_verified_rate": 1.0,
+      "result_accuracy": 0.0,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "multi_asset": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        }
+      }
+    },
+    "projection": {
+      "total_cases": 4,
+      "total_executions": 4,
+      "executed_queries": 3,
+      "passed_cases": 3,
+      "pass_rate": 0.75,
+      "classification_accuracy": 0.75,
+      "backend_selection_accuracy": 0.75,
+      "valid_plan_rate": 0.75,
+      "execution_accuracy": 0.75,
+      "latency_ms": {
+        "planning": {
+          "median": 9022.040628013201,
+          "p95": 11836.019599999418
+        },
+        "execution": {
+          "median": 17.86782799172215,
+          "p95": 71.37000499642454
+        },
+        "explanation": {
+          "median": 0.09976000001188368,
+          "p95": 0.10956400365103036
+        },
+        "total": {
+          "median": 10538.885830501385,
+          "p95": 15285.942255999544
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.25,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "sort": {
+      "total_cases": 2,
+      "total_executions": 2,
+      "executed_queries": 2,
+      "passed_cases": 2,
+      "pass_rate": 1.0,
+      "classification_accuracy": 1.0,
+      "backend_selection_accuracy": 1.0,
+      "valid_plan_rate": 1.0,
+      "execution_accuracy": 1.0,
+      "latency_ms": {
+        "planning": {
+          "median": 10958.936636503495,
+          "p95": 11336.779618010041
+        },
+        "execution": {
+          "median": 25.698186000226997,
+          "p95": 37.85327599325683
+        },
+        "explanation": {
+          "median": 389.72137049859157,
+          "p95": 779.3491280026501
+        },
+        "total": {
+          "median": 11440.787007501058,
+          "p95": 12196.835936003481
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 1,
+      "result_verified_executions": 1,
+      "result_verified_rate": 0.5,
+      "result_accuracy": 1.0,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "sort": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "temporal_grouping": {
+      "total_cases": 4,
+      "total_executions": 6,
+      "executed_queries": 1,
+      "passed_cases": 1,
+      "pass_rate": 0.25,
+      "classification_accuracy": 0.25,
+      "backend_selection_accuracy": 0.25,
+      "valid_plan_rate": 0.25,
+      "execution_accuracy": 0.3333333333333333,
+      "latency_ms": {
+        "planning": {
+          "median": 17378.09943400498,
+          "p95": 17378.09943400498
+        },
+        "execution": {
+          "median": 25.42774600442499,
+          "p95": 25.42774600442499
+        },
+        "explanation": {
+          "median": 0.13455399312078953,
+          "p95": 0.13455399312078953
+        },
+        "total": {
+          "median": 14204.663366501336,
+          "p95": 17488.861570993322
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 0.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.8333333333333334,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "top_k": {
+      "total_cases": 2,
+      "total_executions": 2,
+      "executed_queries": 1,
+      "passed_cases": 1,
+      "pass_rate": 0.5,
+      "classification_accuracy": 0.5,
+      "backend_selection_accuracy": 0.5,
+      "valid_plan_rate": 0.5,
+      "execution_accuracy": 0.5,
+      "latency_ms": {
+        "planning": {
+          "median": 7264.16463249916,
+          "p95": 11741.027251002379
+        },
+        "execution": {
+          "median": 98.5637240082724,
+          "p95": 98.5637240082724
+        },
+        "explanation": {
+          "median": 2463.4968640020816,
+          "p95": 2463.4968640020816
+        },
+        "total": {
+          "median": 8605.284329991264,
+          "p95": 14376.429394993465
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "uncertainty": {
+      "total_cases": 8,
+      "total_executions": 10,
+      "executed_queries": 0,
+      "passed_cases": 7,
+      "pass_rate": 0.875,
+      "classification_accuracy": 0.875,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1993.694286007667,
+          "p95": 3608.9300729945535
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2055.7580165041145,
+          "p95": 18175.524122998468
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.1,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "unsupported_analysis": {
+      "total_cases": 9,
+      "total_executions": 11,
+      "executed_queries": 0,
+      "passed_cases": 5,
+      "pass_rate": 0.5555555555555556,
+      "classification_accuracy": 0.5555555555555556,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1868.089466006495,
+          "p95": 4106.6075779963285
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 1920.6706120021408,
+          "p95": 4158.449675000156
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.6363636363636364,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    }
+  },
+  "by_difficulty": {
+    "easy": {
+      "total_cases": 23,
+      "total_executions": 35,
+      "executed_queries": 17,
+      "passed_cases": 19,
+      "pass_rate": 0.8260869565217391,
+      "classification_accuracy": 0.8260869565217391,
+      "backend_selection_accuracy": 0.7647058823529411,
+      "valid_plan_rate": 0.7647058823529411,
+      "execution_accuracy": 0.7647058823529411,
+      "latency_ms": {
+        "planning": {
+          "median": 9022.040628013201,
+          "p95": 17267.732509004418
+        },
+        "execution": {
+          "median": 27.032898011384532,
+          "p95": 263.6578300007386
+        },
+        "explanation": {
+          "median": 374.63119700259995,
+          "p95": 689.7368730133167
+        },
+        "total": {
+          "median": 9671.50829100865,
+          "p95": 18044.444881990785
+        }
+      },
+      "repeat_consistency_rate": 0.6666666666666666,
+      "semantic_consistency_rate": 1.0,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 1.0,
+      "timeout_rate": 0.0,
+      "error_rate": 0.22857142857142856,
+      "result_verified_cases": 8,
+      "result_verified_executions": 16,
+      "result_verified_rate": 0.34782608695652173,
+      "result_accuracy": 0.5625,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 3,
+          "result_accuracy": 0.0
+        },
+        "mongodb": {
+          "verified_executions": 6,
+          "result_accuracy": 0.5
+        },
+        "mysql": {
+          "verified_executions": 7,
+          "result_accuracy": 0.8571428571428571
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 2,
+          "result_accuracy": 1.0
+        },
+        "count": {
+          "verified_executions": 7,
+          "result_accuracy": 0.42857142857142855
+        },
+        "group_by": {
+          "verified_executions": 7,
+          "result_accuracy": 0.5714285714285714
+        }
+      }
+    },
+    "hard": {
+      "total_cases": 18,
+      "total_executions": 26,
+      "executed_queries": 4,
+      "passed_cases": 3,
+      "pass_rate": 0.16666666666666666,
+      "classification_accuracy": 0.16666666666666666,
+      "backend_selection_accuracy": 0.16666666666666666,
+      "valid_plan_rate": 0.16666666666666666,
+      "execution_accuracy": 0.18181818181818182,
+      "latency_ms": {
+        "planning": {
+          "median": 2466.3572770004976,
+          "p95": 21894.902115993318
+        },
+        "execution": {
+          "median": 18.239323995658197,
+          "p95": 98.5637240082724
+        },
+        "explanation": {
+          "median": 1295.332479501667,
+          "p95": 2463.4968640020816
+        },
+        "total": {
+          "median": 12072.548472504423,
+          "p95": 23206.23067500128
+        }
+      },
+      "repeat_consistency_rate": 0.5,
+      "semantic_consistency_rate": 0.8,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.2,
+      "timeout_rate": 0.0,
+      "error_rate": 0.46153846153846156,
+      "result_verified_cases": 9,
+      "result_verified_executions": 15,
+      "result_verified_rate": 0.5,
+      "result_accuracy": 0.2,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        },
+        "mongodb": {
+          "verified_executions": 10,
+          "result_accuracy": 0.3
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "count": {
+          "verified_executions": 1,
+          "result_accuracy": 0.0
+        },
+        "group_by": {
+          "verified_executions": 8,
+          "result_accuracy": 0.375
+        },
+        "multi_asset": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        }
+      }
+    },
+    "medium": {
+      "total_cases": 31,
+      "total_executions": 39,
+      "executed_queries": 20,
+      "passed_cases": 19,
+      "pass_rate": 0.6129032258064516,
+      "classification_accuracy": 0.6129032258064516,
+      "backend_selection_accuracy": 0.5384615384615384,
+      "valid_plan_rate": 0.5384615384615384,
+      "execution_accuracy": 0.5833333333333334,
+      "latency_ms": {
+        "planning": {
+          "median": 9666.558482000255,
+          "p95": 18325.238286997774
+        },
+        "execution": {
+          "median": 21.414574002847075,
+          "p95": 43.26960899925325
+        },
+        "explanation": {
+          "median": 0.16359749133698642,
+          "p95": 616.5464669902576
+        },
+        "total": {
+          "median": 10309.174519992666,
+          "p95": 19064.626064006006
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": 0.8888888888888888,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 1.0,
+      "timeout_rate": 0.0,
+      "error_rate": 0.3076923076923077,
+      "result_verified_cases": 10,
+      "result_verified_executions": 12,
+      "result_verified_rate": 0.3225806451612903,
+      "result_accuracy": 0.4166666666666667,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 2,
+          "result_accuracy": 0.5
+        },
+        "mongodb": {
+          "verified_executions": 8,
+          "result_accuracy": 0.375
+        },
+        "mysql": {
+          "verified_executions": 2,
+          "result_accuracy": 0.5
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 3,
+          "result_accuracy": 0.3333333333333333
+        },
+        "count": {
+          "verified_executions": 6,
+          "result_accuracy": 0.5
+        },
+        "group_by": {
+          "verified_executions": 2,
+          "result_accuracy": 0.0
+        },
+        "sort": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    }
+  },
+  "by_uncertainty_type": {
+    "ambiguous_metric": {
+      "total_cases": 2,
+      "total_executions": 4,
+      "executed_queries": 0,
+      "passed_cases": 2,
+      "pass_rate": 1.0,
+      "classification_accuracy": 1.0,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 2128.172734497639,
+          "p95": 3608.9300729945535
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2175.6660565006314,
+          "p95": 3661.6815259912983
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "incomplete_request": {
+      "total_cases": 3,
+      "total_executions": 3,
+      "executed_queries": 0,
+      "passed_cases": 2,
+      "pass_rate": 0.6666666666666666,
+      "classification_accuracy": 0.6666666666666666,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1854.9093080000603,
+          "p95": 1993.694286007667
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2040.6545440055197,
+          "p95": 18175.524122998468
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.3333333333333333,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "missing_data": {
+      "total_cases": 7,
+      "total_executions": 9,
+      "executed_queries": 0,
+      "passed_cases": 4,
+      "pass_rate": 0.5714285714285714,
+      "classification_accuracy": 0.5714285714285714,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 1865.4812349996064,
+          "p95": 4106.6075779963285
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 1912.6831439934904,
+          "p95": 4158.449675000156
+        }
+      },
+      "repeat_consistency_rate": 1.0,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.6666666666666666,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "none": {
+      "total_cases": 55,
+      "total_executions": 79,
+      "executed_queries": 41,
+      "passed_cases": 29,
+      "pass_rate": 0.5272727272727272,
+      "classification_accuracy": 0.5272727272727272,
+      "backend_selection_accuracy": 0.5272727272727272,
+      "valid_plan_rate": 0.5272727272727272,
+      "execution_accuracy": 0.5576923076923077,
+      "latency_ms": {
+        "planning": {
+          "median": 10848.451083002146,
+          "p95": 21818.30663200526
+        },
+        "execution": {
+          "median": 20.27106699824799,
+          "p95": 154.61827399849426
+        },
+        "explanation": {
+          "median": 375.88491100177635,
+          "p95": 1293.5365919984179
+        },
+        "total": {
+          "median": 11083.537553000497,
+          "p95": 21995.197702999576
+        }
+      },
+      "repeat_consistency_rate": 0.6666666666666666,
+      "semantic_consistency_rate": 0.5833333333333334,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.3924050632911392,
+      "result_verified_cases": 27,
+      "result_verified_executions": 43,
+      "result_verified_rate": 0.4909090909090909,
+      "result_accuracy": 0.3953488372093023,
+      "result_accuracy_by_backend": {
+        "duckdb": {
+          "verified_executions": 10,
+          "result_accuracy": 0.1
+        },
+        "mongodb": {
+          "verified_executions": 24,
+          "result_accuracy": 0.375
+        },
+        "mysql": {
+          "verified_executions": 9,
+          "result_accuracy": 0.7777777777777778
+        }
+      },
+      "result_accuracy_by_operation_type": {
+        "aggregation": {
+          "verified_executions": 6,
+          "result_accuracy": 0.5
+        },
+        "count": {
+          "verified_executions": 14,
+          "result_accuracy": 0.42857142857142855
+        },
+        "group_by": {
+          "verified_executions": 17,
+          "result_accuracy": 0.4117647058823529
+        },
+        "multi_asset": {
+          "verified_executions": 5,
+          "result_accuracy": 0.0
+        },
+        "sort": {
+          "verified_executions": 1,
+          "result_accuracy": 1.0
+        }
+      }
+    },
+    "unsupported_combination": {
+      "total_cases": 2,
+      "total_executions": 2,
+      "executed_queries": 0,
+      "passed_cases": 1,
+      "pass_rate": 0.5,
+      "classification_accuracy": 0.5,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 2052.811608504271,
+          "p95": 2237.533751002047
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2105.479120000382,
+          "p95": 2290.287627998623
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": 0.0,
+      "prudent_refusal_rate": 0.5,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    },
+    "vague_concept": {
+      "total_cases": 3,
+      "total_executions": 3,
+      "executed_queries": 0,
+      "passed_cases": 3,
+      "pass_rate": 1.0,
+      "classification_accuracy": 1.0,
+      "backend_selection_accuracy": null,
+      "valid_plan_rate": null,
+      "execution_accuracy": null,
+      "latency_ms": {
+        "planning": {
+          "median": 2010.629122989485,
+          "p95": 3012.025812000502
+        },
+        "execution": {
+          "median": null,
+          "p95": null
+        },
+        "explanation": {
+          "median": null,
+          "p95": null
+        },
+        "total": {
+          "median": 2070.8614890027093,
+          "p95": 3063.9769550034543
+        }
+      },
+      "repeat_consistency_rate": null,
+      "semantic_consistency_rate": null,
+      "structural_hallucination_rate": 0.0,
+      "forced_answer_rate": null,
+      "prudent_refusal_rate": null,
+      "timeout_rate": 0.0,
+      "error_rate": 0.0,
+      "result_verified_cases": 0,
+      "result_verified_executions": 0,
+      "result_verified_rate": 0.0,
+      "result_accuracy": null,
+      "result_accuracy_by_backend": {},
+      "result_accuracy_by_operation_type": {}
+    }
+  },
+  "by_equivalence_group": {
+    "duckdb_category_revenue": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": true,
+      "group_pass_rate": 0.0,
+      "full_semantic_consistency": true
+    },
+    "duckdb_delivered": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": null,
+      "group_pass_rate": 1.0,
+      "full_semantic_consistency": true
+    },
+    "duckdb_orders_monthly": {
+      "case_count": 4,
+      "classification_consistency": false,
+      "backend_consistency": false,
+      "asset_consistency": false,
+      "operation_consistency": false,
+      "execution_consistency": false,
+      "result_consistency": null,
+      "group_pass_rate": 0.25,
+      "full_semantic_consistency": false
+    },
+    "duckdb_orders_status": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": true,
+      "group_pass_rate": 0.0,
+      "full_semantic_consistency": true
+    },
+    "mongodb_events_type": {
+      "case_count": 3,
+      "classification_consistency": false,
+      "backend_consistency": false,
+      "asset_consistency": false,
+      "operation_consistency": false,
+      "execution_consistency": false,
+      "result_consistency": false,
+      "group_pass_rate": 0.3333333333333333,
+      "full_semantic_consistency": false
+    },
+    "mongodb_items_quantity_gte_2_documents": {
+      "case_count": 2,
+      "classification_consistency": false,
+      "backend_consistency": false,
+      "asset_consistency": false,
+      "operation_consistency": false,
+      "execution_consistency": false,
+      "result_consistency": false,
+      "group_pass_rate": 0.5,
+      "full_semantic_consistency": false
+    },
+    "mongodb_newsletter_enabled": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": null,
+      "group_pass_rate": 1.0,
+      "full_semantic_consistency": true
+    },
+    "mongodb_profiles_by_role": {
+      "case_count": 2,
+      "classification_consistency": false,
+      "backend_consistency": false,
+      "asset_consistency": false,
+      "operation_consistency": false,
+      "execution_consistency": false,
+      "result_consistency": false,
+      "group_pass_rate": 0.5,
+      "full_semantic_consistency": false
+    },
+    "mongodb_profiles_count": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": true,
+      "group_pass_rate": 0.0,
+      "full_semantic_consistency": true
+    },
+    "mongodb_quantity_by_sku": {
+      "case_count": 2,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": true,
+      "group_pass_rate": 0.0,
+      "full_semantic_consistency": true
+    },
+    "mysql_average_total": {
+      "case_count": 3,
+      "classification_consistency": true,
+      "backend_consistency": true,
+      "asset_consistency": true,
+      "operation_consistency": true,
+      "execution_consistency": true,
+      "result_consistency": true,
+      "group_pass_rate": 1.0,
+      "full_semantic_consistency": true
+    },
+    "mysql_paid_count": {
+      "case_count": 3,
+      "classification_consistency": false,
+      "backend_consistency": false,
+      "asset_consistency": false,
+      "operation_consistency": false,
+      "execution_consistency": false,
+      "result_consistency": false,
+      "group_pass_rate": 0.3333333333333333,
+      "full_semantic_consistency": false
+    }
+  }
+}
