@@ -274,15 +274,33 @@ Compose definisce `queryx`, `queryx-worker`, `mysql` e `mongodb`. API e worker c
 
 ### Seed demo deterministico
 
-Con lo stack avviato, un solo comando porta i dati demo a 100 customer e 500 order in MySQL, più 100 profile e 500 event in MongoDB:
+Con lo stack avviato, un solo comando porta i dati demo ai target totali di 10.000 customer e 100.000 order in MySQL, più 10.000 profile e 100.000 event in MongoDB:
 
 ```bash
 docker compose exec queryx python -m queryx.tools.seed_demo
 ```
 
-Lo script usa il seed fisso `20260723`, conserva i record già presenti e inserisce soltanto quelli mancanti tramite identificatori stabili; può quindi essere rilanciato senza duplicati e senza ricreare i volumi. Non elimina dati: se una collection o tabella supera già il target, termina con errore. Al termine stampa i quattro conteggi finali.
+Lo script usa il seed fisso `20260723`, conserva gli identificativi demo esistenti e inserisce soltanto il deficit verso i target tramite identificatori stabili e upsert MongoDB. Può quindi essere rilanciato senza duplicati e senza ricreare i volumi. Non elimina dati: se una collection o tabella supera già il target, termina con errore. Inserimenti e commit avvengono in batch da 2.000 record; il riepilogo JSON finale verifica direttamente i quattro conteggi:
+
+```json
+{"mongodb": {"events": 100000, "profiles": 10000}, "mysql": {"customers": 10000, "orders": 100000}}
+```
+
+I target e la dimensione del batch sono configurabili per prove locali, mantenendo questi valori come default:
+
+```bash
+QUERYX_SEED_MYSQL_CUSTOMERS=10000
+QUERYX_SEED_MYSQL_ORDERS=100000
+QUERYX_SEED_MONGODB_PROFILES=10000
+QUERYX_SEED_MONGODB_EVENTS=100000
+QUERYX_SEED_BATCH_SIZE=2000
+```
 
 Gli order hanno totali uniformemente distribuiti fra 10 e 500, status `paid`/`pending`/`shipped`/`cancelled`/`refunded` con pesi 45/20/20/10/5 e note assenti nell'80% circa dei casi. I profile distribuiscono `language` fra `en`/`it`/`fr`/`es` con pesi 40/30/20/10, newsletter vera/falsa/assente con pesi 45/35/20 e da uno a tre ruoli. Gli event distribuiscono `purchase`/`page_view`/`login`/`logout` con pesi 25/45/20/10; `amount`, valuta e items sono generati esclusivamente per i purchase, mentre device, path e tags restano coerenti con il tipo di evento.
+
+Il seed verifica o crea, senza rimuovere quelli presenti, gli indici MySQL su email customer, customer/status/data degli order e gli indici MongoDB sui campi interrogati di profile ed event, inclusi i campi annidati. Non aggiunge colonne né modifica lo schema funzionale.
+
+Dopo il cambio di scala occorre eseguire, nell'ordine: discovery/profiling delle sorgenti, rigenerazione della ground truth, un nuovo benchmark Qwen, il benchmark del secondo modello e infine il report Markdown. La ground truth attuale non viene aggiornata automaticamente dal seed.
 
 Avvio locale:
 
