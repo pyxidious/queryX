@@ -1077,3 +1077,167 @@ def test_natural_language_context_includes_ready_mysql_asset_without_connection_
     assert settings.mysql_host not in prompt
     assert settings.mysql_password not in prompt
     assert settings.mysql_database not in prompt
+
+
+def _duckdb_orders_asset(settings: Settings) -> Any:
+    return next(
+        asset
+        for asset in IngestionStorage(settings.catalog_db_path).list_assets()
+        if asset.name == "orders" and str(asset.asset_kind) == "file"
+    )
+
+
+def _duckdb_status_count_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [{
+            "source_alias": "o", "field": "order_status", "alias": "status",
+        }],
+        "aggregations": [{
+            "function": "count", "source_alias": "o",
+            "field": "order_id", "alias": "orders",
+        }],
+        "group_by": [{"source_alias": "o", "field": "order_status"}],
+    }
+
+
+@pytest.mark.parametrize("question", [
+    "Quanti ordini ci sono per order_status nel dataset CSV orders?",
+    (
+        "Nel dataset CSV orders, raggruppa gli ordini contando gli order_id "
+        "per ciascun order_status"
+    ),
+    "Quanti ordini ci sono per order_status nel file orders?",
+    "Quanti ordini ci sono per order_status in DuckDB?",
+])
+def test_duckdb_source_signal_excludes_same_named_mysql_asset(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    question: str,
+) -> None:
+    settings, _, mysql_assets = mysql_query_env
+    _add_duckdb_orders(settings)
+    duckdb_asset = _duckdb_orders_asset(settings)
+    client = _SequencedNaturalClient(_duckdb_status_count_plan(duckdb_asset))
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(question=question)
+    )
+
+    catalog = json.loads(client.planning_calls[0][1]["content"])["catalog"]
+    assert [asset["backend"] for asset in catalog["assets"]] == ["duckdb"]
+    assert mysql_assets["orders"].asset_id not in json.dumps(catalog)
+    assert response.normalized_plan.sources[0].asset_id == duckdb_asset.id
+
+
+def test_duckdb_monthly_count_has_a_bounded_exact_planning_example(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    plan = {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [{
+            "source_alias": "o", "field": "order_purchase_timestamp",
+            "transform": "date_trunc_month", "alias": "month",
+        }],
+        "aggregations": [{
+            "function": "count", "source_alias": "o",
+            "field": "order_id", "alias": "orders",
+        }],
+        "group_by": [{
+            "source_alias": "o", "field": "order_purchase_timestamp",
+            "transform": "date_trunc_month",
+        }],
+        "order_by": [{"field": "month", "direction": "asc"}],
+    }
+    client = _SequencedNaturalClient(plan)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question=(
+                "Quanti ordini del dataset CSV orders ci sono per mese di "
+                "order_purchase_timestamp?"
+            )
+        )
+    )
+
+    payload = json.loads(client.planning_calls[0][1]["content"])
+    assert payload["duckdb_monthly_count_example"]["plan"] == plan
+    assert response.normalized_plan.projections[0].transform == "date_trunc_month"
+    assert response.normalized_plan.limit == settings.query_default_limit
+
+
+def test_duckdb_delivered_filter_is_required_and_retried_once(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    invalid = {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [
+            {"source_alias": "o", "field": "order_id"},
+            {"source_alias": "o", "field": "order_status"},
+            {"source_alias": "o", "field": "order_purchase_timestamp"},
+        ],
+    }
+    corrected = {
+        **invalid,
+        "filters": [{
+            "source_alias": "o", "field": "order_status",
+            "operator": "eq", "value": "delivered",
+        }],
+    }
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Mostra gli ordini con order_status delivered nel dataset CSV orders"
+        )
+    )
+
+    assert [(item.field, item.value) for item in response.normalized_plan.filters] == [
+        ("order_status", "delivered")
+    ]
+    assert len(client.planning_calls) == 2
+    retry = json.loads(client.planning_calls[1][-1]["content"])
+    assert retry["validation_code"] == "missing_explicit_filter"
+
+
+def test_duckdb_explicit_projection_is_catalog_answerable(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    plan = {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [
+            {"source_alias": "o", "field": "order_id"},
+            {"source_alias": "o", "field": "order_status"},
+            {"source_alias": "o", "field": "order_purchase_timestamp"},
+        ],
+    }
+    client = _SequencedNaturalClient(
+        plan,
+        classification={
+            "classification": "ambiguous",
+            "reason": "La sorgente potrebbe essere ambigua.",
+            "clarification_question": "Quale sorgente intendi?",
+        },
+    )
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question=(
+                "Mostra order_id, order_status e order_purchase_timestamp "
+                "del dataset CSV orders"
+            )
+        )
+    )
+
+    assert response.classification == "answerable"
+    assert [item.field for item in response.normalized_plan.projections] == [
+        "order_id", "order_status", "order_purchase_timestamp"
+    ]

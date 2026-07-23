@@ -48,6 +48,9 @@ After choosing a source, use only the fields listed for that source. Never combi
 Use semantic_field_hints only within the asset block that contains them; they are catalog-scoped disambiguation evidence.
 If the question explicitly names MySQL, choose only an asset whose backend is mysql.
 If the question explicitly names MongoDB, choose only an asset whose backend is mongodb.
+If the question explicitly names CSV, dataset CSV, file or DuckDB, choose only an asset whose backend is duckdb.
+For a DuckDB asset, use only its listed file-dataset fields; never select a same-named MySQL asset.
+For DuckDB monthly counts, use one date_trunc_month projection and the identical group_by expression, one count aggregation, and a bounded limit. Keep this plan compact and never repeat objects.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
 For MongoDB profiles, use preferences.newsletter for newsletter conditions when that exact field is listed; never shorten it to newsletter.
@@ -80,6 +83,8 @@ Use classification answerable when the requested result is defined and computabl
 Use ambiguous when essential intent is unclear, and provide one concise clarification_question.
 Use unanswerable when required data or metrics are absent, and explain the missing data briefly in reason.
 Before classifying a question as ambiguous, use its explicit backend, candidate assets, fields and catalog-scoped semantic_field_hints. If these provide exactly one plausible interpretation, classify it as answerable.
+CSV, dataset CSV, file and DuckDB explicitly identify backend duckdb. A row request listing fields that all exist in that single selected asset is answerable.
+Questions grouping a listed timestamp field by month are answerable using the controlled date_trunc_month transform.
 If assets share a logical name across backends and the question identifies neither a backend nor fields that select one unambiguously, classify it as ambiguous.
 Do not invent data, perform calculations, or include hidden analysis.
 Exact example:
@@ -87,6 +92,10 @@ Input: "Quali sono i clienti migliori?"
 Output: {"classification":"ambiguous","reason":"Il criterio di migliore non è specificato.","clarification_question":"Per migliori intendi i clienti con più ordini, maggiore spesa o un altro criterio?"}
 Input: "Qual è il profitto totale?"
 Output: {"classification":"unanswerable","reason":"Il catalogo contiene dati sui ricavi, ma non contiene dati sui costi necessari per calcolare il profitto.","clarification_question":null}
+Input: "Mostra order_id, order_status e order_purchase_timestamp del dataset CSV orders"
+Output: {"classification":"answerable","reason":"I campi richiesti appartengono all'unico asset CSV orders selezionato.","clarification_question":null}
+Input: "Quanti ordini del dataset CSV orders ci sono per mese di order_purchase_timestamp?"
+Output: {"classification":"answerable","reason":"Il timestamp elencato supporta il raggruppamento mensile controllato.","clarification_question":null}
 """
 
 
@@ -207,7 +216,7 @@ class NaturalLanguageQueryService:
                                 {"source_alias": "o", "field": "order_status"}
                             ],
                         },
-                        "mysql_record_display_example": {
+                        **({"mysql_record_display_example": {
                             "question": "Mostra gli ordini MySQL con totale maggiore di 100",
                             "rule": "Use this shape only when the selected MySQL asset lists these exact fields.",
                             "projections": [
@@ -224,11 +233,16 @@ class NaturalLanguageQueryService:
                                     "value": 100,
                                 }
                             ],
-                        },
+                        }} if any(
+                            asset["backend"] == "mysql" for asset in context["assets"]
+                        ) else {}),
                         "catalog_scoped_resolution_examples": self._planning_examples(
                             context
                         ),
-                        "correct_multi_asset_revenue_example": {
+                        **({"duckdb_monthly_count_example": self._duckdb_monthly_example(
+                            context
+                        )} if self._duckdb_monthly_example(context) is not None else {}),
+                        **({"correct_multi_asset_revenue_example": {
                             "sources": [
                                 {
                                     "alias": "p",
@@ -270,7 +284,7 @@ class NaturalLanguageQueryService:
                             "order_by": [
                                 {"field": "revenue", "direction": "desc"}
                             ],
-                        },
+                        }} if context["relationships"] else {}),
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -654,6 +668,23 @@ class NaturalLanguageQueryService:
                     candidate.get("group_by") and not requirements.get("group_by")
                 ):
                     raise _PlanningSemanticError("metric_aggregation_mismatch")
+            if requirements.get("strict_duckdb_grouped_count"):
+                expected_group = requirements["group_by"]
+                projections = candidate.get("projections", [])
+                group_by = candidate.get("group_by", [])
+                if (
+                    len(projections) != 1
+                    or not isinstance(projections[0], dict)
+                    or projections[0].get("source_alias") != alias
+                    or projections[0].get("field") != expected_group["field"]
+                    or projections[0].get("transform") != expected_group.get("transform")
+                    or len(group_by) != 1
+                    or not isinstance(group_by[0], dict)
+                    or group_by[0].get("source_alias") != alias
+                    or group_by[0].get("field") != expected_group["field"]
+                    or group_by[0].get("transform") != expected_group.get("transform")
+                ):
+                    raise _PlanningSemanticError("duckdb_grouped_count_mismatch")
             if requirements.get("strict_mongodb_count_shape"):
                 aggregations = candidate.get("aggregations", [])
                 expected = requirements["aggregation"]
@@ -820,6 +851,12 @@ class NaturalLanguageQueryService:
             instruction = (
                 "The catalog-scoped semantic requirements resolve the question. Generate only "
                 "the corresponding LogicalQueryPlan and return only the plan object."
+            )
+        elif validation_code == "duckdb_grouped_count_mismatch":
+            instruction = (
+                "Regenerate only the compact DuckDB LogicalQueryPlan from semantic_requirements. "
+                "Use exactly one projection and the identical group_by expression, exactly one "
+                "count aggregation, and no extra sources, fields or metrics. Return only the plan object."
             )
         elif validation_code in {
             "mongodb_filter_mismatch",
@@ -1017,7 +1054,9 @@ class NaturalLanguageQueryService:
             candidate["semantic_entity_terms"] = self._semantic_entity_terms(candidate)
             candidate["semantic_metric_hints"] = self._semantic_metric_hints(candidate)
             candidates.append(candidate)
-        if re.search(r"\bmysql\b", question, re.IGNORECASE):
+        if re.search(r"\b(?:csv|file|duckdb)\b", question, re.IGNORECASE):
+            candidates = [asset for asset in candidates if asset["backend"] == "duckdb"]
+        elif re.search(r"\bmysql\b", question, re.IGNORECASE):
             candidates = [asset for asset in candidates if asset["backend"] == "mysql"]
         elif re.search(r"\bmongo(?:db)?\b", question, re.IGNORECASE):
             candidates = [asset for asset in candidates if asset["backend"] == "mongodb"]
@@ -1139,6 +1178,16 @@ class NaturalLanguageQueryService:
                 "field": "status",
                 "reason": "status is the only order-state field in this asset",
             }]
+        if (
+            asset.get("backend") == "duckdb"
+            and asset["logical_name"].casefold() == "orders"
+            and "order_status" in fields
+        ):
+            return [{
+                "terms": ["stato", "stato ordine", "order_status"],
+                "field": "order_status",
+                "reason": "order_status is the observed status field in this file dataset",
+            }]
         return []
 
     @staticmethod
@@ -1209,6 +1258,12 @@ class NaturalLanguageQueryService:
                 for term in asset.get("semantic_entity_terms", [])
             )
         ]
+        if (
+            not assets
+            and len(context["assets"]) == 1
+            and re.search(r"\b(?:csv|file|duckdb)\b", normalized)
+        ):
+            assets = list(context["assets"])
         if len(assets) != 1:
             return {}
         asset = assets[0]
@@ -1249,6 +1304,57 @@ class NaturalLanguageQueryService:
                         "field": "id",
                         "alias": "orders",
                     }
+        if asset.get("backend") == "duckdb":
+            fields = {str(field["name"]): field for field in asset["fields"]}
+            if intent == "row_returning":
+                requirements["strict_row_shape"] = True
+                explicit_projections = (
+                    NaturalLanguageQueryService._explicit_projection_fields(
+                        normalized, asset
+                    )
+                )
+                if explicit_projections:
+                    requirements["explicit_projections"] = True
+                requirements["projections"] = (
+                    explicit_projections
+                    or [
+                        field
+                        for field in (
+                            "order_id", "order_status", "order_purchase_timestamp"
+                        )
+                        if field in fields
+                    ]
+                )
+                status_match = re.search(
+                    r"\bcon\s+order_status\s+([\w-]+)\b", normalized
+                )
+                if status_match is not None and "order_status" in fields:
+                    requirements["filter"] = {
+                        "field": "order_status",
+                        "operator": "eq",
+                        "value": status_match.group(1),
+                    }
+            if intent == "count" and {"order_id", "order_status"}.issubset(fields):
+                if re.search(r"\bper\s+(?:ciascun\s+)?order_status\b", normalized):
+                    requirements["aggregation"] = {
+                        "function": "count", "field": "order_id", "alias": "orders"
+                    }
+                    requirements["group_by"] = {"field": "order_status"}
+                    requirements["strict_duckdb_grouped_count"] = True
+            if (
+                intent == "count"
+                and "order_id" in fields
+                and "order_purchase_timestamp" in fields
+                and re.search(r"\bper\s+mese\b", normalized)
+            ):
+                requirements["aggregation"] = {
+                    "function": "count", "field": "order_id", "alias": "orders"
+                }
+                requirements["group_by"] = {
+                    "field": "order_purchase_timestamp",
+                    "transform": "date_trunc_month",
+                }
+                requirements["strict_duckdb_grouped_count"] = True
         if intent == "row_returning" and asset.get("backend") == "mysql":
             requirements["strict_row_shape"] = True
             numeric_filter = NaturalLanguageQueryService._numeric_filter(
@@ -1418,7 +1524,7 @@ class NaturalLanguageQueryService:
     @staticmethod
     def _question_intent(normalized_question: str) -> str | None:
         if re.search(
-            r"\b(quanti|conta|numero\s+di|how\s+many|count|number\s+of)\b",
+            r"\b(quanti|conta(?:ndo)?|numero\s+di|how\s+many|count|number\s+of)\b",
             normalized_question,
         ):
             return "count"
@@ -1443,12 +1549,14 @@ class NaturalLanguageQueryService:
     ) -> list[str]:
         match = re.search(
             r"\b(?:mostra|elenca|visualizza)\s+(.+?)\s+"
-            r"(?:degli|delle|dei)\s+ordini\b",
+            r"(?:(?:degli|delle|dei)\s+ordini\b|(?:del|nel)\s+dataset\b)",
             normalized_question,
         )
         if match is None:
             return []
         field_clause = match.group(1)
+        if re.search(r"\b(?:gli|degli)\s+ordini\b", field_clause):
+            return []
         candidates: list[tuple[int, str]] = []
         for field in asset["fields"]:
             name = str(field["name"])
@@ -1514,10 +1622,18 @@ class NaturalLanguageQueryService:
         requirements = NaturalLanguageQueryService._semantic_requirements(
             question, context
         )
-        if requirements.get("aggregation"):
+        if requirements.get("aggregation") or (
+            requirements.get("intent") == "row_returning"
+            and requirements.get("asset_id")
+            and requirements.get("projections")
+            and (
+                requirements.get("explicit_projections")
+                or requirements.get("filter")
+            )
+        ):
             return NaturalLanguageClassification(
                 classification=QueryClassification.ANSWERABLE,
-                reason="The catalog uniquely resolves the requested metric.",
+                reason="The catalog uniquely resolves the requested fields and operation.",
                 clarification_question=None,
             )
         normalized = question.casefold()
@@ -1543,6 +1659,52 @@ class NaturalLanguageQueryService:
             ),
             clarification_question=None,
         )
+
+    @staticmethod
+    def _duckdb_monthly_example(
+        context: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        asset = next(
+            (
+                item
+                for item in context["assets"]
+                if item["backend"] == "duckdb"
+                and item["logical_name"].casefold() == "orders"
+                and {"order_id", "order_purchase_timestamp"}.issubset(
+                    {field["name"] for field in item["fields"]}
+                )
+            ),
+            None,
+        )
+        if asset is None:
+            return None
+        return {
+            "question": (
+                "Quanti ordini del dataset CSV orders ci sono per mese di "
+                "order_purchase_timestamp?"
+            ),
+            "plan": {
+                "sources": [{"alias": "o", "asset_id": asset["asset_id"]}],
+                "projections": [{
+                    "source_alias": "o",
+                    "field": "order_purchase_timestamp",
+                    "transform": "date_trunc_month",
+                    "alias": "month",
+                }],
+                "aggregations": [{
+                    "function": "count",
+                    "source_alias": "o",
+                    "field": "order_id",
+                    "alias": "orders",
+                }],
+                "group_by": [{
+                    "source_alias": "o",
+                    "field": "order_purchase_timestamp",
+                    "transform": "date_trunc_month",
+                }],
+                "order_by": [{"field": "month", "direction": "asc"}],
+            },
+        }
 
     @staticmethod
     def _planning_examples(context: dict[str, Any]) -> list[dict[str, Any]]:

@@ -272,6 +272,18 @@ docker compose up --build
 
 Compose definisce `queryx`, `queryx-worker`, `mysql` e `mongodb`. API e worker condividono l’immagine e il volume `/app/data`. Non servono credenziali o secret per fonti di dataset.
 
+### Seed demo deterministico
+
+Con lo stack avviato, un solo comando porta i dati demo a 100 customer e 500 order in MySQL, più 100 profile e 500 event in MongoDB:
+
+```bash
+docker compose exec queryx python -m queryx.tools.seed_demo
+```
+
+Lo script usa il seed fisso `20260723`, conserva i record già presenti e inserisce soltanto quelli mancanti tramite identificatori stabili; può quindi essere rilanciato senza duplicati e senza ricreare i volumi. Non elimina dati: se una collection o tabella supera già il target, termina con errore. Al termine stampa i quattro conteggi finali.
+
+Gli order hanno totali uniformemente distribuiti fra 10 e 500, status `paid`/`pending`/`shipped`/`cancelled`/`refunded` con pesi 45/20/20/10/5 e note assenti nell'80% circa dei casi. I profile distribuiscono `language` fra `en`/`it`/`fr`/`es` con pesi 40/30/20/10, newsletter vera/falsa/assente con pesi 45/35/20 e da uno a tre ruoli. Gli event distribuiscono `purchase`/`page_view`/`login`/`logout` con pesi 25/45/20/10; `amount`, valuta e items sono generati esclusivamente per i purchase, mentre device, path e tags restano coerenti con il tipo di evento.
+
 Avvio locale:
 
 ```bash
