@@ -1,15 +1,402 @@
 {% extends "base.html" %}
 {% from "components/status_badge.html" import status_badge %}
+
 {% block content %}
 {% include "components/alerts.html" %}
-<div class="page-heading"><div><p class="eyebrow">Sistema</p><h1>Dashboard</h1></div><div class="actions"><a class="button" href="/ui/ingestions/new">Importa dataset</a><a class="button secondary" href="/ui/assets">Apri asset</a></div></div>
-<div class="card-grid metrics-grid">
-  <section class="card"><h2>Health</h2>{{ status_badge(health) }}</section>
-  <section class="card"><h2>Asset</h2><p class="big-number">{{ assets_count }}</p></section>
-  {% include "components/worker_status.html" %}
-</div>
-<section><h2>Ultime ingestion</h2>{% if jobs %}<div class="table-wrap"><table><thead><tr><th>Job</th><th>File</th><th>Stato</th><th>Aggiornato</th></tr></thead><tbody>{% for job in jobs %}<tr><td><a href="/ui/ingestions/{{ job.id }}"><code>{{ job.short_id }}</code></a></td><td>{{ job.filename }}</td><td>{{ status_badge(job.status) }}</td><td>{{ job.updated_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessuna ingestion.</p>{% endif %}</section>
-<section><h2>Ultimi processing run</h2>{% if runs %}<div class="table-wrap"><table><thead><tr><th>Run</th><th>Recipe</th><th>Stato</th><th>Aggiornato</th></tr></thead><tbody>{% for run in runs %}<tr><td><a href="/ui/processing/runs/{{ run.id }}"><code>{{ run.short_id }}</code></a></td><td>{{ run.recipe_name }}</td><td>{{ status_badge(run.status) }}</td><td>{{ run.updated_at }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessun processing run.</p>{% endif %}</section>
-<section><h2>Sorgenti configurate</h2>{% if sources %}<div class="card-grid">{% for source in sources %}<article class="card"><div class="card-heading"><a href="/ui/sources/{{ source.id }}">{{ source.name }}</a>{{ status_badge(source.freshness) }}</div><p>{{ source.database_type }}</p></article>{% endfor %}</div>{% endif %}</section>
-{% endblock %}
 
+<style>
+  .dashboard-shell {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .dashboard-hero {
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr);
+    gap: 1.5rem;
+    align-items: center;
+    padding: 2rem;
+    border: 1px solid var(--border-color, #dfe5ec);
+    border-radius: 1.25rem;
+    background:
+      radial-gradient(circle at top right, rgba(78, 125, 255, .18), transparent 34%),
+      linear-gradient(135deg, rgba(15, 23, 42, .98), rgba(30, 41, 59, .96));
+    color: #fff;
+    box-shadow: 0 20px 45px rgba(15, 23, 42, .16);
+  }
+
+  .dashboard-hero::after {
+    content: "";
+    position: absolute;
+    right: -80px;
+    bottom: -120px;
+    width: 260px;
+    height: 260px;
+    border-radius: 999px;
+    border: 42px solid rgba(255, 255, 255, .04);
+  }
+
+  .dashboard-hero-copy {
+    position: relative;
+    z-index: 1;
+  }
+
+  .dashboard-hero .eyebrow {
+    margin: 0 0 .5rem;
+    color: #93c5fd;
+    font-size: .78rem;
+    font-weight: 700;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+
+  .dashboard-hero h1 {
+    margin: 0;
+    font-size: clamp(2rem, 4vw, 3.25rem);
+    line-height: 1;
+    color: #fff;
+  }
+
+  .dashboard-hero p {
+    max-width: 700px;
+    margin: 1rem 0 0;
+    color: #cbd5e1;
+    font-size: 1.02rem;
+    line-height: 1.65;
+  }
+
+  .dashboard-actions {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: .75rem;
+  }
+
+  .dashboard-actions .button {
+    width: 100%;
+    justify-content: center;
+    box-sizing: border-box;
+  }
+
+  .dashboard-actions .button.secondary {
+    border-color: rgba(255, 255, 255, .26);
+    background: rgba(255, 255, 255, .08);
+    color: #fff;
+  }
+
+  .dashboard-actions .button.secondary:hover {
+    background: rgba(255, 255, 255, .14);
+  }
+
+  .dashboard-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .metric-card {
+    position: relative;
+    overflow: hidden;
+    min-height: 150px;
+    padding: 1.25rem;
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: 1rem;
+    background: var(--surface, #fff);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .06);
+  }
+
+  .metric-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 4px;
+    background: linear-gradient(90deg, #2563eb, #8b5cf6);
+  }
+
+  .metric-label {
+    margin: 0 0 .75rem;
+    color: var(--muted-color, #64748b);
+    font-size: .8rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  .metric-card .big-number {
+    margin: 0;
+    font-size: 2.6rem;
+    line-height: 1;
+  }
+
+  .metric-caption {
+    margin: .75rem 0 0;
+    color: var(--muted-color, #64748b);
+    font-size: .9rem;
+  }
+
+  .dashboard-section {
+    padding: 1.25rem;
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: 1rem;
+    background: var(--surface, #fff);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, .05);
+  }
+
+  .section-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: end;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+
+  .section-heading h2 {
+    margin: 0;
+    font-size: 1.15rem;
+  }
+
+  .section-heading p {
+    margin: .25rem 0 0;
+    color: var(--muted-color, #64748b);
+    font-size: .9rem;
+  }
+
+  .dashboard-table tbody tr {
+    transition: background .18s ease, transform .18s ease;
+  }
+
+  .dashboard-table tbody tr:hover {
+    background: rgba(37, 99, 235, .045);
+  }
+
+  .source-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1rem;
+  }
+
+  .source-card {
+    display: grid;
+    gap: .8rem;
+    padding: 1.1rem;
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: .9rem;
+    background: linear-gradient(180deg, rgba(248, 250, 252, .95), rgba(255, 255, 255, 1));
+    transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+  }
+
+  .source-card:hover {
+    transform: translateY(-2px);
+    border-color: rgba(37, 99, 235, .35);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, .08);
+  }
+
+  .source-card-top {
+    display: flex;
+    gap: .75rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .source-card a {
+    font-weight: 700;
+    text-decoration: none;
+  }
+
+  .source-type {
+    margin: 0;
+    color: var(--muted-color, #64748b);
+    font-size: .92rem;
+  }
+
+  .empty-state {
+    display: grid;
+    place-items: center;
+    min-height: 120px;
+    padding: 1rem;
+    border: 1px dashed var(--border-color, #cbd5e1);
+    border-radius: .8rem;
+    color: var(--muted-color, #64748b);
+    text-align: center;
+    background: rgba(248, 250, 252, .7);
+  }
+
+  @media (max-width: 900px) {
+    .dashboard-hero {
+      grid-template-columns: 1fr;
+    }
+
+    .dashboard-actions {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .dashboard-metrics {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 620px) {
+    .dashboard-hero {
+      padding: 1.4rem;
+    }
+
+    .dashboard-actions {
+      grid-template-columns: 1fr;
+    }
+
+    .section-heading {
+      align-items: start;
+      flex-direction: column;
+    }
+  }
+</style>
+
+<div class="dashboard-shell">
+
+  <section class="dashboard-hero">
+    <div class="dashboard-hero-copy">
+      <p class="eyebrow">QueryX Control Center</p>
+      <h1>Dashboard</h1>
+      <p>
+        Monitora lo stato del sistema, consulta le sorgenti e accedi rapidamente
+        ai flussi di ingestion, processing e interrogazione dei dati.
+      </p>
+    </div>
+
+    <div class="dashboard-actions">
+      <a class="button" href="/ui/query">Interroga i dati</a>
+      <a class="button secondary" href="/ui/ingestions/new">Importa dataset</a>
+      <a class="button secondary" href="/ui/assets">Esplora gli asset</a>
+    </div>
+  </section>
+
+  <section class="dashboard-metrics" aria-label="Metriche principali">
+    <article class="metric-card">
+      <p class="metric-label">Stato applicazione</p>
+      {{ status_badge(health) }}
+      <p class="metric-caption">Disponibilità generale dei servizi QueryX.</p>
+    </article>
+
+    <article class="metric-card">
+      <p class="metric-label">Asset catalogati</p>
+      <p class="big-number">{{ assets_count }}</p>
+      <p class="metric-caption">Dataset e sorgenti attualmente disponibili.</p>
+    </article>
+
+    <article class="metric-card">
+      <p class="metric-label">Worker</p>
+      {% include "components/worker_status.html" %}
+    </article>
+  </section>
+
+  <section class="dashboard-section">
+    <div class="section-heading">
+      <div>
+        <h2>Ultime ingestion</h2>
+        <p>Stato dei caricamenti e degli aggiornamenti più recenti.</p>
+      </div>
+      <a class="button secondary" href="/ui/ingestions/new">Nuova ingestion</a>
+    </div>
+
+    {% if jobs %}
+      <div class="table-wrap">
+        <table class="dashboard-table">
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>File</th>
+              <th>Stato</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for job in jobs %}
+              <tr>
+                <td>
+                  <a href="/ui/ingestions/{{ job.id }}">
+                    <code>{{ job.short_id }}</code>
+                  </a>
+                </td>
+                <td>{{ job.filename }}</td>
+                <td>{{ status_badge(job.status) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">Nessuna ingestion disponibile.</div>
+    {% endif %}
+  </section>
+
+  <section class="dashboard-section">
+    <div class="section-heading">
+      <div>
+        <h2>Ultimi processing run</h2>
+        <p>Trasformazioni e preparazioni dati eseguite più di recente.</p>
+      </div>
+    </div>
+
+    {% if runs %}
+      <div class="table-wrap">
+        <table class="dashboard-table">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Recipe</th>
+              <th>Stato</th>
+              <th>Aggiornato</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+              <tr>
+                <td>
+                  <a href="/ui/processing/runs/{{ run.id }}">
+                    <code>{{ run.short_id }}</code>
+                  </a>
+                </td>
+                <td>{{ run.recipe_name }}</td>
+                <td>{{ status_badge(run.status) }}</td>
+                <td>{{ run.updated_at }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty-state">Nessun processing run disponibile.</div>
+    {% endif %}
+  </section>
+
+  <section class="dashboard-section">
+    <div class="section-heading">
+      <div>
+        <h2>Sorgenti configurate</h2>
+        <p>Backend attivi e relativo stato di aggiornamento.</p>
+      </div>
+      <a class="button secondary" href="/ui/sources">Gestisci sorgenti</a>
+    </div>
+
+    {% if sources %}
+      <div class="source-grid">
+        {% for source in sources %}
+          <article class="source-card">
+            <div class="source-card-top">
+              <a href="/ui/sources/{{ source.id }}">{{ source.name }}</a>
+              {{ status_badge(source.freshness) }}
+            </div>
+            <p class="source-type">{{ source.database_type }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">Nessuna sorgente configurata.</div>
+    {% endif %}
+  </section>
+
+</div>
+{% endblock %}

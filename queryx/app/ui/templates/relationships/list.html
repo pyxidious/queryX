@@ -1,17 +1,571 @@
 {% extends "base.html" %}
+
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Catalogo</p><h1>Relazioni tra asset</h1><p class="muted">Le relazioni sono dichiarate manualmente sui campi osservati.</p></div></div>
-{% if error %}<div class="alert alert-danger"><strong>{{ error.code }}</strong>: {{ error.message }}</div>{% endif %}
-<section class="card"><h2>Crea relazione</h2><form class="form" method="post" action="/ui/relationships">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Nome opzionale<input name="name" maxlength="256"></label>
-  <label>Asset sinistro<select name="left_asset_id" required><option value="">Seleziona</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.id }}</option>{% endfor %}</select></label>
-  <label>Campo sinistro<input name="left_field" maxlength="256" required></label>
-  <label>Asset destro<select name="right_asset_id" required><option value="">Seleziona</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.id }}</option>{% endfor %}</select></label>
-  <label>Campo destro<input name="right_field" maxlength="256" required></label>
-  <label>Cardinalità<select name="relationship_type"><option>one_to_one</option><option>one_to_many</option><option>many_to_one</option><option>many_to_many</option></select></label>
-  <label>Join predefinito<select name="join_type_default"><option>inner</option><option>left</option></select></label>
-  <button class="button" type="submit">Registra relazione</button>
-</form></section>
-<section><h2>Relazioni registrate</h2>{% if relationships %}<div class="table-wrap"><table><thead><tr><th>Nome</th><th>Sinistra</th><th>Destra</th><th>Tipo</th><th>Stato</th></tr></thead><tbody>{% for relationship in relationships %}<tr><td>{{ relationship.name or "—" }}</td><td><code>{{ relationship.left_asset_id }}</code>.{{ relationship.left_field }}</td><td><code>{{ relationship.right_asset_id }}</code>.{{ relationship.right_field }}</td><td>{{ relationship.relationship_type }}</td><td>{{ relationship.status }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p class="empty">Nessuna relazione dichiarata.</p>{% endif %}</section>
+<style>
+  .relationships-page {
+    display: grid;
+    gap: 1.5rem;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  .relationships-hero {
+    position: relative;
+    overflow: hidden;
+    padding: 2rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.25rem;
+    background:
+      radial-gradient(
+        circle at top right,
+        rgba(139, 92, 246, 0.2),
+        transparent 32%
+      ),
+      linear-gradient(
+        135deg,
+        rgba(15, 23, 42, 0.99),
+        rgba(30, 41, 59, 0.96)
+      );
+    color: #ffffff;
+    box-shadow: 0 22px 50px rgba(15, 23, 42, 0.16);
+  }
+
+  .relationships-hero::after {
+    content: "";
+    position: absolute;
+    right: -90px;
+    bottom: -130px;
+    width: 290px;
+    height: 290px;
+    border: 44px solid rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+    pointer-events: none;
+  }
+
+  .relationships-hero-content {
+    position: relative;
+    z-index: 1;
+    max-width: 760px;
+  }
+
+  .relationships-hero .eyebrow {
+    margin: 0 0 0.65rem;
+    color: #c4b5fd;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .relationships-hero h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: clamp(2rem, 4vw, 3.1rem);
+    line-height: 1.08;
+  }
+
+  .relationships-hero p {
+    max-width: 720px;
+    margin: 1rem 0 0;
+    color: #cbd5e1;
+    font-size: 1.03rem;
+    line-height: 1.7;
+  }
+
+  .relationships-alert {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 1rem;
+    align-items: flex-start;
+    padding: 1.15rem 1.25rem;
+    border: 1px solid rgba(220, 38, 38, 0.32);
+    border-radius: 1rem;
+    background: rgba(254, 242, 242, 0.97);
+    color: #991b1b;
+    animation: relationships-fade-in 320ms ease forwards;
+  }
+
+  .relationships-alert-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 0.8rem;
+    background: rgba(220, 38, 38, 0.12);
+    color: #dc2626;
+  }
+
+  .relationships-alert-icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .relationships-panel {
+    padding: 1.5rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.1rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+  }
+
+  .relationships-panel-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+    margin-bottom: 1.35rem;
+  }
+
+  .relationships-panel-icon {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border-radius: 0.9rem;
+    background: linear-gradient(135deg, #7c3aed, #2563eb);
+    color: #ffffff;
+    box-shadow: 0 10px 22px rgba(124, 58, 237, 0.2);
+  }
+
+  .relationships-panel-icon svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .relationships-panel-heading h2 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+
+  .relationships-panel-heading p {
+    margin: 0.35rem 0 0;
+    color: var(--muted-color, #64748b);
+    line-height: 1.55;
+  }
+
+  .relationships-form {
+    display: grid;
+    gap: 1.1rem;
+  }
+
+  .relationships-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+
+  .relationships-form label {
+    display: grid;
+    gap: 0.45rem;
+    color: var(--text-color, #334155);
+    font-size: 0.9rem;
+    font-weight: 650;
+  }
+
+  .relationships-form input,
+  .relationships-form select {
+    width: 100%;
+    min-height: 45px;
+    padding: 0.72rem 0.85rem;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color, #cbd5e1);
+    border-radius: 0.8rem;
+    background: var(--surface, #ffffff);
+    color: var(--text-color, #0f172a);
+    font: inherit;
+    outline: none;
+    transition:
+      border-color 170ms ease,
+      box-shadow 170ms ease;
+  }
+
+  .relationships-form input:focus,
+  .relationships-form select:focus {
+    border-color: #7c3aed;
+    box-shadow: 0 0 0 4px rgba(124, 58, 237, 0.12);
+  }
+
+  .relationships-form .full-width {
+    grid-column: 1 / -1;
+  }
+
+  .relationships-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 0.25rem;
+  }
+
+  .relationships-list-section {
+    padding: 1.5rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.1rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.05);
+  }
+
+  .relationships-list-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: end;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+
+  .relationships-list-heading h2 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+
+  .relationships-list-heading p {
+    margin: 0.3rem 0 0;
+    color: var(--muted-color, #64748b);
+  }
+
+  .relationship-direction {
+    display: inline-flex;
+    gap: 0.4rem;
+    align-items: center;
+  }
+
+  .relationship-direction svg {
+    width: 17px;
+    height: 17px;
+    color: #7c3aed;
+  }
+
+  .relationship-type-badge,
+  .relationship-status-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.38rem 0.62rem;
+    border-radius: 999px;
+    font-size: 0.77rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .relationship-type-badge {
+    background: rgba(124, 58, 237, 0.1);
+    color: #6d28d9;
+  }
+
+  .relationship-status-badge {
+    background: rgba(37, 99, 235, 0.1);
+    color: #1d4ed8;
+  }
+
+  .relationships-table tbody tr {
+    transition: background 170ms ease;
+  }
+
+  .relationships-table tbody tr:hover {
+    background: rgba(124, 58, 237, 0.045);
+  }
+
+  .relationships-empty {
+    display: grid;
+    justify-items: center;
+    gap: 0.7rem;
+    min-height: 150px;
+    padding: 2rem;
+    border: 1px dashed var(--border-color, #cbd5e1);
+    border-radius: 0.9rem;
+    background: rgba(248, 250, 252, 0.7);
+    color: var(--muted-color, #64748b);
+    text-align: center;
+  }
+
+  .relationships-empty svg {
+    width: 34px;
+    height: 34px;
+    color: #94a3b8;
+  }
+
+  @keyframes relationships-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @media (max-width: 760px) {
+    .relationships-hero {
+      padding: 1.4rem;
+    }
+
+    .relationships-form-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .relationships-form .full-width {
+      grid-column: auto;
+    }
+
+    .relationships-actions .button {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+</style>
+
+<div class="relationships-page">
+  <section class="relationships-hero">
+    <div class="relationships-hero-content">
+      <p class="eyebrow">QueryX Data Catalog</p>
+
+      <h1>Relazioni tra asset</h1>
+
+      <p>
+        Definisci in modo esplicito come gli asset possono essere collegati.
+        QueryX utilizzerà queste relazioni per validare e compilare join
+        controllati tra sorgenti compatibili.
+      </p>
+    </div>
+  </section>
+
+  {% if error %}
+    <div class="relationships-alert" role="alert">
+      <div class="relationships-alert-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 8v5"></path>
+          <path d="M12 16h.01"></path>
+        </svg>
+      </div>
+
+      <div>
+        <strong>{{ error.code }}</strong>
+        <p>{{ error.message }}</p>
+      </div>
+    </div>
+  {% endif %}
+
+  <section class="relationships-panel">
+    <div class="relationships-panel-heading">
+      <div class="relationships-panel-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="6" cy="12" r="3"></circle>
+          <circle cx="18" cy="6" r="3"></circle>
+          <circle cx="18" cy="18" r="3"></circle>
+          <path d="m8.7 10.7 6.6-3.4"></path>
+          <path d="m8.7 13.3 6.6 3.4"></path>
+        </svg>
+      </div>
+
+      <div>
+        <h2>Crea una nuova relazione</h2>
+
+        <p>
+          Seleziona due asset, specifica i campi di collegamento
+          e indica la cardinalità prevista.
+        </p>
+      </div>
+    </div>
+
+    <form
+      class="relationships-form"
+      method="post"
+      action="/ui/relationships"
+    >
+      <input
+        type="hidden"
+        name="csrf_token"
+        value="{{ csrf_token }}"
+      >
+
+      <div class="relationships-form-grid">
+        <label class="full-width">
+          Nome della relazione
+          <input
+            name="name"
+            maxlength="256"
+            placeholder="Esempio: ordini appartenenti ai clienti"
+          >
+        </label>
+
+        <label>
+          Asset sinistro
+          <select name="left_asset_id" required>
+            <option value="">Seleziona un asset</option>
+
+            {% for asset in assets %}
+              <option value="{{ asset.id }}">
+                {{ asset.name }} · {{ asset.id }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label>
+          Campo sinistro
+          <input
+            name="left_field"
+            maxlength="256"
+            required
+            placeholder="Esempio: customer_id"
+          >
+        </label>
+
+        <label>
+          Asset destro
+          <select name="right_asset_id" required>
+            <option value="">Seleziona un asset</option>
+
+            {% for asset in assets %}
+              <option value="{{ asset.id }}">
+                {{ asset.name }} · {{ asset.id }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label>
+          Campo destro
+          <input
+            name="right_field"
+            maxlength="256"
+            required
+            placeholder="Esempio: id"
+          >
+        </label>
+
+        <label>
+          Cardinalità
+          <select name="relationship_type">
+            <option value="one_to_one">Uno a uno</option>
+            <option value="one_to_many">Uno a molti</option>
+            <option value="many_to_one">Molti a uno</option>
+            <option value="many_to_many">Molti a molti</option>
+          </select>
+        </label>
+
+        <label>
+          Join predefinito
+          <select name="join_type_default">
+            <option value="inner">Inner join</option>
+            <option value="left">Left join</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="relationships-actions">
+        <button class="button" type="submit">
+          Registra relazione
+        </button>
+      </div>
+    </form>
+  </section>
+
+  <section class="relationships-list-section">
+    <div class="relationships-list-heading">
+      <div>
+        <h2>Relazioni registrate</h2>
+        <p>
+          Collegamenti disponibili per la validazione dei piani logici.
+        </p>
+      </div>
+    </div>
+
+    {% if relationships %}
+      <div class="table-wrap">
+        <table class="relationships-table">
+          <thead>
+            <tr>
+              <th>Nome</th>
+              <th>Asset sinistro</th>
+              <th>Asset destro</th>
+              <th>Cardinalità</th>
+              <th>Stato</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {% for relationship in relationships %}
+              <tr>
+                <td>
+                  <strong>
+                    {{ relationship.name or "Relazione senza nome" }}
+                  </strong>
+                </td>
+
+                <td>
+                  <span class="relationship-direction">
+                    <code>{{ relationship.left_asset_id }}</code>
+                    <span>.{{ relationship.left_field }}</span>
+
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      aria-hidden="true"
+                    >
+                      <path d="M5 12h14"></path>
+                      <path d="m15 8 4 4-4 4"></path>
+                    </svg>
+                  </span>
+                </td>
+
+                <td>
+                  <code>{{ relationship.right_asset_id }}</code>
+                  .{{ relationship.right_field }}
+                </td>
+
+                <td>
+                  <span class="relationship-type-badge">
+                    {{ relationship.relationship_type }}
+                  </span>
+                </td>
+
+                <td>
+                  <span class="relationship-status-badge">
+                    {{ relationship.status }}
+                  </span>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="relationships-empty">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          aria-hidden="true"
+        >
+          <circle cx="6" cy="12" r="3"></circle>
+          <circle cx="18" cy="6" r="3"></circle>
+          <circle cx="18" cy="18" r="3"></circle>
+          <path d="m8.7 10.7 6.6-3.4"></path>
+          <path d="m8.7 13.3 6.6 3.4"></path>
+        </svg>
+
+        <strong>Nessuna relazione dichiarata</strong>
+
+        <span>
+          Crea la prima relazione per consentire a QueryX
+          di utilizzare join controllati tra asset.
+        </span>
+      </div>
+    {% endif %}
+  </section>
+</div>
 {% endblock %}

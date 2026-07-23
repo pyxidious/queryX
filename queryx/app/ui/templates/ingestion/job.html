@@ -1,12 +1,560 @@
 {% extends "base.html" %}
+
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Passaggio 2</p><h1>Ingestion <code>{{ job.short_id }}</code></h1></div></div>
-{% include "components/job_status.html" %}
-<section class="card"><h2>Dettagli upload</h2><dl class="details"><div><dt>Filename</dt><dd>{{ job.filename }}</dd></div><div><dt>Nome logico</dt><dd>{{ job.logical_name }}</dd></div>{% if job.requested_asset_id %}<div><dt>Asset target</dt><dd><code>{{ job.requested_asset_id }}</code></dd></div>{% endif %}<div><dt>Byte</dt><dd>{{ job.bytes_received }}</dd></div><div><dt>Record rilevati</dt><dd>{{ job.records_detected }}</dd></div><div><dt>Job ID</dt><dd><code>{{ job.id }}</code></dd></div></dl>
-{% if job.asset_id %}<p><a href="/ui/assets/{{ job.asset_id }}">Apri asset</a>{% if job.asset_version_id %} · <a href="/ui/assets/{{ job.asset_id }}/versions/{{ job.asset_version_id }}">Apri versione</a>{% endif %}</p>{% endif %}
-{% if job.can_cancel %}<form method="post" action="/ui/ingestions/{{ job.id }}/cancel"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button danger" type="submit">Annulla</button></form>{% endif %}</section>
-<section><h2>Provenienza dichiarata</h2>{% with provenance=job.provenance %}{% include "components/provenance.html" %}{% endwith %}</section>
-{% if preview_alert %}<div class="alert alert-warning">{{ preview_alert.message }}</div>{% endif %}
-<section><h2>Preview raw</h2>{% include "components/preview_table.html" %}</section>
-{% if job.asset_id and job.asset_version_id and job.status.label == "ready" %}<form method="post" action="/ui/assets/{{ job.asset_id }}/versions/{{ job.asset_version_id }}/prepare"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button" type="submit">Prepara per analytics</button></form>{% endif %}
+<style>
+  .job-page {
+    display: grid;
+    gap: 1.5rem;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  .job-hero {
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 1.5rem;
+    align-items: center;
+    padding: 2rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.25rem;
+    background:
+      radial-gradient(
+        circle at top right,
+        rgba(16, 185, 129, 0.2),
+        transparent 34%
+      ),
+      linear-gradient(
+        135deg,
+        rgba(15, 23, 42, 0.99),
+        rgba(30, 41, 59, 0.96)
+      );
+    color: #ffffff;
+    box-shadow: 0 22px 50px rgba(15, 23, 42, 0.16);
+  }
+
+  .job-hero::after {
+    content: "";
+    position: absolute;
+    right: -90px;
+    bottom: -130px;
+    width: 290px;
+    height: 290px;
+    border: 44px solid rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+    pointer-events: none;
+  }
+
+  .job-hero-content,
+  .job-hero-status {
+    position: relative;
+    z-index: 1;
+  }
+
+  .job-hero .eyebrow {
+    margin: 0 0 0.65rem;
+    color: #6ee7b7;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .job-hero h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: clamp(1.8rem, 4vw, 2.8rem);
+    line-height: 1.1;
+  }
+
+  .job-hero h1 code {
+    color: #d1fae5;
+  }
+
+  .job-hero p {
+    max-width: 720px;
+    margin: 0.9rem 0 0;
+    color: #cbd5e1;
+    line-height: 1.65;
+  }
+
+  .job-status-shell {
+    min-width: 230px;
+    padding: 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(10px);
+  }
+
+  .job-details-card,
+  .job-section {
+    padding: 1.5rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.1rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+  }
+
+  .job-section-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+    margin-bottom: 1.2rem;
+  }
+
+  .job-section-icon {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: 0.85rem;
+    background: linear-gradient(135deg, #059669, #2563eb);
+    color: #ffffff;
+  }
+
+  .job-section-icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .job-section-heading h2 {
+    margin: 0;
+    font-size: 1.18rem;
+  }
+
+  .job-section-heading p {
+    margin: 0.35rem 0 0;
+    color: var(--muted-color, #64748b);
+    line-height: 1.55;
+  }
+
+  .job-details-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1rem;
+    margin: 0;
+  }
+
+  .job-detail {
+    padding: 1rem;
+    border: 1px solid var(--border-color, #e2e8f0);
+    border-radius: 0.85rem;
+    background: rgba(248, 250, 252, 0.75);
+  }
+
+  .job-detail dt {
+    margin-bottom: 0.4rem;
+    color: var(--muted-color, #64748b);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+
+  .job-detail dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-color, #0f172a);
+    font-weight: 650;
+  }
+
+  .job-detail-value-large {
+    font-size: 1.35rem;
+  }
+
+  .job-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1.2rem;
+  }
+
+  .job-link-card {
+    display: inline-flex;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.65rem 0.85rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 0.75rem;
+    background: rgba(248, 250, 252, 0.75);
+    font-weight: 650;
+    text-decoration: none;
+    transition:
+      border-color 170ms ease,
+      transform 170ms ease,
+      background 170ms ease;
+  }
+
+  .job-link-card:hover {
+    transform: translateY(-1px);
+    border-color: rgba(37, 99, 235, 0.45);
+    background: rgba(239, 246, 255, 0.9);
+  }
+
+  .job-link-card svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .job-warning {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 1rem;
+    align-items: flex-start;
+    padding: 1.15rem 1.25rem;
+    border: 1px solid rgba(217, 119, 6, 0.35);
+    border-radius: 1rem;
+    background: rgba(255, 251, 235, 0.98);
+    color: #92400e;
+  }
+
+  .job-warning-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 0.8rem;
+    background: rgba(245, 158, 11, 0.15);
+    color: #d97706;
+  }
+
+  .job-warning-icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .job-warning p {
+    margin: 0;
+    line-height: 1.6;
+  }
+
+  .job-preview-shell {
+    overflow: hidden;
+  }
+
+  .job-prepare {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .job-danger-zone {
+    margin-top: 1.2rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--border-color, #e2e8f0);
+  }
+
+  @media (max-width: 900px) {
+    .job-hero {
+      grid-template-columns: 1fr;
+    }
+
+    .job-status-shell {
+      min-width: 0;
+    }
+
+    .job-details-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .job-hero {
+      padding: 1.4rem;
+    }
+
+    .job-details-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .job-actions,
+    .job-prepare {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    .job-actions .button,
+    .job-actions .job-link-card,
+    .job-prepare .button {
+      width: 100%;
+      box-sizing: border-box;
+      justify-content: center;
+    }
+  }
+</style>
+
+<div class="job-page">
+  <section class="job-hero">
+    <div class="job-hero-content">
+      <p class="eyebrow">QueryX Data Ingestion</p>
+
+      <h1>
+        Ingestion
+        <code>{{ job.short_id }}</code>
+      </h1>
+
+      <p>
+        Consulta lo stato del caricamento, i metadati rilevati
+        e l’anteprima dei record acquisiti.
+      </p>
+    </div>
+
+    <div class="job-hero-status">
+      <div class="job-status-shell">
+        {% include "components/job_status.html" %}
+      </div>
+    </div>
+  </section>
+
+  <section class="job-details-card">
+    <div class="job-section-heading">
+      <div class="job-section-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M4 5h16v14H4z"></path>
+          <path d="M8 9h8"></path>
+          <path d="M8 13h5"></path>
+        </svg>
+      </div>
+
+      <div>
+        <h2>Dettagli del caricamento</h2>
+
+        <p>
+          Informazioni tecniche e identificativi associati all’ingestion.
+        </p>
+      </div>
+    </div>
+
+    <dl class="job-details-grid">
+      <div class="job-detail">
+        <dt>Nome del file</dt>
+        <dd>{{ job.filename }}</dd>
+      </div>
+
+      <div class="job-detail">
+        <dt>Nome logico</dt>
+        <dd>{{ job.logical_name or "—" }}</dd>
+      </div>
+
+      <div class="job-detail">
+        <dt>Dimensione</dt>
+        <dd class="job-detail-value-large">
+          {{ job.bytes_received }} byte
+        </dd>
+      </div>
+
+      <div class="job-detail">
+        <dt>Record rilevati</dt>
+        <dd class="job-detail-value-large">
+          {{ job.records_detected }}
+        </dd>
+      </div>
+
+      {% if job.requested_asset_id %}
+        <div class="job-detail">
+          <dt>Asset richiesto</dt>
+          <dd>
+            <code>{{ job.requested_asset_id }}</code>
+          </dd>
+        </div>
+      {% endif %}
+
+      <div class="job-detail">
+        <dt>Job ID</dt>
+        <dd>
+          <code>{{ job.id }}</code>
+        </dd>
+      </div>
+    </dl>
+
+    {% if job.asset_id %}
+      <div class="job-actions">
+        <a
+          class="job-link-card"
+          href="/ui/assets/{{ job.asset_id }}"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <path d="M4 6h16v12H4z"></path>
+            <path d="M8 10h8"></path>
+            <path d="M8 14h5"></path>
+          </svg>
+
+          Apri asset
+        </a>
+
+        {% if job.asset_version_id %}
+          <a
+            class="job-link-card"
+            href="/ui/assets/{{ job.asset_id }}/versions/{{ job.asset_version_id }}"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              aria-hidden="true"
+            >
+              <path d="M12 8v4l3 2"></path>
+              <circle cx="12" cy="12" r="9"></circle>
+            </svg>
+
+            Apri versione
+          </a>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% if job.can_cancel %}
+      <div class="job-danger-zone">
+        <form
+          method="post"
+          action="/ui/ingestions/{{ job.id }}/cancel"
+        >
+          <input
+            type="hidden"
+            name="csrf_token"
+            value="{{ csrf_token }}"
+          >
+
+          <button class="button danger" type="submit">
+            Annulla ingestion
+          </button>
+        </form>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="job-section">
+    <div class="job-section-heading">
+      <div class="job-section-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 3v18"></path>
+          <path d="M5 8h14"></path>
+          <path d="M7 16h10"></path>
+        </svg>
+      </div>
+
+      <div>
+        <h2>Provenienza dichiarata</h2>
+
+        <p>
+          Metadati forniti dall’utente al momento del caricamento.
+        </p>
+      </div>
+    </div>
+
+    {% with provenance=job.provenance %}
+      {% include "components/provenance.html" %}
+    {% endwith %}
+  </section>
+
+  {% if preview_alert %}
+    <div class="job-warning" role="alert">
+      <div class="job-warning-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 3 2.8 19h18.4L12 3Z"></path>
+          <path d="M12 9v4"></path>
+          <path d="M12 16h.01"></path>
+        </svg>
+      </div>
+
+      <p>{{ preview_alert.message }}</p>
+    </div>
+  {% endif %}
+
+  <section class="job-section job-preview-shell">
+    <div class="job-section-heading">
+      <div class="job-section-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M4 5h16v14H4z"></path>
+          <path d="M4 10h16"></path>
+          <path d="M9 5v14"></path>
+        </svg>
+      </div>
+
+      <div>
+        <h2>Anteprima dei dati</h2>
+
+        <p>
+          Campione dei record rilevati prima della preparazione analytics.
+        </p>
+      </div>
+    </div>
+
+    {% include "components/preview_table.html" %}
+  </section>
+
+  {% if job.asset_id
+        and job.asset_version_id
+        and job.status.label == "ready" %}
+    <section class="job-section">
+      <div class="job-section-heading">
+        <div class="job-section-icon" aria-hidden="true">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M4 18 9 13l4 4 7-8"></path>
+            <path d="M15 9h5v5"></path>
+          </svg>
+        </div>
+
+        <div>
+          <h2>Preparazione analytics</h2>
+
+          <p>
+            Normalizza il dataset e rendilo disponibile
+            per le interrogazioni QueryX.
+          </p>
+        </div>
+      </div>
+
+      <form
+        class="job-prepare"
+        method="post"
+        action="/ui/assets/{{ job.asset_id }}/versions/{{ job.asset_version_id }}/prepare"
+      >
+        <input
+          type="hidden"
+          name="csrf_token"
+          value="{{ csrf_token }}"
+        >
+
+        <button class="button" type="submit">
+          Prepara per analytics
+        </button>
+      </form>
+    </section>
+  {% endif %}
+</div>
 {% endblock %}

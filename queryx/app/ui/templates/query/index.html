@@ -1,30 +1,1134 @@
 {% extends "base.html" %}
+
 {% block content %}
-<div id="query-workspace" aria-busy="false">
-<div id="query-loading" class="query-loading" role="status" aria-live="polite" hidden><span class="query-spinner" aria-hidden="true"></span><span data-loading-message>Operazione in corso…</span></div>
-<div class="page-heading"><div><p class="eyebrow">Strumento tecnico</p><h1>Logical Query Plan</h1><p class="muted">Inserisci esclusivamente un piano JSON. QueryX compila internamente una SELECT bounded per DuckDB o MySQL; SQL e path non sono accettati.</p></div></div>
-{% if error %}<div class="alert alert-danger"><strong>{{ error.code }}</strong>: {{ error.message }}{% if error.issues %}<ul>{% for issue in error.issues %}<li><code>{{ issue.path }}</code>: {{ issue.message }}</li>{% endfor %}</ul>{% endif %}</div>{% endif %}
-{% if explanation_warning %}<div class="alert alert-warning"><strong>{{ explanation_warning.code }}</strong>: {{ explanation_warning.message }}</div>{% endif %}
-{% if classification == "ambiguous" %}<section class="card"><h2>Chiarimento necessario</h2><p>{{ clarification_question }}</p>{% if reason %}<p class="muted">{{ reason }}</p>{% endif %}</section>{% endif %}
-{% if classification == "unanswerable" %}<section class="card"><h2>Richiesta non calcolabile</h2><p>{{ reason }}</p></section>{% endif %}
-{% if generated %}<div class="alert alert-success">Piano generato e validato.</div>{% endif %}
-{% if generated %}<p class="muted">Planning {{ "%.2f"|format(planning_time_ms) }} ms{% if execution_time_ms is not none %} · Execution {{ "%.2f"|format(execution_time_ms) }} ms{% endif %}{% if explanation_time_ms is not none %} · Explanation {{ "%.2f"|format(explanation_time_ms) }} ms{% endif %}</p>{% endif %}
-<section class="card"><h2>Domanda in linguaggio naturale</h2><form class="form" method="post" action="/ui/query/natural-language" data-query-form>
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Domanda in linguaggio naturale<textarea name="question" maxlength="2000" required>{{ question }}</textarea></label>
-  <div class="actions"><button class="button secondary" name="execute" value="false" type="submit" data-loading-text="Generazione del piano in corso…">Genera piano</button><button class="button" name="execute" value="true" type="submit" data-loading-text="Esecuzione della query e generazione della risposta in corso…">Genera ed esegui</button></div>
-</form></section>
-{% if plan_json and not hide_plan_editor and classification not in ["ambiguous", "unanswerable"] %}
-<h2>Piano JSON</h2>
-<form class="form" method="post" action="/ui/query/validate" data-query-form>
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Piano JSON<textarea name="plan_json" required>{{ plan_json }}</textarea></label>
-  <div class="actions"><button class="button secondary" formaction="/ui/query/validate" type="submit" data-loading-text="Validazione in corso…">Validate</button><button class="button" formaction="/ui/query/execute" type="submit" data-loading-text="Esecuzione della query in corso…">Execute</button></div>
-</form>
-{% endif %}
-{% if validation %}<section class="card"><h2>Piano valido</h2><p>Fingerprint <code>{{ validation.plan_fingerprint }}</code></p><div class="table-wrap"><table><thead><tr><th>Colonna</th><th>Tipo</th><th>Nullable</th></tr></thead><tbody>{% for field in validation.output_schema %}<tr><td>{{ field.name }}</td><td>{{ field.data_type }}</td><td>{{ "sì" if field.nullable else "no" }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
-{% if answer and classification == "answerable" %}<section class="card"><h2>Risposta</h2><p>{{ answer }}</p></section>{% endif %}
-{% if result %}<section><h2>Risultato</h2><p>{{ result.row_count }} righe · {{ "%.2f"|format(result.execution_time_ms) }} ms{% if result.truncated %} · risultato troncato{% endif %}</p><div class="table-wrap"><table class="preview"><thead><tr>{% for column in result.columns %}<th>{{ column }}</th>{% endfor %}</tr></thead><tbody>{% for row in result.rows %}<tr>{% for value in row %}<td>{{ value|query_value if value is not none else "null" }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></section>{% endif %}
+<style>
+  /*
+   * QueryX natural-language workspace
+   */
+
+  .query-page {
+    display: grid;
+    gap: 1.5rem;
+    max-width: 1180px;
+    margin: 0 auto;
+  }
+
+  .query-hero {
+    position: relative;
+    overflow: hidden;
+    padding: 2rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.25rem;
+    background:
+      radial-gradient(
+        circle at top right,
+        rgba(59, 130, 246, 0.2),
+        transparent 32%
+      ),
+      linear-gradient(
+        135deg,
+        rgba(15, 23, 42, 0.99),
+        rgba(30, 41, 59, 0.96)
+      );
+    color: #ffffff;
+    box-shadow: 0 22px 50px rgba(15, 23, 42, 0.16);
+  }
+
+  .query-hero::after {
+    content: "";
+    position: absolute;
+    right: -90px;
+    bottom: -120px;
+    width: 280px;
+    height: 280px;
+    border: 42px solid rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+    pointer-events: none;
+  }
+
+  .query-hero-content {
+    position: relative;
+    z-index: 1;
+    max-width: 760px;
+  }
+
+  .query-hero .eyebrow {
+    margin: 0 0 0.65rem;
+    color: #93c5fd;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .query-hero h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: clamp(2rem, 4vw, 3.2rem);
+    line-height: 1.08;
+  }
+
+  .query-hero-description {
+    max-width: 720px;
+    margin: 1rem 0 0;
+    color: #cbd5e1;
+    font-size: 1.04rem;
+    line-height: 1.7;
+  }
+
+  /*
+   * Animated workspace
+   */
+
+  .query-interaction-shell {
+    position: relative;
+    min-height: 325px;
+  }
+
+  .query-composer,
+  .query-loading-panel {
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .query-composer {
+    display: grid;
+    gap: 1.25rem;
+    padding: 1.5rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.15rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.07);
+    opacity: 1;
+    transform: translateY(0);
+    transition:
+      opacity 220ms ease,
+      transform 220ms ease,
+      visibility 220ms ease;
+  }
+
+  .query-composer.is-leaving {
+    opacity: 0;
+    transform: translateY(-8px);
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .query-composer-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .query-composer-icon {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border-radius: 0.9rem;
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    color: #ffffff;
+    box-shadow: 0 10px 22px rgba(37, 99, 235, 0.22);
+  }
+
+  .query-composer-icon svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .query-composer-heading h2 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+
+  .query-composer-heading p {
+    margin: 0.35rem 0 0;
+    color: var(--muted-color, #64748b);
+    line-height: 1.55;
+  }
+
+  .query-form {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .query-textarea-wrapper {
+    position: relative;
+  }
+
+  .query-textarea {
+    width: 100%;
+    min-height: 150px;
+    padding: 1.15rem 1.15rem 2.4rem;
+    box-sizing: border-box;
+    resize: vertical;
+    border: 1px solid var(--border-color, #cbd5e1);
+    border-radius: 0.95rem;
+    background: var(--surface, #ffffff);
+    color: var(--text-color, #0f172a);
+    font: inherit;
+    font-size: 1.03rem;
+    line-height: 1.65;
+    outline: none;
+    transition:
+      border-color 180ms ease,
+      box-shadow 180ms ease,
+      background 180ms ease;
+  }
+
+  .query-textarea:hover {
+    border-color: #94a3b8;
+  }
+
+  .query-textarea:focus {
+    border-color: #3b82f6;
+    box-shadow:
+      0 0 0 4px rgba(59, 130, 246, 0.13),
+      0 10px 25px rgba(15, 23, 42, 0.05);
+  }
+
+  .query-character-count {
+    position: absolute;
+    right: 0.9rem;
+    bottom: 0.7rem;
+    color: var(--muted-color, #64748b);
+    font-size: 0.78rem;
+    pointer-events: none;
+  }
+
+  .query-suggestions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+  }
+
+  .query-suggestion {
+    padding: 0.55rem 0.8rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 999px;
+    background: rgba(248, 250, 252, 0.9);
+    color: var(--text-color, #334155);
+    font: inherit;
+    font-size: 0.84rem;
+    cursor: pointer;
+    transition:
+      transform 160ms ease,
+      border-color 160ms ease,
+      background 160ms ease;
+  }
+
+  .query-suggestion:hover {
+    transform: translateY(-1px);
+    border-color: rgba(37, 99, 235, 0.5);
+    background: rgba(239, 246, 255, 0.95);
+  }
+
+  .query-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: flex-end;
+  }
+
+  /*
+   * Loading state
+   */
+
+  .query-loading-panel {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    min-height: 325px;
+    padding: 2rem;
+    box-sizing: border-box;
+    border: 1px solid rgba(59, 130, 246, 0.25);
+    border-radius: 1.15rem;
+    background:
+      radial-gradient(
+        circle at center,
+        rgba(59, 130, 246, 0.08),
+        transparent 58%
+      ),
+      var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.07);
+    text-align: center;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition:
+      opacity 260ms ease,
+      transform 260ms ease,
+      visibility 260ms ease;
+  }
+
+  .query-loading-panel.is-visible {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  .query-loading-content {
+    display: grid;
+    justify-items: center;
+    gap: 1rem;
+    max-width: 520px;
+  }
+
+  .query-loader {
+    position: relative;
+    width: 78px;
+    height: 78px;
+  }
+
+  .query-loader::before,
+  .query-loader::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+  }
+
+  .query-loader::before {
+    border: 4px solid rgba(59, 130, 246, 0.15);
+  }
+
+  .query-loader::after {
+    border: 4px solid transparent;
+    border-top-color: #2563eb;
+    border-right-color: #7c3aed;
+    animation: query-spin 900ms linear infinite;
+  }
+
+  .query-loader-core {
+    position: absolute;
+    inset: 17px;
+    display: grid;
+    place-items: center;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #2563eb, #7c3aed);
+    color: #ffffff;
+    box-shadow: 0 8px 22px rgba(37, 99, 235, 0.25);
+  }
+
+  .query-loader-core svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .query-loading-content h2 {
+    margin: 0;
+    font-size: 1.3rem;
+  }
+
+  .query-loading-message {
+    margin: 0;
+    color: var(--muted-color, #64748b);
+    line-height: 1.6;
+  }
+
+  .query-loading-progress {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+  }
+
+  .query-loading-progress span {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: #3b82f6;
+    animation: query-pulse 1.2s infinite ease-in-out;
+  }
+
+  .query-loading-progress span:nth-child(2) {
+    animation-delay: 150ms;
+  }
+
+  .query-loading-progress span:nth-child(3) {
+    animation-delay: 300ms;
+  }
+
+  /*
+   * Status messages
+   */
+
+  .query-status {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 1rem;
+    align-items: flex-start;
+    padding: 1.2rem 1.25rem;
+    border: 1px solid;
+    border-radius: 1rem;
+    opacity: 0;
+    transform: translateY(-8px);
+    animation: query-fade-in 360ms ease forwards;
+  }
+
+  .query-status-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 0.8rem;
+  }
+
+  .query-status-icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .query-status-content h2 {
+    margin: 0;
+    font-size: 1.08rem;
+  }
+
+  .query-status-content p {
+    margin: 0.4rem 0 0;
+    line-height: 1.6;
+  }
+
+  .query-status-content .status-reason {
+    opacity: 0.84;
+    font-size: 0.92rem;
+  }
+
+  .query-status-unanswerable {
+    border-color: rgba(220, 38, 38, 0.34);
+    background: rgba(254, 242, 242, 0.96);
+    color: #991b1b;
+  }
+
+  .query-status-unanswerable .query-status-icon {
+    background: rgba(220, 38, 38, 0.11);
+    color: #dc2626;
+  }
+
+  .query-status-warning {
+    border-color: rgba(217, 119, 6, 0.38);
+    background: rgba(255, 251, 235, 0.98);
+    color: #92400e;
+  }
+
+  .query-status-warning .query-status-icon {
+    background: rgba(245, 158, 11, 0.16);
+    color: #d97706;
+  }
+
+  .query-status-success {
+    border-color: rgba(22, 163, 74, 0.3);
+    background: rgba(240, 253, 244, 0.96);
+    color: #166534;
+  }
+
+  .query-status-success .query-status-icon {
+    background: rgba(22, 163, 74, 0.12);
+    color: #16a34a;
+  }
+
+  .query-status.is-leaving {
+    animation: query-fade-out 220ms ease forwards;
+  }
+
+  /*
+   * Results
+   */
+
+  .query-result-card {
+    padding: 1.4rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+    animation: query-fade-in 360ms ease forwards;
+  }
+
+  .query-result-heading {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+
+  .query-result-heading h2 {
+    margin: 0;
+  }
+
+  .query-answer {
+    padding: 1.3rem;
+    border-left: 4px solid #2563eb;
+    border-radius: 0.85rem;
+    background: rgba(239, 246, 255, 0.82);
+  }
+
+  .query-answer-label {
+    margin: 0 0 0.4rem;
+    color: #1d4ed8;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+  }
+
+  .query-answer-text {
+    margin: 0;
+    color: var(--text-color, #0f172a);
+    font-size: 1.15rem;
+    line-height: 1.65;
+  }
+
+  .query-timing {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin: 0;
+  }
+
+  .query-timing span {
+    padding: 0.42rem 0.65rem;
+    border-radius: 999px;
+    background: rgba(241, 245, 249, 0.9);
+    color: var(--muted-color, #475569);
+    font-size: 0.8rem;
+  }
+
+  .query-plan-details {
+    overflow: hidden;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 0.9rem;
+    background: var(--surface, #ffffff);
+  }
+
+  .query-plan-details summary {
+    padding: 1rem 1.15rem;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .query-plan-form {
+    display: grid;
+    gap: 1rem;
+    padding: 0 1.15rem 1.15rem;
+  }
+
+  .query-plan-textarea {
+    width: 100%;
+    min-height: 320px;
+    padding: 1rem;
+    box-sizing: border-box;
+    resize: vertical;
+    border: 1px solid var(--border-color, #cbd5e1);
+    border-radius: 0.8rem;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family:
+      "SFMono-Regular",
+      Consolas,
+      "Liberation Mono",
+      monospace;
+    font-size: 0.86rem;
+    line-height: 1.6;
+  }
+
+  @keyframes query-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes query-pulse {
+    0%,
+    80%,
+    100% {
+      opacity: 0.3;
+      transform: scale(0.8);
+    }
+
+    40% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @keyframes query-fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes query-fade-out {
+    from {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    to {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .query-composer,
+    .query-loading-panel,
+    .query-status {
+      transition: none;
+      animation-duration: 1ms;
+    }
+
+    .query-loader::after,
+    .query-loading-progress span {
+      animation-duration: 1ms;
+      animation-iteration-count: 1;
+    }
+  }
+
+  @media (max-width: 680px) {
+    .query-hero {
+      padding: 1.4rem;
+    }
+
+    .query-composer {
+      padding: 1.1rem;
+    }
+
+    .query-actions {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    .query-actions .button {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+</style>
+
+<div
+  id="query-workspace"
+  class="query-page"
+  aria-busy="false"
+>
+  <section class="query-hero">
+    <div class="query-hero-content">
+      <p class="eyebrow">QueryX AI Data Agent</p>
+
+      <h1>Interrogazione intelligente dei dati</h1>
+
+      <p class="query-hero-description">
+        Descrivi ciò che vuoi conoscere: QueryX analizzerà il catalogo,
+        costruirà un piano logico controllato e, quando richiesto,
+        interrogherà la sorgente dati appropriata.
+      </p>
+    </div>
+  </section>
+
+  {% if error %}
+    <div
+      class="query-status query-status-unanswerable"
+      role="alert"
+      data-query-status
+    >
+      <div class="query-status-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M12 8v5"></path>
+          <path d="M12 16h.01"></path>
+        </svg>
+      </div>
+
+      <div class="query-status-content">
+        <h2>Si è verificato un errore</h2>
+
+        <p>
+          <strong>{{ error.code }}</strong>: {{ error.message }}
+        </p>
+
+        {% if error.issues %}
+          <ul>
+            {% for issue in error.issues %}
+              <li>
+                <code>{{ issue.path }}</code>: {{ issue.message }}
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% if explanation_warning %}
+    <div
+      class="query-status query-status-warning"
+      role="alert"
+      data-query-status
+    >
+      <div class="query-status-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 3 2.8 19h18.4L12 3Z"></path>
+          <path d="M12 9v4"></path>
+          <path d="M12 16h.01"></path>
+        </svg>
+      </div>
+
+      <div class="query-status-content">
+        <h2>Avviso durante la spiegazione</h2>
+        <p>
+          <strong>{{ explanation_warning.code }}</strong>:
+          {{ explanation_warning.message }}
+        </p>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if classification == "ambiguous" %}
+    <section
+      class="query-status query-status-warning"
+      role="alert"
+      data-query-status
+    >
+      <div class="query-status-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="M9.8 9a2.4 2.4 0 0 1 4.6 1c0 1.7-2.4 2-2.4 3.7"></path>
+          <path d="M12 17h.01"></path>
+        </svg>
+      </div>
+
+      <div class="query-status-content">
+        <h2>Chiarimento necessario</h2>
+
+        <p>{{ clarification_question }}</p>
+
+        {% if reason %}
+          <p class="status-reason">{{ reason }}</p>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
+  {% if classification == "unanswerable" %}
+    <section
+      class="query-status query-status-unanswerable"
+      role="alert"
+      data-query-status
+    >
+      <div class="query-status-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="m9 9 6 6"></path>
+          <path d="m15 9-6 6"></path>
+        </svg>
+      </div>
+
+      <div class="query-status-content">
+        <h2>Richiesta non calcolabile</h2>
+
+        <p>
+          QueryX non dispone delle informazioni o delle relazioni necessarie
+          per calcolare questa richiesta.
+        </p>
+
+        {% if reason %}
+          <p class="status-reason">{{ reason }}</p>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
+  {% if generated %}
+    <div
+      class="query-status query-status-success"
+      role="status"
+      data-query-status
+    >
+      <div class="query-status-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <circle cx="12" cy="12" r="9"></circle>
+          <path d="m8 12 2.5 2.5L16 9"></path>
+        </svg>
+      </div>
+
+      <div class="query-status-content">
+        <h2>Piano generato correttamente</h2>
+        <p>
+          Il piano logico è stato costruito e validato rispetto al catalogo.
+        </p>
+      </div>
+    </div>
+  {% endif %}
+
+  <section class="query-interaction-shell">
+    <div
+      id="query-composer"
+      class="query-composer"
+    >
+      <div class="query-composer-heading">
+        <div class="query-composer-icon" aria-hidden="true">
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M4 5h16v11H8l-4 4V5Z"></path>
+            <path d="M8 9h8"></path>
+            <path d="M8 12h5"></path>
+          </svg>
+        </div>
+
+        <div>
+          <h2>Cosa vuoi sapere dai tuoi dati?</h2>
+
+          <p>
+            Formula una domanda completa indicando, quando utile,
+            la sorgente o il tipo di dato da analizzare.
+          </p>
+        </div>
+      </div>
+
+      <form
+        class="query-form"
+        method="post"
+        action="/ui/query/natural-language"
+        data-query-form
+      >
+        <input
+          type="hidden"
+          name="csrf_token"
+          value="{{ csrf_token }}"
+        >
+
+        <div class="query-textarea-wrapper">
+          <textarea
+            id="natural-language-question"
+            class="query-textarea"
+            name="question"
+            maxlength="2000"
+            required
+            autofocus
+            placeholder="Esempio: quanti ordini sono presenti nel database MySQL?"
+            aria-label="Domanda da inviare a QueryX"
+          >{{ question }}</textarea>
+
+          <span
+            class="query-character-count"
+            data-character-count
+          >
+            0 / 2000
+          </span>
+        </div>
+
+        <div
+          class="query-suggestions"
+          aria-label="Domande di esempio"
+        >
+          <button
+            class="query-suggestion"
+            type="button"
+            data-query-suggestion="Quanti ordini ci sono nel database MySQL?"
+          >
+            Totale ordini MySQL
+          </button>
+
+          <button
+            class="query-suggestion"
+            type="button"
+            data-query-suggestion="Quanti eventi MongoDB contengono almeno un articolo con quantità maggiore o uguale a 2?"
+          >
+            Eventi MongoDB con array
+          </button>
+
+          <button
+            class="query-suggestion"
+            type="button"
+            data-query-suggestion="Quali sono i cinque clienti con il maggior numero di ordini?"
+          >
+            Top clienti
+          </button>
+        </div>
+
+        <div class="query-actions">
+          <button
+            class="button secondary"
+            name="execute"
+            value="false"
+            type="submit"
+            data-loading-text="Generazione del piano in corso…"
+          >
+            Genera piano
+          </button>
+
+          <button
+            class="button"
+            name="execute"
+            value="true"
+            type="submit"
+            data-loading-text="Esecuzione della query e generazione della risposta in corso…"
+          >
+            Genera ed esegui
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div
+      id="query-loading"
+      class="query-loading-panel"
+      role="status"
+      aria-live="polite"
+      aria-hidden="true"
+    >
+      <div class="query-loading-content">
+        <div class="query-loader" aria-hidden="true">
+          <div class="query-loader-core">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M12 3v3"></path>
+              <path d="M12 18v3"></path>
+              <path d="m4.2 4.2 2.1 2.1"></path>
+              <path d="m17.7 17.7 2.1 2.1"></path>
+              <path d="M3 12h3"></path>
+              <path d="M18 12h3"></path>
+              <path d="m4.2 19.8 2.1-2.1"></path>
+              <path d="m17.7 6.3 2.1-2.1"></path>
+            </svg>
+          </div>
+        </div>
+
+        <div>
+          <h2>QueryX sta elaborando la richiesta</h2>
+
+          <p
+            class="query-loading-message"
+            data-loading-message
+          >
+            Generazione del piano in corso…
+          </p>
+        </div>
+
+        <div
+          class="query-loading-progress"
+          aria-hidden="true"
+        >
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  {% if generated %}
+    <div class="query-result-card">
+      <div class="query-result-heading">
+        <h2>Metriche di elaborazione</h2>
+
+        <p class="query-timing">
+          <span>
+            Planning:
+            {{ "%.2f"|format(planning_time_ms) }} ms
+          </span>
+
+          {% if execution_time_ms is not none %}
+            <span>
+              Esecuzione:
+              {{ "%.2f"|format(execution_time_ms) }} ms
+            </span>
+          {% endif %}
+
+          {% if explanation_time_ms is not none %}
+            <span>
+              Spiegazione:
+              {{ "%.2f"|format(explanation_time_ms) }} ms
+            </span>
+          {% endif %}
+        </p>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if answer and classification == "answerable" %}
+    <section class="query-result-card">
+      <div class="query-answer">
+        <p class="query-answer-label">Risposta QueryX</p>
+        <p class="query-answer-text">{{ answer }}</p>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if result %}
+    <section class="query-result-card">
+      <div class="query-result-heading">
+        <div>
+          <h2>Risultato dell’interrogazione</h2>
+
+          <p class="muted">
+            {{ result.row_count }} righe ·
+            {{ "%.2f"|format(result.execution_time_ms) }} ms
+
+            {% if result.truncated %}
+              · risultato troncato
+            {% endif %}
+          </p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="preview">
+          <thead>
+            <tr>
+              {% for column in result.columns %}
+                <th>{{ column }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+
+          <tbody>
+            {% for row in result.rows %}
+              <tr>
+                {% for value in row %}
+                  <td>
+                    {{ value|query_value if value is not none else "null" }}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if plan_json
+        and not hide_plan_editor
+        and classification not in ["ambiguous", "unanswerable"] %}
+    <details class="query-plan-details">
+      <summary>
+        Piano logico generato da QueryX
+      </summary>
+
+      <form
+        class="query-plan-form"
+        method="post"
+        action="/ui/query/validate"
+        data-query-form
+      >
+        <input
+          type="hidden"
+          name="csrf_token"
+          value="{{ csrf_token }}"
+        >
+
+        <textarea
+          class="query-plan-textarea"
+          name="plan_json"
+          required
+          aria-label="Piano logico JSON"
+        >{{ plan_json }}</textarea>
+
+        <div class="query-actions">
+          <button
+            class="button secondary"
+            formaction="/ui/query/validate"
+            type="submit"
+            data-loading-text="Validazione del piano in corso…"
+          >
+            Valida piano
+          </button>
+
+          <button
+            class="button"
+            formaction="/ui/query/execute"
+            type="submit"
+            data-loading-text="Esecuzione del piano in corso…"
+          >
+            Esegui piano
+          </button>
+        </div>
+      </form>
+    </details>
+  {% endif %}
+
+  {% if validation %}
+    <section class="query-result-card">
+      <div class="query-result-heading">
+        <div>
+          <h2>Schema previsto del risultato</h2>
+
+          <p class="muted">
+            Fingerprint:
+            <code>{{ validation.plan_fingerprint }}</code>
+          </p>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Colonna</th>
+              <th>Tipo</th>
+              <th>Nullable</th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {% for field in validation.output_schema %}
+              <tr>
+                <td>{{ field.name }}</td>
+                <td>{{ field.data_type }}</td>
+                <td>{{ "sì" if field.nullable else "no" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
 </div>
-<script src="/ui/static/queryx-query.js?v=2" defer></script>
+
+<script src="/ui/static/queryx-query.js?v=3" defer></script>
 {% endblock %}

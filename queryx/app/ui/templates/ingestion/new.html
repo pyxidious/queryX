@@ -1,22 +1,632 @@
 {% extends "base.html" %}
+
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Passaggio 1</p><h1>Importa dataset</h1><p>Upload locale CSV o Parquet, massimo {{ max_upload }} byte.</p></div></div>
-<div class="alert alert-info">QueryX non scarica il dataset. Scarica ed estrai localmente il dataset, quindi carica uno dei file CSV o Parquet. Gli archivi ZIP devono essere estratti prima dell’upload.</div>
-<form class="card form" action="/ui/ingestions" method="post" enctype="multipart/form-data">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>File CSV o Parquet<input type="file" name="file" accept=".csv,.parquet,text/csv,application/vnd.apache.parquet" required></label>
-  <label>Nome logico opzionale<input type="text" name="logical_name" maxlength="200" autocomplete="off"></label>
-  <label>Asset esistente opzionale<select name="asset_id"><option value="">Crea nuovo asset</option>{% for asset in assets %}<option value="{{ asset.id }}">{{ asset.name }} · {{ asset.short_id }}</option>{% endfor %}</select></label>
-  <details>
-    <summary>Provenienza del dataset — opzionale</summary>
-    <p class="muted">Metadata descrittivi dichiarati dall’utente; non attivano download e la licenza non viene verificata da QueryX.</p>
-    <label>Provider<select name="source_provider"><option value="manual" selected>manual</option><option value="kaggle">kaggle</option><option value="other">other</option></select></label>
-    <label>Riferimento o slug<input type="text" name="source_reference" maxlength="512" autocomplete="off"></label>
-    <label>Versione<input type="text" name="source_version" maxlength="128" autocomplete="off"></label>
-    <label>Titolo dataset<input type="text" name="dataset_title" maxlength="256" autocomplete="off"></label>
-    <label>Licenza dichiarata<input type="text" name="license_name" maxlength="128" autocomplete="off"></label>
-    <label>Note<textarea name="provenance_notes" maxlength="1000"></textarea></label>
-  </details>
-  <button class="button" type="submit">Carica e avvia</button>
-</form>
+<style>
+  .ingestion-page {
+    display: grid;
+    gap: 1.5rem;
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  .ingestion-hero {
+    position: relative;
+    overflow: hidden;
+    padding: 2rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.25rem;
+    background:
+      radial-gradient(
+        circle at top right,
+        rgba(14, 165, 233, 0.22),
+        transparent 34%
+      ),
+      linear-gradient(
+        135deg,
+        rgba(15, 23, 42, 0.99),
+        rgba(30, 41, 59, 0.96)
+      );
+    color: #ffffff;
+    box-shadow: 0 22px 50px rgba(15, 23, 42, 0.16);
+  }
+
+  .ingestion-hero::after {
+    content: "";
+    position: absolute;
+    right: -90px;
+    bottom: -125px;
+    width: 290px;
+    height: 290px;
+    border: 44px solid rgba(255, 255, 255, 0.04);
+    border-radius: 999px;
+    pointer-events: none;
+  }
+
+  .ingestion-hero-content {
+    position: relative;
+    z-index: 1;
+    max-width: 740px;
+  }
+
+  .ingestion-hero .eyebrow {
+    margin: 0 0 0.65rem;
+    color: #7dd3fc;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  .ingestion-hero h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: clamp(2rem, 4vw, 3.1rem);
+    line-height: 1.08;
+  }
+
+  .ingestion-hero p {
+    max-width: 720px;
+    margin: 1rem 0 0;
+    color: #cbd5e1;
+    line-height: 1.7;
+  }
+
+  .ingestion-info {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 1rem;
+    align-items: flex-start;
+    padding: 1.15rem 1.25rem;
+    border: 1px solid rgba(14, 165, 233, 0.3);
+    border-radius: 1rem;
+    background: rgba(240, 249, 255, 0.98);
+    color: #075985;
+  }
+
+  .ingestion-info-icon {
+    display: grid;
+    place-items: center;
+    width: 42px;
+    height: 42px;
+    border-radius: 0.8rem;
+    background: rgba(14, 165, 233, 0.12);
+    color: #0284c7;
+  }
+
+  .ingestion-info-icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .ingestion-info h2 {
+    margin: 0;
+    font-size: 1rem;
+  }
+
+  .ingestion-info p {
+    margin: 0.35rem 0 0;
+    line-height: 1.6;
+  }
+
+  .ingestion-form-card {
+    padding: 1.5rem;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 1.15rem;
+    background: var(--surface, #ffffff);
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+  }
+
+  .ingestion-form-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+    margin-bottom: 1.4rem;
+  }
+
+  .ingestion-form-icon {
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border-radius: 0.9rem;
+    background: linear-gradient(135deg, #0284c7, #2563eb);
+    color: #ffffff;
+    box-shadow: 0 10px 22px rgba(2, 132, 199, 0.2);
+  }
+
+  .ingestion-form-icon svg {
+    width: 24px;
+    height: 24px;
+  }
+
+  .ingestion-form-heading h2 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+
+  .ingestion-form-heading p {
+    margin: 0.35rem 0 0;
+    color: var(--muted-color, #64748b);
+    line-height: 1.55;
+  }
+
+  .ingestion-form {
+    display: grid;
+    gap: 1.15rem;
+  }
+
+  .ingestion-field {
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .ingestion-label {
+    color: var(--text-color, #334155);
+    font-size: 0.9rem;
+    font-weight: 650;
+  }
+
+  .ingestion-help {
+    color: var(--muted-color, #64748b);
+    font-size: 0.82rem;
+    line-height: 1.5;
+  }
+
+  .ingestion-form input,
+  .ingestion-form select,
+  .ingestion-form textarea {
+    width: 100%;
+    padding: 0.72rem 0.85rem;
+    box-sizing: border-box;
+    border: 1px solid var(--border-color, #cbd5e1);
+    border-radius: 0.8rem;
+    background: var(--surface, #ffffff);
+    color: var(--text-color, #0f172a);
+    font: inherit;
+    outline: none;
+    transition:
+      border-color 170ms ease,
+      box-shadow 170ms ease;
+  }
+
+  .ingestion-form input,
+  .ingestion-form select {
+    min-height: 45px;
+  }
+
+  .ingestion-form textarea {
+    min-height: 120px;
+    resize: vertical;
+  }
+
+  .ingestion-form input:focus,
+  .ingestion-form select:focus,
+  .ingestion-form textarea:focus {
+    border-color: #0284c7;
+    box-shadow: 0 0 0 4px rgba(2, 132, 199, 0.12);
+  }
+
+  .ingestion-file-zone {
+    position: relative;
+    display: grid;
+    justify-items: center;
+    gap: 0.7rem;
+    padding: 2rem 1.25rem;
+    border: 2px dashed #94a3b8;
+    border-radius: 1rem;
+    background: rgba(248, 250, 252, 0.75);
+    text-align: center;
+    cursor: pointer;
+    transition:
+      border-color 170ms ease,
+      background 170ms ease,
+      transform 170ms ease;
+  }
+
+  .ingestion-file-zone:hover,
+  .ingestion-file-zone.is-dragging {
+    transform: translateY(-1px);
+    border-color: #0284c7;
+    background: rgba(240, 249, 255, 0.92);
+  }
+
+  .ingestion-file-zone svg {
+    width: 38px;
+    height: 38px;
+    color: #0284c7;
+  }
+
+  .ingestion-file-zone strong {
+    font-size: 1rem;
+  }
+
+  .ingestion-file-zone span {
+    color: var(--muted-color, #64748b);
+    font-size: 0.87rem;
+  }
+
+  .ingestion-file-zone input[type="file"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .selected-file {
+    display: none;
+    align-items: center;
+    gap: 0.65rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.75rem;
+    background: rgba(236, 253, 245, 0.95);
+    color: #166534;
+    font-size: 0.88rem;
+  }
+
+  .selected-file.is-visible {
+    display: flex;
+  }
+
+  .selected-file svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .provenance-details {
+    overflow: hidden;
+    border: 1px solid var(--border-color, #dbe3ec);
+    border-radius: 0.9rem;
+    background: rgba(248, 250, 252, 0.6);
+  }
+
+  .provenance-details summary {
+    padding: 1rem 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .provenance-details-content {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+    padding: 0 1.1rem 1.1rem;
+  }
+
+  .provenance-details-content .full-width {
+    grid-column: 1 / -1;
+  }
+
+  .ingestion-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 0.25rem;
+  }
+
+  @media (max-width: 720px) {
+    .ingestion-hero {
+      padding: 1.4rem;
+    }
+
+    .provenance-details-content {
+      grid-template-columns: 1fr;
+    }
+
+    .provenance-details-content .full-width {
+      grid-column: auto;
+    }
+
+    .ingestion-actions .button {
+      width: 100%;
+      justify-content: center;
+    }
+  }
+</style>
+
+<div class="ingestion-page">
+  <section class="ingestion-hero">
+    <div class="ingestion-hero-content">
+      <p class="eyebrow">QueryX Data Ingestion</p>
+
+      <h1>Importa un dataset</h1>
+
+      <p>
+        Carica un file CSV o Parquet e registralo nel catalogo QueryX.
+        Il file verrà analizzato, profilato e preparato
+        per le successive interrogazioni.
+      </p>
+    </div>
+  </section>
+
+  <div class="ingestion-info" role="note">
+    <div class="ingestion-info-icon" aria-hidden="true">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+      >
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M12 11v5"></path>
+        <path d="M12 8h.01"></path>
+      </svg>
+    </div>
+
+    <div>
+      <h2>Preparazione del file</h2>
+
+      <p>
+        QueryX accetta file CSV e Parquet fino a
+        <strong>{{ max_upload }} byte</strong>.
+        Gli archivi ZIP devono essere estratti prima del caricamento.
+      </p>
+    </div>
+  </div>
+
+  <section class="ingestion-form-card">
+    <div class="ingestion-form-heading">
+      <div class="ingestion-form-icon" aria-hidden="true">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path d="M12 16V4"></path>
+          <path d="m7 9 5-5 5 5"></path>
+          <path d="M5 20h14"></path>
+        </svg>
+      </div>
+
+      <div>
+        <h2>Configura il caricamento</h2>
+
+        <p>
+          Seleziona il file e indica come deve essere registrato
+          all’interno del catalogo.
+        </p>
+      </div>
+    </div>
+
+    <form
+      class="ingestion-form"
+      action="/ui/ingestions"
+      method="post"
+      enctype="multipart/form-data"
+      data-ingestion-form
+    >
+      <input
+        type="hidden"
+        name="csrf_token"
+        value="{{ csrf_token }}"
+      >
+
+      <div class="ingestion-field">
+        <span class="ingestion-label">File CSV o Parquet</span>
+
+        <label
+          class="ingestion-file-zone"
+          for="dataset-file"
+          data-file-zone
+        >
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            aria-hidden="true"
+          >
+            <path d="M12 16V4"></path>
+            <path d="m7 9 5-5 5 5"></path>
+            <path d="M5 20h14"></path>
+          </svg>
+
+          <strong>Seleziona un file dal computer</strong>
+
+          <span>
+            CSV o Parquet · massimo {{ max_upload }} byte
+          </span>
+
+          <input
+            id="dataset-file"
+            type="file"
+            name="file"
+            accept=".csv,.parquet,text/csv,application/vnd.apache.parquet"
+            required
+            data-file-input
+          >
+        </label>
+
+        <div class="selected-file" data-selected-file>
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            aria-hidden="true"
+          >
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="m8 12 2.5 2.5L16 9"></path>
+          </svg>
+
+          <span data-selected-file-name></span>
+        </div>
+      </div>
+
+      <label class="ingestion-field">
+        <span class="ingestion-label">Nome logico</span>
+
+        <input
+          type="text"
+          name="logical_name"
+          maxlength="200"
+          autocomplete="off"
+          placeholder="Esempio: ordini_ecommerce"
+        >
+
+        <span class="ingestion-help">
+          Se omesso, QueryX ricaverà il nome dal file caricato.
+        </span>
+      </label>
+
+      <label class="ingestion-field">
+        <span class="ingestion-label">Asset di destinazione</span>
+
+        <select name="asset_id">
+          <option value="">Crea un nuovo asset</option>
+
+          {% for asset in assets %}
+            <option value="{{ asset.id }}">
+              {{ asset.name }} · {{ asset.short_id }}
+            </option>
+          {% endfor %}
+        </select>
+
+        <span class="ingestion-help">
+          Seleziona un asset esistente per aggiungere una nuova versione.
+        </span>
+      </label>
+
+      <details class="provenance-details">
+        <summary>Provenienza del dataset</summary>
+
+        <div class="provenance-details-content">
+          <p class="ingestion-help full-width">
+            Questi metadati sono dichiarati dall’utente.
+            QueryX non effettua download e non verifica automaticamente
+            la licenza indicata.
+          </p>
+
+          <label class="ingestion-field">
+            <span class="ingestion-label">Provider</span>
+
+            <select name="source_provider">
+              <option value="manual" selected>Manuale</option>
+              <option value="kaggle">Kaggle</option>
+              <option value="other">Altro</option>
+            </select>
+          </label>
+
+          <label class="ingestion-field">
+            <span class="ingestion-label">Riferimento o slug</span>
+
+            <input
+              type="text"
+              name="source_reference"
+              maxlength="512"
+              autocomplete="off"
+              placeholder="Esempio: owner/dataset-name"
+            >
+          </label>
+
+          <label class="ingestion-field">
+            <span class="ingestion-label">Versione</span>
+
+            <input
+              type="text"
+              name="source_version"
+              maxlength="128"
+              autocomplete="off"
+              placeholder="Esempio: 1.0"
+            >
+          </label>
+
+          <label class="ingestion-field">
+            <span class="ingestion-label">Titolo del dataset</span>
+
+            <input
+              type="text"
+              name="dataset_title"
+              maxlength="256"
+              autocomplete="off"
+            >
+          </label>
+
+          <label class="ingestion-field">
+            <span class="ingestion-label">Licenza dichiarata</span>
+
+            <input
+              type="text"
+              name="license_name"
+              maxlength="128"
+              autocomplete="off"
+              placeholder="Esempio: CC BY 4.0"
+            >
+          </label>
+
+          <label class="ingestion-field full-width">
+            <span class="ingestion-label">Note</span>
+
+            <textarea
+              name="provenance_notes"
+              maxlength="1000"
+              placeholder="Aggiungi informazioni utili sulla provenienza del dataset."
+            ></textarea>
+          </label>
+        </div>
+      </details>
+
+      <div class="ingestion-actions">
+        <button class="button" type="submit">
+          Carica e avvia ingestion
+        </button>
+      </div>
+    </form>
+  </section>
+</div>
+
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const fileInput = document.querySelector("[data-file-input]");
+    const fileZone = document.querySelector("[data-file-zone]");
+    const selectedFile = document.querySelector("[data-selected-file]");
+    const selectedFileName = document.querySelector(
+      "[data-selected-file-name]"
+    );
+
+    const showSelectedFile = () => {
+      const file = fileInput?.files?.[0];
+
+      if (!file || !selectedFile || !selectedFileName) {
+        return;
+      }
+
+      const sizeMb = (file.size / 1024 / 1024).toFixed(2);
+
+      selectedFileName.textContent =
+        `${file.name} · ${sizeMb} MB`;
+
+      selectedFile.classList.add("is-visible");
+    };
+
+    fileInput?.addEventListener("change", showSelectedFile);
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+      fileZone?.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        fileZone.classList.add("is-dragging");
+      });
+    });
+
+    ["dragleave", "drop"].forEach((eventName) => {
+      fileZone?.addEventListener(eventName, (event) => {
+        event.preventDefault();
+        fileZone.classList.remove("is-dragging");
+      });
+    });
+
+    fileZone?.addEventListener("drop", (event) => {
+      const files = event.dataTransfer?.files;
+
+      if (!files?.length || !fileInput) {
+        return;
+      }
+
+      fileInput.files = files;
+      showSelectedFile();
+    });
+  });
+</script>
 {% endblock %}
