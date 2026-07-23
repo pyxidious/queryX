@@ -1251,6 +1251,146 @@ def test_natural_language_quantity_by_sku_rejects_amount_and_retries_once(
     assert plan.filters == [] and plan.array_matches == []
 
 
+def test_natural_language_english_quantity_by_sku_retries_wrong_amount_plan(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    corrected = _items_plan(
+        assets["events"],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+        group_by=[{
+            "source_alias": "events",
+            "field": "items[].sku",
+        }],
+    )
+    client = _SequencedNaturalClient(
+        _events_amount_metric_plan(assets["events"], "sum", "total"),
+        corrected,
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="In MongoDB events, sum the item quantity for each SKU"
+    ))
+
+    assert len(client.planning_calls) == 2
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.unwinds[0].field == "items"
+    assert response.normalized_plan.group_by[0].field == "items[].sku"
+    assert response.normalized_plan.aggregations[0].field == "items[].quantity"
+
+
+def test_natural_language_filtered_item_quantity_sum_requires_array_match(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    wrong = _items_plan(
+        assets["events"],
+        projections=[],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+    )
+    corrected = {
+        **wrong,
+        "array_matches": [{
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{
+                "field": "quantity",
+                "operator": "gte",
+                "value": 2,
+            }],
+        }],
+    }
+    client = _SequencedNaturalClient(wrong, corrected)
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question=(
+            "Qual è la quantità totale degli articoli negli eventi MongoDB "
+            "con quantità maggiore o uguale a 2?"
+        )
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert len(client.planning_calls) == 2
+    assert plan.projections == [] and plan.group_by == []
+    assert plan.unwinds[0].field == "items"
+    assert plan.array_matches[0].field == "items"
+    assert plan.array_matches[0].predicates[0].field == "quantity"
+    assert plan.array_matches[0].predicates[0].operator.value == "gte"
+    assert plan.array_matches[0].predicates[0].value == 2
+    assert plan.aggregations[0].field == "items[].quantity"
+
+
+def test_natural_language_correct_filtered_sum_and_recent_top_k_need_no_retry(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    filtered_sum = _items_plan(
+        assets["events"],
+        projections=[],
+        array_matches=[{
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{
+                "field": "quantity",
+                "operator": "gte",
+                "value": 2,
+            }],
+        }],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+    )
+    recent = {
+        "sources": [{
+            "alias": "events",
+            "asset_id": assets["events"].asset_id,
+        }],
+        "projections": [
+            {"source_alias": "events", "field": field}
+            for field in ("type", "user_id", "created_at")
+        ],
+        "filters": [],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [{"field": "created_at", "direction": "desc"}],
+        "limit": 5,
+    }
+    client = _SequencedNaturalClient(filtered_sum, recent)
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+
+    filtered_response = service.translate(NaturalLanguageQueryRequest(
+        question=(
+            "Qual è la quantità totale degli articoli negli eventi MongoDB "
+            "con quantità >= 2?"
+        )
+    ))
+    recent_response = service.translate(NaturalLanguageQueryRequest(
+        question="Mostra i 5 eventi MongoDB più recenti con type, user_id e created_at"
+    ))
+
+    assert filtered_response.normalized_plan is not None
+    assert recent_response.normalized_plan is not None
+    assert len(client.planning_calls) == 2
+
+
 def test_natural_language_profiles_by_role_requires_unwind_and_grouping(
     mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:
@@ -1298,6 +1438,27 @@ def test_natural_language_correct_profiles_by_role_plan_needs_no_retry(
     assert response.normalized_plan is not None
     assert response.normalized_plan.group_by[0].field == "roles[]"
     assert len(client.planning_calls) == 1
+
+
+def test_natural_language_english_profiles_per_role_retries_global_count(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _profiles_count_plan(assets["profiles"]),
+        _profiles_by_role_plan(assets["profiles"]),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="For each role in the MongoDB profiles roles array, count the profiles"
+    ))
+
+    assert len(client.planning_calls) == 2
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.unwinds[0].field == "roles"
+    assert response.normalized_plan.group_by[0].field == "roles[]"
 
 
 def test_natural_language_retries_mongodb_source_alias_typo_once(
@@ -1516,7 +1677,7 @@ def test_natural_language_mongodb_profiles_count_discards_events_fragments(
     assert [asset["logical_name"] for asset in catalog["assets"]] == ["profiles"]
 
 
-def test_natural_language_mongodb_count_rejects_unrequested_row_shape(
+def test_natural_language_mongodb_global_count_canonicalizes_unrequested_shape(
     mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:
     settings, _, assets = mongodb_profiles_env
@@ -1528,8 +1689,7 @@ def test_natural_language_mongodb_count_rejects_unrequested_row_shape(
         "value": True,
     }]
     invalid["order_by"] = [{"field": "profiles", "direction": "desc"}]
-    corrected = _profiles_count_plan(assets["profiles"])
-    client = _SequencedNaturalClient(invalid, corrected)
+    client = _SequencedNaturalClient(invalid)
 
     response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
         NaturalLanguageQueryRequest(
@@ -1537,12 +1697,50 @@ def test_natural_language_mongodb_count_rejects_unrequested_row_shape(
         )
     )
 
-    assert response.normalized_plan is not None
-    assert response.normalized_plan.projections == []
-    assert response.normalized_plan.filters == []
-    assert response.normalized_plan.order_by == []
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.projections == [] and plan.filters == []
+    assert plan.group_by == [] and plan.order_by == []
+    assert plan.unwinds == [] and plan.array_matches == []
+    assert plan.limit is None
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "_id", "profiles")
+    ]
+    assert len(client.planning_calls) == 1
+
+
+def test_natural_language_mongodb_global_count_canonicalizes_retry_shape(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    initial = _newsletter_plan(assets["profiles"], True)
+    retry = _profiles_count_plan(assets["profiles"])
+    retry["filters"] = [{
+        "source_alias": "profiles",
+        "field": "preferences.newsletter",
+        "operator": "eq",
+        "value": True,
+    }]
+    client = _SequencedNaturalClient(initial, retry)
+
+    response = NaturalLanguageQueryService(settings, client=client).translate(  # type: ignore[arg-type]
+        NaturalLanguageQueryRequest(
+            question="Quanti profili ci sono nel database MongoDB?"
+        )
+    )
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.projections == [] and plan.filters == []
+    assert plan.group_by == [] and plan.order_by == []
+    assert plan.unwinds == [] and plan.array_matches == []
+    assert plan.limit is None
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "_id", "profiles")
+    ]
+    assert len(client.planning_calls) == 2
     feedback = json.loads(client.planning_calls[1][-1]["content"])
-    assert feedback["validation_code"] == "mongodb_count_intent_mismatch"
+    assert feedback["validation_code"] == "metric_aggregation_mismatch"
 
 
 def test_natural_language_mongodb_requests_are_isolated(
@@ -1712,6 +1910,77 @@ def test_natural_language_mongodb_events_count_per_type_requires_group_by(
     assert plan.filters == [] and plan.order_by == []
     feedback = json.loads(client.planning_calls[1][-1]["content"])
     assert feedback["validation_code"] == "mongodb_count_intent_mismatch"
+
+
+def test_natural_language_mongodb_group_documents_by_type_and_count_them(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _events_count_plan(assets["events"]),
+        _events_count_plan(assets["events"], grouped=True),
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Raggruppa per type i documenti events e contali"
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert len(client.planning_calls) == 2
+    assert [item.field for item in plan.projections] == ["type"]
+    assert [item.field for item in plan.group_by] == ["type"]
+    assert [(item.function.value, item.field, item.alias) for item in plan.aggregations] == [
+        ("count", "_id", "events")
+    ]
+    assert plan.filters == [] and plan.order_by == []
+
+
+def test_natural_language_mongodb_recent_events_top_k_is_exact(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    wrong = {
+        "sources": [{
+            "alias": "events",
+            "asset_id": assets["events"].asset_id,
+        }],
+        "projections": [{"source_alias": "events", "field": "type"}],
+        "filters": [],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+        "limit": 5,
+    }
+    corrected = {
+        **wrong,
+        "projections": [
+            {"source_alias": "events", "field": field}
+            for field in ("type", "user_id", "created_at")
+        ],
+        "order_by": [{"field": "created_at", "direction": "desc"}],
+    }
+    client = _SequencedNaturalClient(wrong, corrected)
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Mostra i 5 eventi MongoDB più recenti con type, user_id e created_at"
+    ))
+
+    plan = response.normalized_plan
+    assert plan is not None
+    assert len(client.planning_calls) == 2
+    assert [item.field for item in plan.projections] == [
+        "type", "user_id", "created_at"
+    ]
+    assert [(item.field, item.direction) for item in plan.order_by] == [
+        ("created_at", "desc")
+    ]
+    assert plan.limit == 5
+    assert plan.filters == [] and plan.aggregations == [] and plan.group_by == []
 
 
 def test_natural_language_mongodb_total_count_is_distinct_from_grouped_count(

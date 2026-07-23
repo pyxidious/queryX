@@ -219,6 +219,34 @@ def _mongodb(settings: Settings) -> dict[str, Any]:
                 ]
             )
         )
+        filtered_quantity = list(
+            database.events.aggregate(
+                [
+                    {"$match": {"items": {"$elemMatch": {"quantity": {"$gte": 2}}}}},
+                    {"$unwind": "$items"},
+                    {"$match": {"items.quantity": {"$gte": 2}}},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "quantity": {"$sum": "$items.quantity"},
+                        }
+                    },
+                ]
+            )
+        )
+        if not filtered_quantity:
+            raise GroundTruthError(
+                "MongoDB events contain no item quantity greater than or equal to 2."
+            )
+        profiles_by_role = list(
+            database.profiles.aggregate(
+                [
+                    {"$unwind": "$roles"},
+                    {"$group": {"_id": "$roles", "profiles": {"$sum": 1}}},
+                    {"$sort": {"_id": 1}},
+                ]
+            )
+        )
         return {
             "profiles_count": int(database.profiles.count_documents({})),
             "events_by_type": [
@@ -229,6 +257,13 @@ def _mongodb(settings: Settings) -> dict[str, Any]:
             "quantity_by_sku": [
                 [str(item["_id"]), int(item["quantity"])]
                 for item in quantity_by_sku
+            ],
+            "filtered_quantity_gte_2_sum": int(
+                filtered_quantity[0]["quantity"]
+            ),
+            "profiles_by_role": [
+                [str(item["_id"]), int(item["profiles"])]
+                for item in profiles_by_role
             ],
         }
     except GroundTruthError:
@@ -356,8 +391,26 @@ def generate(settings: Settings) -> dict[str, Any]:
         "mongodb_events_item_quantity_count": {
             "rows": [[mongodb["events_with_quantity_gte_2"]]]
         },
+        "mongodb_events_item_quantity_count_variant": {
+            "rows": [[mongodb["events_with_quantity_gte_2"]]]
+        },
         "mongodb_quantity_by_sku": {
             "rows": mongodb["quantity_by_sku"],
+            "unordered": True,
+        },
+        "mongodb_quantity_by_sku_variant": {
+            "rows": mongodb["quantity_by_sku"],
+            "unordered": True,
+        },
+        "mongodb_item_quantity_gte_2_sum": {
+            "rows": [[mongodb["filtered_quantity_gte_2_sum"]]]
+        },
+        "mongodb_profiles_by_role": {
+            "rows": mongodb["profiles_by_role"],
+            "unordered": True,
+        },
+        "mongodb_profiles_by_role_variant": {
+            "rows": mongodb["profiles_by_role"],
             "unordered": True,
         },
     }

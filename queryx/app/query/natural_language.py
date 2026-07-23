@@ -347,9 +347,28 @@ class NaturalLanguageQueryService:
                     )
                 except (QueryValidationError, _PlanningSemanticError) as retry_exc:
                     self._log_rejected_plan(retry_exc.code, candidate)
-                    raise self._invalid_plan_error(
-                        retry_exc, candidate
-                    ) from retry_exc
+                    repaired_retry_candidate = self._canonicalize_grouped_retry(
+                        candidate, retry_exc.code, question, context
+                    )
+                    if repaired_retry_candidate == candidate:
+                        raise self._invalid_plan_error(
+                            retry_exc, candidate
+                        ) from retry_exc
+                    candidate = repaired_retry_candidate
+                    try:
+                        validation = self._validate_candidate_semantics(
+                            candidate, question, context
+                        )
+                    except (
+                        QueryValidationError,
+                        _PlanningSemanticError,
+                    ) as repaired_retry_exc:
+                        self._log_rejected_plan(
+                            repaired_retry_exc.code, candidate
+                        )
+                        raise self._invalid_plan_error(
+                            repaired_retry_exc, candidate
+                        ) from repaired_retry_exc
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
         answer: str | None = None
@@ -753,6 +772,12 @@ class NaturalLanguageQueryService:
                         or len(projected_fields) != len(set(projected_fields))
                     ):
                         raise _PlanningSemanticError("mongodb_row_projection_mismatch")
+                if requirements.get("strict_mongodb_recent_top_k") and (
+                    candidate.get("unwinds") or candidate.get("array_matches")
+                ):
+                    raise _PlanningSemanticError(
+                        "mongodb_events_recent_top_k_mismatch"
+                    )
             array_shape_code = requirements.get("mongodb_array_shape_code")
             if (
                 isinstance(array_shape_code, str)
@@ -829,6 +854,13 @@ class NaturalLanguageQueryService:
                         candidate.get("order_by")
                         and not requirements.get("ordering_requested")
                     )
+                    or (
+                        requirements.get("strict_mongodb_no_array_ops")
+                        and (
+                            candidate.get("unwinds")
+                            or candidate.get("array_matches")
+                        )
+                    )
                 ):
                     raise _PlanningSemanticError("mongodb_count_intent_mismatch")
             if requirements.get("strict_mongodb_scalar_aggregation"):
@@ -858,9 +890,10 @@ class NaturalLanguageQueryService:
         requirements: dict[str, Any],
     ) -> bool:
         unwind = requirements["unwind"]
-        projection = requirements["projection"]
         aggregation = requirements["aggregation"]
-        group_by = requirements["group_by"]
+        projection = requirements.get("projection")
+        group_by = requirements.get("group_by")
+        array_match = requirements.get("array_match")
 
         def one(section: str) -> dict[str, Any] | None:
             values = candidate.get(section, [])
@@ -874,27 +907,62 @@ class NaturalLanguageQueryService:
         candidate_projection = one("projections")
         candidate_aggregation = one("aggregations")
         candidate_group_by = one("group_by")
+        candidate_array_match = one("array_matches")
+        projection_matches = (
+            not candidate.get("projections")
+            if projection is None
+            else (
+                candidate_projection is not None
+                and candidate_projection.get("source_alias") == source_alias
+                and candidate_projection.get("field") == projection["field"]
+                and candidate_projection.get("alias") == projection["alias"]
+                and candidate_projection.get("transform") is None
+            )
+        )
+        group_by_matches = (
+            not candidate.get("group_by")
+            if group_by is None
+            else (
+                candidate_group_by is not None
+                and candidate_group_by.get("source_alias") == source_alias
+                and candidate_group_by.get("field") == group_by["field"]
+                and candidate_group_by.get("transform") is None
+            )
+        )
+        array_match_matches = not candidate.get("array_matches")
+        if array_match is not None:
+            predicates = (
+                candidate_array_match.get("predicates", [])
+                if candidate_array_match is not None
+                else []
+            )
+            expected_predicate = array_match["predicate"]
+            array_match_matches = (
+                candidate_array_match is not None
+                and candidate_array_match.get("source_alias") == source_alias
+                and candidate_array_match.get("field") == array_match["field"]
+                and len(predicates) == 1
+                and isinstance(predicates[0], dict)
+                and predicates[0].get("field") == expected_predicate["field"]
+                and predicates[0].get("operator") == expected_predicate["operator"]
+                and NaturalLanguageQueryService._semantic_values_equal(
+                    predicates[0].get("value"), expected_predicate["value"]
+                )
+            )
         return (
             isinstance(source_alias, str)
             and candidate_unwind is not None
             and candidate_unwind.get("source_alias") == source_alias
             and candidate_unwind.get("field") == unwind["field"]
             and not candidate_unwind.get("preserve_null_and_empty_arrays", False)
-            and candidate_projection is not None
-            and candidate_projection.get("source_alias") == source_alias
-            and candidate_projection.get("field") == projection["field"]
-            and candidate_projection.get("alias") == projection["alias"]
-            and candidate_projection.get("transform") is None
+            and projection_matches
             and candidate_aggregation is not None
             and candidate_aggregation.get("function") == aggregation["function"]
             and candidate_aggregation.get("source_alias") == source_alias
             and candidate_aggregation.get("field") == aggregation["field"]
             and candidate_aggregation.get("alias") == aggregation["alias"]
-            and candidate_group_by is not None
-            and candidate_group_by.get("source_alias") == source_alias
-            and candidate_group_by.get("field") == group_by["field"]
-            and candidate_group_by.get("transform") is None
-            and not candidate.get("array_matches")
+            and group_by_matches
+            and array_match_matches
             and not candidate.get("filters")
             and not candidate.get("order_by")
         )
@@ -977,6 +1045,10 @@ class NaturalLanguageQueryService:
         question: str,
         context: dict[str, Any],
     ) -> dict[str, Any]:
+        if validation_code == "mongodb_count_intent_mismatch":
+            return self._canonicalize_mongodb_global_count(
+                candidate, question, context
+            )
         if validation_code != "invalid_group_by":
             return candidate
 
@@ -1125,6 +1197,98 @@ class NaturalLanguageQueryService:
         )
         return canonical
 
+    def _canonicalize_mongodb_global_count(
+        self,
+        candidate: dict[str, Any],
+        question: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        requirements = self._semantic_requirements(question, context)
+        aggregation = requirements.get("aggregation")
+        asset_id = requirements.get("asset_id")
+        if not (
+            requirements.get("intent") == "count"
+            and requirements.get("strict_mongodb_count_shape") is True
+            and isinstance(asset_id, str)
+            and isinstance(aggregation, dict)
+            and aggregation.get("function") == "count"
+            and isinstance(aggregation.get("field"), str)
+            and isinstance(aggregation.get("alias"), str)
+            and requirements.get("filter") is None
+            and requirements.get("group_by") is None
+            and not requirements.get("ordering_requested")
+            and requirements.get("mongodb_array_shape_code") is None
+        ):
+            logger.info(
+                "Skipped MongoDB global-count canonicalization "
+                "reason=non_global_or_ambiguous_intent"
+            )
+            return candidate
+
+        selected_asset = next(
+            (
+                asset
+                for asset in context.get("assets", [])
+                if isinstance(asset, dict) and asset.get("asset_id") == asset_id
+            ),
+            None,
+        )
+        if not (
+            isinstance(selected_asset, dict)
+            and selected_asset.get("backend") == "mongodb"
+            and aggregation["field"]
+            in {
+                str(field.get("name"))
+                for field in selected_asset.get("fields", [])
+                if isinstance(field, dict)
+            }
+        ):
+            logger.info(
+                "Skipped MongoDB global-count canonicalization "
+                "reason=asset_or_count_field_not_catalogued"
+            )
+            return candidate
+
+        sources = candidate.get("sources", [])
+        if (
+            len(sources) != 1
+            or not isinstance(sources[0], dict)
+            or sources[0].get("asset_id") != asset_id
+            or not isinstance(sources[0].get("alias"), str)
+        ):
+            logger.info(
+                "Skipped MongoDB global-count canonicalization "
+                "reason=unsupported_source_shape"
+            )
+            return candidate
+
+        source = sources[0]
+        source_alias = source["alias"]
+        canonical = {
+            **candidate,
+            "sources": [source],
+            "joins": [],
+            "projections": [],
+            "filters": [],
+            "aggregations": [{
+                "function": "count",
+                "source_alias": source_alias,
+                "field": aggregation["field"],
+                "alias": aggregation["alias"],
+            }],
+            "group_by": [],
+            "unwinds": [],
+            "array_matches": [],
+            "order_by": [],
+            "limit": None,
+        }
+        logger.info(
+            "Canonicalized MongoDB global count source_alias=%s field=%s alias=%s",
+            source_alias,
+            aggregation["field"],
+            aggregation["alias"],
+        )
+        return canonical
 
     def _retry_invalid_plan(
         self,
@@ -1183,6 +1347,24 @@ class NaturalLanguageQueryService:
                 "profiles-by-role count. Unwind exactly roles; project roles[] as role; "
                 "group by roles[]; count _id as profiles. Do not use array_matches, "
                 "filters or extra fields. Return only the corrected plan object."
+            )
+        elif validation_code == "mongodb_filtered_item_quantity_sum_mismatch":
+            instruction = (
+                "Correct only the MongoDB LogicalQueryPlan for the catalog-scoped "
+                "filtered item-quantity sum. Unwind exactly items; add exactly one "
+                "array_match on items with the quantity predicate from "
+                "semantic_requirements; sum items[].quantity as quantity. Do not "
+                "project or group fields, do not count documents, and do not use "
+                "properties.amount, filters or order_by. Return only the corrected "
+                "plan object."
+            )
+        elif validation_code == "mongodb_events_recent_top_k_mismatch":
+            instruction = (
+                "Correct only the MongoDB row-returning LogicalQueryPlan from "
+                "semantic_requirements. Project exactly type, user_id and created_at; "
+                "order by the created_at output descending; apply the requested bounded "
+                "limit; use no filters, aggregations, grouping or array operations. "
+                "Return only the corrected plan object."
             )
         semantic_requirements = self._semantic_requirements(question, context)
         if (
@@ -1788,10 +1970,16 @@ class NaturalLanguageQueryService:
                     "alias": asset["logical_name"],
                 }
                 requirements["strict_mongodb_count_shape"] = True
+                if (
+                    {"roles", "roles[]"}.issubset(fields)
+                    and not NaturalLanguageQueryService._count_per_role_intent(
+                        normalized
+                    )
+                ):
+                    requirements["strict_mongodb_no_array_ops"] = True
             if (
-                asset["logical_name"].casefold() == "events"
-                and "type" in fields
-                and re.search(r"\bper\s+tipo\b", normalized)
+                "type" in fields
+                and NaturalLanguageQueryService._count_per_type_intent(normalized)
             ):
                 requirements["group_by"] = {"field": "type"}
             user_filter = NaturalLanguageQueryService._mongodb_event_user_filter(
@@ -1836,6 +2024,57 @@ class NaturalLanguageQueryService:
                         "mongodb_quantity_by_sku_mismatch"
                     ),
                 })
+            filtered_quantity = (
+                NaturalLanguageQueryService._filtered_item_quantity_sum(
+                    normalized
+                )
+            )
+            if (
+                intent != "count"
+                and {"items", "items[]", "items[].quantity"}.issubset(fields)
+                and filtered_quantity is not None
+                and not requirements.get("mongodb_array_shape_code")
+            ):
+                requirements.update({
+                    "unwind": {"field": "items"},
+                    "projection": None,
+                    "aggregation": {
+                        "function": "sum",
+                        "field": "items[].quantity",
+                        "alias": "quantity",
+                    },
+                    "group_by": None,
+                    "array_match": {
+                        "field": "items",
+                        "predicate": {
+                            "field": "quantity",
+                            "operator": "gte",
+                            "value": filtered_quantity,
+                        },
+                    },
+                    "mongodb_array_shape_code": (
+                        "mongodb_filtered_item_quantity_sum_mismatch"
+                    ),
+                })
+            if (
+                intent == "row_returning"
+                and {"type", "user_id", "created_at"}.issubset(fields)
+                and NaturalLanguageQueryService._recent_events_intent(normalized)
+            ):
+                requested_limit = NaturalLanguageQueryService._requested_limit(
+                    normalized
+                )
+                if requested_limit is not None:
+                    requirements.update({
+                        "strict_row_shape": True,
+                        "strict_mongodb_recent_top_k": True,
+                        "projections": ["type", "user_id", "created_at"],
+                        "order_by": {
+                            "field": "created_at",
+                            "direction": "desc",
+                        },
+                        "limit": requested_limit,
+                    })
         if (
             asset.get("backend") == "mongodb"
             and asset["logical_name"].casefold() == "events"
@@ -1911,7 +2150,7 @@ class NaturalLanguageQueryService:
         return bool(
             re.search(r"\b(?:quantit[aà]|quantity)\b", normalized_question)
             and re.search(
-                r"\b(?:per|by)\s+(?:(?:ciascun|ogni|each)\s+)?sku\b",
+                r"\b(?:per|by|for)\s+(?:(?:ciascun|ogni|each)\s+)?sku\b",
                 normalized_question,
             )
         )
@@ -1927,6 +2166,57 @@ class NaturalLanguageQueryService:
             or re.search(
                 rf"\b(?:ciascun|ogni|each)\s+{role}\b",
                 normalized_question,
+            )
+        )
+
+    @staticmethod
+    def _count_per_type_intent(normalized_question: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:per|by)\s+(?:(?:ciascun|ogni|each)\s+)?"
+                r"(?:tipo|type)\b",
+                normalized_question,
+            )
+            or (
+                re.search(r"\b(?:raggruppa|group)\b", normalized_question)
+                and re.search(r"\b(?:tipo|type)\b", normalized_question)
+            )
+        )
+
+    @staticmethod
+    def _filtered_item_quantity_sum(
+        normalized_question: str,
+    ) -> int | float | None:
+        if not (
+            re.search(r"\b(?:articol[oi]|items?)\b", normalized_question)
+            and re.search(r"\b(?:quantit[aà]|quantity)\b", normalized_question)
+            and re.search(
+                r"\b(?:totale|complessiva|sum|total)\b",
+                normalized_question,
+            )
+        ):
+            return None
+        threshold = re.search(
+            r"(?:>=|maggiore\s+o\s+uguale\s+a|almeno|"
+            r"greater\s+than\s+or\s+equal\s+to|at\s+least)\s*(\d+(?:\.\d+)?)",
+            normalized_question,
+        )
+        if threshold is None:
+            return None
+        value = float(threshold.group(1))
+        return int(value) if value.is_integer() else value
+
+    @staticmethod
+    def _recent_events_intent(normalized_question: str) -> bool:
+        return bool(
+            re.search(r"\b(?:eventi|events)\b", normalized_question)
+            and re.search(
+                r"\b(?:pi[uù]\s+recenti|most\s+recent|latest)\b",
+                normalized_question,
+            )
+            and all(
+                re.search(rf"\b{re.escape(field)}\b", normalized_question)
+                for field in ("type", "user_id", "created_at")
             )
         )
 
@@ -1996,7 +2286,7 @@ class NaturalLanguageQueryService:
     @staticmethod
     def _question_intent(normalized_question: str) -> str | None:
         if re.search(
-            r"\b(quanti|conta(?:ndo)?|numero\s+di|how\s+many|count|number\s+of)\b",
+            r"\b(quanti|conta(?:ndo|li|le)?|numero\s+di|how\s+many|count|number\s+of)\b",
             normalized_question,
         ):
             return "count"

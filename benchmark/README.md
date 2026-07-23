@@ -4,7 +4,7 @@ Il benchmark esercita il normale endpoint `POST /query/natural-language`: non re
 
 ## Obiettivi e corpus
 
-Il corpus misura accuratezza funzionale, robustezza semantica, consistenza tra riformulazioni e run ripetuti, selezione del repository, validità del piano, correttezza dell'esecuzione e gestione prudente dell'incertezza. Include casi DuckDB, MySQL e MongoDB, riformulazioni, richieste ambigue o incomplete e analisi non calcolabili per dati mancanti.
+Il corpus misura accuratezza funzionale, robustezza semantica, consistenza tra riformulazioni e run ripetuti, selezione del repository, validità del piano, correttezza dell'esecuzione e gestione prudente dell'incertezza. Include 72 casi logici e 100 esecuzioni effettive su DuckDB, MySQL e MongoDB, oltre a riformulazioni, richieste ambigue o incomplete e analisi non calcolabili per dati mancanti.
 
 Ogni caso conserva i campi storici e può aggiungere:
 
@@ -39,13 +39,26 @@ Le latenze misurano tempo osservato end-to-end nelle rispettive fasi: sono **lat
 
 Il runner registra `explanation_present` e `explanation_ms`. Per risposte ambigue o non calcolabili registra anche la presenza strutturale di chiarimento o motivazione. Non valuta automaticamente qualità, correttezza o stile della spiegazione e non applica euristiche lessicali fragili.
 
+## Copertura MongoDB array
+
+La categoria `mongodb_array` isola sette casi dedicati alle nuove primitive controllate:
+
+- `$elemMatch` document-level tramite `MongoArrayMatch`, con conteggio degli eventi che contengono almeno un item con `quantity >= 2`;
+- `MongoUnwind` su array di documenti, con somma di `items[].quantity` raggruppata per `items[].sku`;
+- combinazione `MongoArrayMatch` + `MongoUnwind`, verificata con una somma che richiede anche il match post-unwind sugli elementi;
+- `MongoUnwind` su array scalare `roles`, con conteggio dei profili per ruolo;
+- riformulazioni italiane, tecniche e inglesi collegate tramite `equivalence_group`;
+- ripetizioni sui tre intenti principali per misurare la consistenza.
+
+Questi casi verificano il risultato direttamente contro MongoDB e non richiedono un secondo LLM giudice.
+
 ## Ground truth dei risultati
 
-L'accuratezza strutturale misura classificazione, backend, asset e validità del piano. L'accuratezza del risultato confronta invece le righe restituite con valori calcolati direttamente dalle sorgenti demo. Il corpus corrente contiene 20 casi con `expected_result`: 6 DuckDB, 7 MySQL e 7 MongoDB.
+L'accuratezza strutturale misura classificazione, backend, asset e validità del piano. L'accuratezza del risultato confronta invece le righe restituite con valori calcolati direttamente dalle sorgenti demo. Il corpus corrente contiene 27 casi con `expected_result`: 6 DuckDB, 7 MySQL e 14 MongoDB.
 
 Sono stati scelti count, group by, sum, avg e risultati ordinati o aggregati di dimensione controllata. Sono esclusi casi ambigui/non calcolabili, raggruppamenti temporali ancora instabili, projection molto grandi o senza ordine, output troncati e documenti il cui timestamp init dipende dall'istante di creazione del volume. `result_verified_rate` è la quota di casi logici dotati di ground truth; `result_accuracy` usa esclusivamente le relative esecuzioni come denominatore.
 
-La ground truth è rigenerabile con query statiche e read-only, senza passare dal planner o dall'endpoint QueryX. Il percorso ufficiale usa il container applicativo, che dispone già degli hostname Docker, delle credenziali configurate e del volume DuckDB:
+La ground truth è rigenerabile con query statiche e read-only, senza passare dal planner o dall'endpoint QueryX. **Dopo aver sostituito `cases.json` e `generate_ground_truth.py`, questa rigenerazione è obbligatoria prima dei benchmark ufficiali**, perché popola anche la somma post-unwind e i conteggi per ruolo. Il percorso ufficiale usa il container applicativo, che dispone già degli hostname Docker, delle credenziali configurate e del volume DuckDB:
 
 ```bash
 docker compose exec queryx python -m benchmark.generate_ground_truth
@@ -83,7 +96,7 @@ docker compose exec queryx python -m benchmark.run \
   --base-url http://127.0.0.1:8000 \
   --cases /app/benchmark/cases.json \
   --output-dir /app/benchmark/results \
-  --model-label qwen3.5-9b-100k
+  --model-label qwen3.5-9b-final-json
 ```
 
 Ogni run produce:
