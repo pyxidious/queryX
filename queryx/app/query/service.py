@@ -185,4 +185,8 @@ class QueryService:
         for query_filter in payload.get("filters", []):
             if "value" in query_filter:
                 query_filter["value"] = "<redacted>"
+        for array_match in payload.get("array_matches", []):
+            for predicate in array_match.get("predicates", []):
+                if "value" in predicate:
+                    predicate["value"] = "<redacted>"
         return payload

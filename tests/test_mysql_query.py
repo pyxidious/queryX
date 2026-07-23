@@ -324,6 +324,23 @@ def test_mysql_single_source_validation_projection_and_limits(
     assert captured.value.code == "query_limit_exceeded"
 
 
+def test_mysql_rejects_mongodb_array_operations(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mysql_query_env
+    payload = _mysql_plan(assets)
+    payload["array_matches"] = [{
+        "source_alias": "o",
+        "field": "items",
+        "predicates": [{"field": "quantity", "operator": "gte", "value": 2}],
+    }]
+
+    with pytest.raises(QueryValidationError) as captured:
+        service.validate(payload)
+
+    assert captured.value.code == "mongodb_array_operations_not_supported"
+
+
 def test_mysql_rejects_undeclared_source_alias(
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:

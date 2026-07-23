@@ -111,6 +111,38 @@ class QueryFilter(StrictModel):
         return self
 
 
+class MongoUnwind(StrictModel):
+    source_alias: str = Field(min_length=1, max_length=128)
+    field: str = Field(min_length=1, max_length=256)
+    preserve_null_and_empty_arrays: bool = False
+
+
+class MongoArrayPredicate(StrictModel):
+    field: str = Field(min_length=1, max_length=256)
+    operator: FilterOperator
+    value: Any = None
+
+    @model_validator(mode="after")
+    def validate_operand(self) -> MongoArrayPredicate:
+        if self.operator in {FilterOperator.IN, FilterOperator.NOT_IN} and (
+            not isinstance(self.value, list) or not self.value
+        ):
+            raise ValueError(f"operator '{self.operator}' requires a non-empty list")
+        if self.operator == FilterOperator.BETWEEN and (
+            not isinstance(self.value, list) or len(self.value) != 2
+        ):
+            raise ValueError("operator 'between' requires exactly two values")
+        if self.operator in {FilterOperator.IS_NULL, FilterOperator.IS_NOT_NULL}:
+            self.value = None
+        return self
+
+
+class MongoArrayMatch(StrictModel):
+    source_alias: str = Field(min_length=1, max_length=128)
+    field: str = Field(min_length=1, max_length=256)
+    predicates: list[MongoArrayPredicate] = Field(min_length=1)
+
+
 class AggregationFunction(StrEnum):
     COUNT = "count"
     COUNT_DISTINCT = "count_distinct"
@@ -143,6 +175,8 @@ class OrderBy(StrictModel):
 class LogicalQueryPlan(StrictModel):
     sources: list[QuerySource] = Field(min_length=1)
     joins: list[QueryJoin] = Field(default_factory=list)
+    unwinds: list[MongoUnwind] = Field(default_factory=list)
+    array_matches: list[MongoArrayMatch] = Field(default_factory=list)
     projections: list[Projection] = Field(default_factory=list)
     filters: list[QueryFilter] = Field(default_factory=list)
     aggregations: list[Aggregation] = Field(default_factory=list)

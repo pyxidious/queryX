@@ -11,6 +11,7 @@ def test_infer_mongo_schema_supports_nested_objects_and_arrays() -> None:
                 "profile": {"age": 36, "active": True},
                 "tags": ["vip", "analytics"],
                 "events": [{"type": "login", "score": 1.5}],
+                "items": [{"sku": "DEMO-001", "quantity": 2}],
             },
             {"name": "Grace", "profile": {"active": False}, "tags": []},
         ]
@@ -24,3 +25,7 @@ def test_infer_mongo_schema_supports_nested_objects_and_arrays() -> None:
     assert by_path["tags[]"]["types"] == ["str"]
     assert by_path["events[]"]["types"] == ["object"]
     assert by_path["events[].score"]["types"] == ["float"]
+    assert by_path["items"]["types"] == ["array"]
+    assert by_path["items[]"]["types"] == ["object"]
+    assert by_path["items[].sku"]["types"] == ["str"]
+    assert by_path["items[].quantity"]["types"] == ["int"]

@@ -80,6 +80,7 @@ def _profiles_events_collections() -> tuple[list[dict[str, Any]], list[dict[str,
             ("preferences.language", "str"),
             ("preferences.newsletter", "bool"),
             ("roles", "array"),
+            ("roles[]", "str"),
         ],
         "events": [
             ("_id", "object_id"),
@@ -92,6 +93,9 @@ def _profiles_events_collections() -> tuple[list[dict[str, Any]], list[dict[str,
             ("user_id", "int"),
             ("tags", "array"),
             ("items", "array"),
+            ("items[]", "object"),
+            ("items[].sku", "str"),
+            ("items[].quantity", "int"),
         ],
     }
     declared = [
@@ -334,6 +338,24 @@ def _events_amount_rows_plan(asset: Any) -> dict[str, Any]:
     }
 
 
+def _items_plan(asset: Any, **updates: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "sources": [{"alias": "events", "asset_id": asset.asset_id}],
+        "unwinds": [{"source_alias": "events", "field": "items"}],
+        "projections": [{
+            "source_alias": "events",
+            "field": "items[].sku",
+            "alias": "sku",
+        }],
+        "filters": [],
+        "aggregations": [],
+        "group_by": [],
+        "order_by": [],
+    }
+    payload.update(updates)
+    return payload
+
+
 def test_mongodb_collection_promotion_idempotence_schema_change_and_stale(
     mongodb_env: tuple[Settings, QueryService, Any],
 ) -> None:
@@ -410,6 +432,312 @@ def test_mongodb_projection_filter_order_limit_and_nested_observation(
     with pytest.raises(QueryValidationError) as missing:
         service.validate(nested)
     assert missing.value.code == "field_not_found"
+
+
+def test_mongodb_unwind_compiles_exactly_and_projects_cataloged_element_path(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    validated = service.validator.validate(
+        LogicalQueryPlan.model_validate(_items_plan(assets["events"]))
+    )
+    assert service.mongodb_compiler.compile(validated).pipeline == [
+        {
+            "$unwind": {
+                "path": "$items",
+                "preserveNullAndEmptyArrays": False,
+            }
+        },
+        {"$project": {"_id": 0, "sku": "$items.sku"}},
+        {"$limit": settings.query_default_limit + 1},
+    ]
+
+
+def test_mongodb_elem_match_and_post_unwind_match_are_exact(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    payload = _items_plan(
+        assets["events"],
+        array_matches=[{
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [
+                {"field": "sku", "operator": "eq", "value": "DEMO-001"},
+                {"field": "quantity", "operator": "gte", "value": 2},
+            ],
+        }],
+    )
+    compiled = service.mongodb_compiler.compile(
+        service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    )
+    assert compiled.pipeline == [
+        {
+            "$match": {
+                "items": {
+                    "$elemMatch": {
+                        "sku": "DEMO-001",
+                        "quantity": {"$gte": 2},
+                    }
+                }
+            }
+        },
+        {
+            "$unwind": {
+                "path": "$items",
+                "preserveNullAndEmptyArrays": False,
+            }
+        },
+        {
+            "$match": {
+                "$and": [
+                    {"items.sku": "DEMO-001"},
+                    {"items.quantity": {"$gte": 2}},
+                ]
+            }
+        },
+        {"$project": {"_id": 0, "sku": "$items.sku"}},
+        {"$limit": settings.query_default_limit + 1},
+    ]
+
+
+def test_mongodb_post_unwind_filter_and_scalar_array_projection(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    filtered = _items_plan(
+        assets["events"],
+        filters=[{
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "operator": "gte",
+            "value": 2,
+        }],
+    )
+    filtered_pipeline = service.mongodb_compiler.compile(
+        service.validator.validate(LogicalQueryPlan.model_validate(filtered))
+    ).pipeline
+    assert filtered_pipeline[:2] == [
+        {
+            "$unwind": {
+                "path": "$items",
+                "preserveNullAndEmptyArrays": False,
+            }
+        },
+        {"$match": {"items.quantity": {"$gte": 2}}},
+    ]
+
+    scalar = {
+        "sources": [{
+            "alias": "profiles",
+            "asset_id": assets["profiles"].asset_id,
+        }],
+        "unwinds": [{"source_alias": "profiles", "field": "roles"}],
+        "projections": [{"source_alias": "profiles", "field": "roles[]"}],
+    }
+    scalar_pipeline = service.mongodb_compiler.compile(
+        service.validator.validate(LogicalQueryPlan.model_validate(scalar))
+    ).pipeline
+    assert scalar_pipeline == [
+        {
+            "$unwind": {
+                "path": "$roles",
+                "preserveNullAndEmptyArrays": False,
+            }
+        },
+        {"$project": {"_id": 0, "roles": "$roles"}},
+        {"$limit": settings.query_default_limit + 1},
+    ]
+
+
+def test_mongodb_sum_unwound_quantity_grouped_by_sku(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    payload = _items_plan(
+        assets["events"],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+        group_by=[{
+            "source_alias": "events",
+            "field": "items[].sku",
+        }],
+    )
+    validated = service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    compiled = service.mongodb_compiler.compile(validated)
+
+    assert [field.name for field in validated.output_schema] == ["sku", "quantity"]
+    assert compiled.pipeline == [
+        {
+            "$unwind": {
+                "path": "$items",
+                "preserveNullAndEmptyArrays": False,
+            }
+        },
+        {
+            "$group": {
+                "_id": {"sku": "$items.sku"},
+                "quantity": {"$sum": "$items.quantity"},
+            }
+        },
+        {
+            "$project": {
+                "_id": 0,
+                "sku": "$_id.sku",
+                "quantity": "$quantity",
+            }
+        },
+        {"$limit": settings.query_default_limit + 1},
+    ]
+
+
+def test_mongodb_array_fields_require_exact_cataloged_unwind(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mongodb_profiles_env
+    without_unwind = _items_plan(assets["events"], unwinds=[])
+    with pytest.raises(QueryValidationError) as missing:
+        service.validate(without_unwind)
+    assert missing.value.code == "mongodb_array_field_requires_unwind"
+
+    scalar = _items_plan(
+        assets["events"],
+        unwinds=[{"source_alias": "events", "field": "type"}],
+    )
+    with pytest.raises(QueryValidationError) as invalid_scalar:
+        service.validate(scalar)
+    assert invalid_scalar.value.code == "invalid_mongodb_unwind"
+
+    multiple = _items_plan(
+        assets["events"],
+        unwinds=[
+            {"source_alias": "events", "field": "items"},
+            {"source_alias": "events", "field": "tags"},
+        ],
+    )
+    with pytest.raises(QueryValidationError) as too_many:
+        service.validate(multiple)
+    assert too_many.value.code == "mongodb_multiple_unwinds_not_supported"
+
+    unknown_alias = _items_plan(
+        assets["events"],
+        unwinds=[{"source_alias": "other", "field": "items"}],
+    )
+    with pytest.raises(QueryValidationError) as alias:
+        service.validate(unknown_alias)
+    assert alias.value.code == "source_alias_not_found"
+
+
+@pytest.mark.parametrize(
+    "array_match",
+    [
+        {
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{"field": "missing", "operator": "eq", "value": 1}],
+        },
+        {
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{"field": "$where", "operator": "eq", "value": 1}],
+        },
+        {
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{"field": "sku[]", "operator": "eq", "value": 1}],
+        },
+        {
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{"field": "quantity", "operator": "between", "value": [1, 2]}],
+        },
+        {
+            "source_alias": "events",
+            "field": "items",
+            "predicates": [{
+                "field": "quantity",
+                "operator": "eq",
+                "value": {"$gte": 2},
+            }],
+        },
+    ],
+)
+def test_mongodb_array_match_rejects_unknown_or_unsafe_input(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    array_match: dict[str, Any],
+) -> None:
+    _, service, assets = mongodb_profiles_env
+    payload = _events_count_plan(assets["events"])
+    payload["array_matches"] = [array_match]
+    with pytest.raises(QueryValidationError):
+        service.validate(payload)
+
+
+def test_mongodb_array_match_rejects_scalar_arrays_and_duplicate_keys_use_and(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mongodb_profiles_env
+    scalar = _profiles_count_plan(assets["profiles"])
+    scalar["array_matches"] = [{
+        "source_alias": "profiles",
+        "field": "roles",
+        "predicates": [{"field": "value", "operator": "eq", "value": "admin"}],
+    }]
+    with pytest.raises(QueryValidationError) as invalid:
+        service.validate(scalar)
+    assert invalid.value.code == "invalid_mongodb_array_match"
+
+    duplicate = _events_count_plan(assets["events"])
+    duplicate["array_matches"] = [{
+        "source_alias": "events",
+        "field": "items",
+        "predicates": [
+            {"field": "quantity", "operator": "gte", "value": 2},
+            {"field": "quantity", "operator": "lte", "value": 4},
+        ],
+    }]
+    compiled = service.mongodb_compiler.compile(
+        service.validator.validate(LogicalQueryPlan.model_validate(duplicate))
+    )
+    assert compiled.pipeline[0] == {
+        "$match": {
+            "items": {
+                "$elemMatch": {
+                    "$and": [
+                        {"quantity": {"$gte": 2}},
+                        {"quantity": {"$lte": 4}},
+                    ]
+                }
+            }
+        }
+    }
+
+
+def test_mongodb_preserve_empty_arrays_is_compiled_exactly(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    _, service, assets = mongodb_profiles_env
+    payload = _items_plan(
+        assets["events"],
+        unwinds=[{
+            "source_alias": "events",
+            "field": "items",
+            "preserve_null_and_empty_arrays": True,
+        }],
+    )
+    compiled = service.mongodb_compiler.compile(
+        service.validator.validate(LogicalQueryPlan.model_validate(payload))
+    )
+    assert compiled.pipeline[0] == {
+        "$unwind": {
+            "path": "$items",
+            "preserveNullAndEmptyArrays": True,
+        }
+    }
 
 
 def test_mongodb_declared_source_alias_is_used_exactly(
@@ -529,6 +857,12 @@ def test_mongodb_rejects_arbitrary_operators_pipeline_values_and_scope(
     settings, service, asset = mongodb_env
     for payload in (
         {"pipeline": [{"$where": "evil"}]},
+        _plan(asset, unwinds=[{"$unwind": "$items"}]),
+        _plan(asset, array_matches=[{
+            "source_alias": "o",
+            "field": "items",
+            "predicates": [{"$match": {"quantity": {"$gte": 2}}}],
+        }]),
         _plan(asset, filters=[{
             "source_alias": "o", "field": "status", "operator": "$where", "value": "evil"
         }]),
@@ -609,6 +943,38 @@ def test_mongodb_routing_and_audit_do_not_store_rows_or_filter_values(
     assert json.loads(source_ids) == [settings.mongodb_source_id]
     assert "10" not in plan_json and "<redacted>" in plan_json
     assert "paid" not in plan_json and "rows" not in json.loads(plan_json)
+
+
+def test_mongodb_array_match_values_are_redacted_from_audit(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings, service, assets = mongodb_profiles_env
+    payload = _events_count_plan(assets["events"])
+    payload["array_matches"] = [{
+        "source_alias": "events",
+        "field": "items",
+        "predicates": [{
+            "field": "sku",
+            "operator": "eq",
+            "value": "SECRET-SKU",
+        }],
+    }]
+    monkeypatch.setattr(
+        service.mongodb_executor,
+        "execute",
+        lambda compiled: (["events"], [[1]], False, 1.0),
+    )
+
+    service.execute(payload)
+
+    with sqlite3.connect(settings.catalog_db_path) as connection:
+        plan_json = connection.execute(
+            "SELECT normalized_plan_json FROM query_runs "
+            "ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()[0]
+    assert "SECRET-SKU" not in plan_json
+    assert "<redacted>" in plan_json
 
 
 class _Collection:
@@ -776,6 +1142,48 @@ def test_natural_language_context_selects_only_mongodb_asset(
     prompt = json.dumps(payload)
     assert settings.mongodb_url not in prompt
     assert settings.mongodb_database not in prompt
+
+
+def test_natural_language_accepts_strict_mongodb_array_plan_and_examples(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    plan = _items_plan(
+        assets["events"],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+        group_by=[{
+            "source_alias": "events",
+            "field": "items[].sku",
+        }],
+    )
+    client = _NaturalClient(plan)
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Qual è la quantità totale acquistata per SKU negli eventi MongoDB?"
+    ))
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.unwinds[0].field == "items"
+    assert response.normalized_plan.projections[0].field == "items[].sku"
+    assert response.normalized_plan.group_by[0].field == "items[].sku"
+    assert response.normalized_plan.aggregations[0].field == "items[].quantity"
+    prompt = json.loads(client.planning_messages[1]["content"])
+    examples = prompt["catalog_scoped_resolution_examples"]
+    questions = {item["question"] for item in examples}
+    assert (
+        "Quanti eventi MongoDB contengono almeno un articolo con quantità "
+        "maggiore o uguale a 2?"
+    ) in questions
+    assert (
+        "Qual è la quantità totale acquistata per SKU negli eventi MongoDB?"
+    ) in questions
 
 
 def test_natural_language_retries_mongodb_source_alias_typo_once(

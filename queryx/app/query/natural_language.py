@@ -55,6 +55,9 @@ For a DuckDB asset, use only its listed file-dataset fields; never select a same
 For DuckDB monthly counts, use one date_trunc_month projection and the identical group_by expression, one count aggregation, and a bounded limit. Keep this plan compact and never repeat objects.
 For an asset whose backend is mysql, use exactly one source, no joins and no transforms.
 For an asset whose backend is mongodb, use exactly one source, no joins and no transforms.
+For MongoDB embedded-document arrays, use array_matches when all predicates must apply to the same array element.
+Use unwinds only when the answer requires individual array elements, grouping by an element field, or aggregating an element field.
+Never emit MongoDB pipeline stages or operators. Use catalog paths containing [] only with the corresponding unwind; inside array_matches use relative element fields.
 For MongoDB profiles, use preferences.newsletter for newsletter conditions when that exact field is listed; never shorten it to newsletter.
 "newsletter attiva" or "newsletter abilitata" means exactly one eq true filter; "newsletter disattiva" or "newsletter non attiva" means exactly one eq false filter. Do not add is_not_null to a boolean comparison.
 For MongoDB profiles, "lingua inglese" means exactly one preferences.language eq "en" filter and "lingua italiana" means exactly one preferences.language eq "it" filter, only when that exact field is listed.
@@ -889,6 +892,19 @@ class NaturalLanguageQueryService:
             "group_by": fields(
                 "group_by", ("source_alias", "field", "transform")
             ),
+            "unwinds": fields(
+                "unwinds",
+                ("source_alias", "field", "preserve_null_and_empty_arrays"),
+            ),
+            "array_matches": [
+                {
+                    key: item[key]
+                    for key in ("source_alias", "field")
+                    if key in item
+                }
+                for item in candidate.get("array_matches", [])
+                if isinstance(item, dict)
+            ],
             "order_by": fields("order_by", ("field", "direction")),
             "limit": candidate.get("limit"),
         }
@@ -1190,7 +1206,8 @@ class NaturalLanguageQueryService:
                         "referenced_source_aliases": sorted({
                             alias
                             for section in (
-                                "projections", "filters", "aggregations", "group_by"
+                                "projections", "filters", "aggregations", "group_by",
+                                "unwinds", "array_matches",
                             )
                             for item in candidate.get(section, [])
                             if isinstance(item, dict)
@@ -1396,7 +1413,10 @@ class NaturalLanguageQueryService:
                     *metric_terms,
                 ]
             ).casefold()
-            scores[asset["asset_id"]] = sum(token in searchable for token in tokens)
+            searchable_tokens = set(re.findall(r"[\w]+", searchable))
+            scores[asset["asset_id"]] = sum(
+                token in searchable_tokens for token in tokens
+            )
         matched = {asset_id for asset_id, score in scores.items() if score > 0}
         if matched:
             for relationship in active_relationships:
@@ -2341,4 +2361,65 @@ class NaturalLanguageQueryService:
                         },
                     },
                 ])
+                if {
+                    "items",
+                    "items[]",
+                    "items[].sku",
+                    "items[].quantity",
+                }.issubset(fields):
+                    examples.extend([
+                        {
+                            "question": (
+                                "Quanti eventi MongoDB contengono almeno un "
+                                "articolo con quantità maggiore o uguale a 2?"
+                            ),
+                            "intent": "count",
+                            "plan": {
+                                "sources": [source],
+                                "array_matches": [{
+                                    "source_alias": "events",
+                                    "field": "items",
+                                    "predicates": [{
+                                        "field": "quantity",
+                                        "operator": "gte",
+                                        "value": 2,
+                                    }],
+                                }],
+                                "aggregations": [{
+                                    "function": "count",
+                                    "source_alias": "events",
+                                    "field": "_id",
+                                    "alias": "events",
+                                }],
+                            },
+                        },
+                        {
+                            "question": (
+                                "Qual è la quantità totale acquistata per SKU "
+                                "negli eventi MongoDB?"
+                            ),
+                            "plan": {
+                                "sources": [source],
+                                "unwinds": [{
+                                    "source_alias": "events",
+                                    "field": "items",
+                                }],
+                                "projections": [{
+                                    "source_alias": "events",
+                                    "field": "items[].sku",
+                                    "alias": "sku",
+                                }],
+                                "aggregations": [{
+                                    "function": "sum",
+                                    "source_alias": "events",
+                                    "field": "items[].quantity",
+                                    "alias": "quantity",
+                                }],
+                                "group_by": [{
+                                    "source_alias": "events",
+                                    "field": "items[].sku",
+                                }],
+                            },
+                        },
+                    ])
         return examples

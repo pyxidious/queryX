@@ -95,11 +95,16 @@ class PlanValidator:
                 "A logical query plan cannot mix execution backends",
             )
         backend = next(iter(backends))
+        if backend != "mongodb" and (normalized.unwinds or normalized.array_matches):
+            raise QueryValidationError(
+                "mongodb_array_operations_not_supported",
+                "MongoDB array operations are only valid for MongoDB sources",
+            )
         if backend == "mysql":
             self._validate_mysql_scope(normalized)
             relationships: dict[str, AssetRelationship] = {}
         elif backend == "mongodb":
-            self._validate_mongodb_scope(normalized)
+            self._validate_mongodb_scope(normalized, resolved)
             relationships = {}
         else:
             relationships = self._validate_joins(normalized, resolved)
@@ -130,6 +135,8 @@ class PlanValidator:
             *((item.source_alias, "filter") for item in plan.filters),
             *((item.source_alias, "aggregation") for item in plan.aggregations if item.source_alias is not None),
             *((item.source_alias, "group_by") for item in plan.group_by),
+            *((item.source_alias, "unwind") for item in plan.unwinds),
+            *((item.source_alias, "array_match") for item in plan.array_matches),
             *((item.left_alias, "join.left_alias") for item in plan.joins),
             *((item.right_alias, "join.right_alias") for item in plan.joins),
         ]
@@ -252,7 +259,9 @@ class PlanValidator:
             )
 
     @staticmethod
-    def _validate_mongodb_scope(plan: LogicalQueryPlan) -> None:
+    def _validate_mongodb_scope(
+        plan: LogicalQueryPlan, sources: dict[str, ResolvedSource]
+    ) -> None:
         if len(plan.sources) != 1:
             raise QueryValidationError(
                 "mongodb_multi_source_not_supported",
@@ -267,17 +276,84 @@ class PlanValidator:
                 "mongodb_transform_not_supported",
                 "Transforms are not supported for MongoDB queries yet",
             )
+        if len(plan.unwinds) > 1:
+            raise QueryValidationError(
+                "mongodb_multiple_unwinds_not_supported",
+                "MongoDB queries currently support at most one unwind",
+            )
         fields = [
             *(item.field for item in plan.projections),
             *(item.field for item in plan.filters),
             *(item.field for item in plan.group_by),
             *(item.field for item in plan.aggregations if item.field is not None),
         ]
-        if any(not _safe_mongodb_field(field) for field in fields):
+        if any(
+            not (
+                _safe_mongodb_field(field)
+                if "[]" not in field
+                else _mongodb_array_field_root(field) is not None
+            )
+            for field in fields
+        ):
             raise QueryValidationError(
                 "invalid_mongodb_field",
                 "MongoDB fields must be explicitly observed safe field paths",
             )
+        source = next(iter(sources.values()))
+        unwound_roots: set[str] = set()
+        for unwind in plan.unwinds:
+            field = source.fields.get(unwind.field)
+            if (
+                not _safe_mongodb_relative_field(unwind.field)
+                or field is None
+                or _type(field).upper() != "ARRAY"
+            ):
+                raise QueryValidationError(
+                    "invalid_mongodb_unwind",
+                    "Unwind field must be an explicitly cataloged ARRAY field",
+                    details={"field": unwind.field},
+                )
+            unwound_roots.add(unwind.field)
+        for array_match in plan.array_matches:
+            root = source.fields.get(array_match.field)
+            element = source.fields.get(f"{array_match.field}[]")
+            if (
+                not _safe_mongodb_relative_field(array_match.field)
+                or root is None
+                or _type(root).upper() != "ARRAY"
+                or element is None
+                or _type(element).upper() != "OBJECT"
+            ):
+                raise QueryValidationError(
+                    "invalid_mongodb_array_match",
+                    "Array match requires an explicitly cataloged embedded-document array",
+                    details={"field": array_match.field},
+                )
+            for predicate in array_match.predicates:
+                if not _safe_mongodb_relative_field(predicate.field):
+                    raise QueryValidationError(
+                        "invalid_mongodb_array_field",
+                        "Array predicate fields must be safe relative field paths",
+                        details={"field": predicate.field},
+                    )
+                observed_path = f"{array_match.field}[].{predicate.field}"
+                if observed_path not in source.fields:
+                    raise QueryValidationError(
+                        "field_not_found",
+                        "Array predicate field is not present in the cataloged schema",
+                        details={
+                            "source_alias": array_match.source_alias,
+                            "field": observed_path,
+                        },
+                    )
+        for field in fields:
+            array_root = _mongodb_array_field_root(field)
+            if array_root is not None and array_root not in unwound_roots:
+                raise QueryValidationError(
+                    "mongodb_array_field_requires_unwind",
+                    "Cataloged array element fields require their array root to be unwound",
+                    details={"field": field, "array_root": array_root},
+                )
 
     @staticmethod
     def _validate_backend_operators(plan: LogicalQueryPlan, backend: str) -> None:
@@ -306,6 +382,18 @@ class PlanValidator:
                         "invalid_mongodb_filter_value",
                         "MongoDB filter values must be scalar or lists of scalars",
                     )
+            for array_match in plan.array_matches:
+                for predicate in array_match.predicates:
+                    if predicate.operator not in allowed:
+                        raise QueryValidationError(
+                            "mongodb_operator_not_supported",
+                            "Array predicate operator is not supported by MongoDB queries",
+                        )
+                    if not _safe_mongodb_value(predicate.value):
+                        raise QueryValidationError(
+                            "invalid_mongodb_filter_value",
+                            "MongoDB filter values must be scalar or lists of scalars",
+                        )
         elif any(
             item.operator in {FilterOperator.NE, FilterOperator.NOT_IN}
             for item in plan.filters
@@ -525,12 +613,35 @@ def _safe_mongodb_field(field: str) -> bool:
     )
 
 
+def _safe_mongodb_relative_field(field: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
+            field,
+        )
+    )
+
+
+def _mongodb_array_field_root(field: str) -> str | None:
+    if field.count("[]") != 1:
+        return None
+    root, suffix = field.split("[]", 1)
+    if not root or not _safe_mongodb_relative_field(root):
+        return None
+    if suffix and (
+        not suffix.startswith(".")
+        or not _safe_mongodb_relative_field(suffix[1:])
+    ):
+        return None
+    return root
+
+
 def _safe_mongodb_output_name(name: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,255}", name))
 
 
 def _mongodb_output_name(field: str, alias: str | None) -> str:
-    name = alias or field.rsplit(".", 1)[-1]
+    name = alias or field.replace("[]", "").rsplit(".", 1)[-1]
     if not _safe_mongodb_output_name(name):
         raise QueryValidationError(
             "invalid_mongodb_output_alias",
