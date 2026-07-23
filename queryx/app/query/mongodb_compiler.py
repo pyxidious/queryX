@@ -30,6 +30,8 @@ class MongoDBQueryCompiler:
             *(item.source_alias for item in plan.projections),
             *(item.source_alias for item in plan.filters),
             *(item.source_alias for item in plan.group_by),
+            *(item.source_alias for item in plan.unwinds),
+            *(item.source_alias for item in plan.array_matches),
             *(
                 item.source_alias
                 for item in plan.aggregations
@@ -42,9 +44,56 @@ class MongoDBQueryCompiler:
             raise ValueError("MongoDB compiler received an undeclared source alias")
 
         pipeline: list[dict[str, Any]] = []
-        predicates = [self._predicate(item.field, item.operator, item.value) for item in plan.filters]
-        if predicates:
-            pipeline.append({"$match": predicates[0] if len(predicates) == 1 else {"$and": predicates}})
+        document_predicates = [
+            self._predicate(item.field, item.operator, item.value)
+            for item in plan.filters
+            if "[]" not in item.field
+        ]
+        if document_predicates:
+            pipeline.append(self._match_stage(document_predicates))
+
+        array_predicates = [
+            {
+                item.field: {
+                    "$elemMatch": self._element_predicates(item.predicates)
+                }
+            }
+            for item in plan.array_matches
+        ]
+        if array_predicates:
+            pipeline.append(self._match_stage(array_predicates))
+
+        unwind = plan.unwinds[0] if plan.unwinds else None
+        if unwind is not None:
+            pipeline.append({
+                "$unwind": {
+                    "path": f"${unwind.field}",
+                    "preserveNullAndEmptyArrays": (
+                        unwind.preserve_null_and_empty_arrays
+                    ),
+                }
+            })
+            post_unwind_predicates = [
+                self._predicate(
+                    _mongodb_physical_field(item.field),
+                    item.operator,
+                    item.value,
+                )
+                for item in plan.filters
+                if "[]" in item.field
+            ]
+            post_unwind_predicates.extend(
+                self._predicate(
+                    f"{item.field}.{predicate.field}",
+                    predicate.operator,
+                    predicate.value,
+                )
+                for item in plan.array_matches
+                if item.field == unwind.field
+                for predicate in item.predicates
+            )
+            if post_unwind_predicates:
+                pipeline.append(self._match_stage(post_unwind_predicates))
 
         if plan.aggregations or plan.group_by:
             pipeline.extend(self._aggregate_stages(validated))
@@ -54,7 +103,9 @@ class MongoDBQueryCompiler:
                 output_name = _mongodb_output_name(
                     projection.field, projection.alias
                 )
-                project[output_name] = f"${projection.field}"
+                project[output_name] = (
+                    f"${_mongodb_physical_field(projection.field)}"
+                )
             pipeline.append({"$project": project})
 
         if plan.order_by:
@@ -95,14 +146,18 @@ class MongoDBQueryCompiler:
         group_id: Any = None
         if group_names:
             group_id = {
-                output_name: f"${field}"
+                output_name: f"${_mongodb_physical_field(field)}"
                 for (_, field), output_name in group_names.items()
             }
         group_stage: dict[str, Any] = {"_id": group_id}
         distinct_temporaries: dict[str, str] = {}
         for index, aggregation in enumerate(plan.aggregations):
             output_name = aggregation.alias or _aggregation_name(aggregation)
-            field = f"${aggregation.field}" if aggregation.field else None
+            field = (
+                f"${_mongodb_physical_field(aggregation.field)}"
+                if aggregation.field
+                else None
+            )
             if aggregation.function == AggregationFunction.COUNT:
                 group_stage[output_name] = {"$sum": 1}
             elif aggregation.function == AggregationFunction.COUNT_DISTINCT:
@@ -127,6 +182,29 @@ class MongoDBQueryCompiler:
         return [{"$group": group_stage}, {"$project": project_stage}]
 
     @staticmethod
+    def _match_stage(predicates: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "$match": (
+                predicates[0] if len(predicates) == 1 else {"$and": predicates}
+            )
+        }
+
+    @classmethod
+    def _element_predicates(cls, predicates: list[Any]) -> dict[str, Any]:
+        compiled = [
+            cls._predicate(item.field, item.operator, item.value)
+            for item in predicates
+        ]
+        keys = [next(iter(item)) for item in compiled]
+        if len(keys) == len(set(keys)):
+            return {
+                key: value
+                for item in compiled
+                for key, value in item.items()
+            }
+        return {"$and": compiled}
+
+    @staticmethod
     def _predicate(field: str, operator: FilterOperator, value: Any) -> dict[str, Any]:
         operators = {
             FilterOperator.NE: "$ne",
@@ -142,3 +220,7 @@ class MongoDBQueryCompiler:
         if operator in {FilterOperator.EQ, FilterOperator.IS_NULL}:
             return {field: value}
         return {field: {operators[operator]: value}}
+
+
+def _mongodb_physical_field(field: str) -> str:
+    return field.replace("[]", "")

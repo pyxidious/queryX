@@ -152,6 +152,19 @@ def test_duckdb_rejects_undeclared_source_alias(
     }
 
 
+def test_duckdb_rejects_mongodb_array_operations(
+    query_env: tuple[Settings, dict[str, Any]],
+) -> None:
+    settings, assets = query_env
+    payload = _status_plan(assets)
+    payload["unwinds"] = [{"source_alias": "o", "field": "items"}]
+
+    with pytest.raises(QueryValidationError) as captured:
+        QueryService(settings).validate(payload)
+
+    assert captured.value.code == "mongodb_array_operations_not_supported"
+
+
 def test_declared_join_and_disabled_relationship(query_env: tuple[Settings, dict[str, Any]]) -> None:
     settings, assets = query_env
     relationships = RelationshipService(settings)

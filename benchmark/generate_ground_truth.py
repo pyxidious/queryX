@@ -202,12 +202,34 @@ def _mongodb(settings: Settings) -> dict[str, Any]:
             raise GroundTruthError(
                 "MongoDB events contain no values for properties.amount."
             )
+        events_with_quantity = database.events.count_documents(
+            {"items": {"$elemMatch": {"quantity": {"$gte": 2}}}}
+        )
+        quantity_by_sku = list(
+            database.events.aggregate(
+                [
+                    {"$unwind": "$items"},
+                    {
+                        "$group": {
+                            "_id": "$items.sku",
+                            "quantity": {"$sum": "$items.quantity"},
+                        }
+                    },
+                    {"$sort": {"_id": 1}},
+                ]
+            )
+        )
         return {
             "profiles_count": int(database.profiles.count_documents({})),
             "events_by_type": [
                 [str(item["_id"]), int(item["events"])] for item in by_type
             ],
             "amount_sum": float(amount[0]["total"]),
+            "events_with_quantity_gte_2": int(events_with_quantity),
+            "quantity_by_sku": [
+                [str(item["_id"]), int(item["quantity"])]
+                for item in quantity_by_sku
+            ],
         }
     except GroundTruthError:
         raise
@@ -331,6 +353,13 @@ def generate(settings: Settings) -> dict[str, Any]:
             "unordered": True,
         },
         "mongodb_sum_amount": {"rows": [[mongodb["amount_sum"]]]},
+        "mongodb_events_item_quantity_count": {
+            "rows": [[mongodb["events_with_quantity_gte_2"]]]
+        },
+        "mongodb_quantity_by_sku": {
+            "rows": mongodb["quantity_by_sku"],
+            "unordered": True,
+        },
     }
 
 
