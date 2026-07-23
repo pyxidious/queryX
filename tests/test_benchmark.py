@@ -44,6 +44,41 @@ def test_result_comparison_is_structural_and_optional() -> None:
     assert compare_results({"rows": [[1]]}, {"rows": [[2]]}) is False
 
 
+def test_result_comparison_exact_columns_null_boolean_and_numeric_equivalence() -> None:
+    actual = {
+        "columns": ["enabled", "value", "missing"],
+        "rows": [[True, 1, None], [False, 2.0, None]],
+    }
+    expected = {
+        "columns": ["enabled", "value", "missing"],
+        "rows": [[True, 1.0, None], [False, 2, None]],
+        "unordered": False,
+    }
+    assert compare_results(actual, expected, ordered_rows=True) is True
+    assert compare_results(
+        actual, {**expected, "columns": ["value", "enabled", "missing"]},
+        ordered_rows=True,
+    ) is False
+    assert compare_results(
+        actual, {**expected, "rows": [[True, 1, None]]}, ordered_rows=True,
+    ) is False
+
+
+def test_result_prefix_is_ordered_and_numeric_tolerant() -> None:
+    actual = {"row_count": 3, "rows": [["a", 10.0000001], ["b", 9], ["c", 8]]}
+    assert compare_results(
+        actual,
+        {"row_count": 3, "rows_prefix": [["a", 10.0], ["b", 9.0]]},
+        ordered_rows=True,
+        tolerance=1e-6,
+    ) is True
+    assert compare_results(
+        actual,
+        {"row_count": 3, "rows_prefix": [["b", 9], ["a", 10]]},
+        ordered_rows=True,
+    ) is False
+
+
 def test_summary_metrics_and_category_breakdown() -> None:
     records = [
         {
@@ -175,6 +210,11 @@ def test_repeat_aggregation_records_consistency_and_outcomes() -> None:
     assert aggregate["full_repeat_consistency"] is True
     assert aggregate["repetitions"] == repetitions
 
+    wrong = [dict(repetitions[0]), {**repetitions[1], "result_match": False, "pass": False}]
+    inconsistent = aggregate_repetitions(case, wrong)
+    assert inconsistent["repeat_consistency_result"] is False
+    assert inconsistent["full_repeat_consistency"] is False
+
 
 def test_extended_summary_consistency_prudence_hallucination_and_breakdowns() -> None:
     base = {
@@ -219,6 +259,39 @@ def test_extended_summary_consistency_prudence_hallucination_and_breakdowns() ->
     assert summary["by_operation_type"]["count"]["total_cases"] == 2
     assert summary["by_difficulty"]["hard"]["total_cases"] == 2
     assert summary["by_equivalence_group"]["same_count"]["full_semantic_consistency"] is True
+
+
+def test_result_accuracy_uses_only_verified_cases_and_executions() -> None:
+    common = {
+        "category": "query", "difficulty": "easy", "uncertainty_type": "none",
+        "classification": "answerable", "expected_classification": "answerable",
+        "plan_valid": True, "requested_execute": True, "executed": True,
+        "error_code": None, "pass": True, "repeat_count": 1,
+    }
+    records = [
+        {
+            **common, "operation_type": "count", "backend": "mysql",
+            "expected_backend": "mysql", "expected_result": {"rows": [[1]]},
+            "result_match": True,
+        },
+        {
+            **common, "operation_type": "count", "backend": "mysql",
+            "expected_backend": "mysql", "expected_result": {"rows": [[2]]},
+            "result_match": False, "pass": False,
+        },
+        {
+            **common, "operation_type": "projection", "backend": "duckdb",
+            "expected_backend": "duckdb", "expected_result": None,
+            "result_match": None,
+        },
+    ]
+    summary = summarize_records(records)
+    assert summary["result_verified_cases"] == 2
+    assert summary["result_verified_executions"] == 2
+    assert summary["result_verified_rate"] == 2 / 3
+    assert summary["result_accuracy"] == 0.5
+    assert summary["result_accuracy_by_backend"]["mysql"]["result_accuracy"] == 0.5
+    assert summary["result_accuracy_by_operation_type"]["count"]["verified_executions"] == 2
 
 
 def test_output_files_include_repetitions_csv_rows_and_extended_summary(tmp_path) -> None:

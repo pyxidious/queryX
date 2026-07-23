@@ -15,7 +15,7 @@ Ogni caso conserva i campi storici e può aggiungere:
 - `repeat_count`: numero di richieste identiche, default `1`;
 - `notes`: annotazioni sperimentali libere.
 
-I campi nuovi sono opzionali: i file casi precedenti continuano a funzionare. `expected_result` resta facoltativo ed è usato soltanto per risultati noti e stabili. Il confronto è strutturale, ignora normalmente l'ordine delle righe, supporta `ordered_rows: true` e usa `numeric_tolerance` per i numeri.
+I campi nuovi sono opzionali: i file casi precedenti continuano a funzionare. `expected_result` resta facoltativo ed è usato soltanto per risultati noti e stabili. Il confronto verifica colonne e righe quando dichiarate, gestisce `null`, booleani, valori annidati semplici e numeri int/float equivalenti. L'ordine delle righe è ignorato per default o con `unordered: true`; `unordered: false` e `ordered_rows: true` richiedono l'ordine esatto. `rows_prefix` consente di verificare un prefisso ordinato insieme al `row_count`, utile per risultati top-k stabili senza duplicare nel corpus tutte le righe. `numeric_tolerance`, normalmente `1e-6`, assorbe soltanto le normali differenze floating point.
 
 ## Consistenza
 
@@ -32,11 +32,28 @@ Il summary mantiene pass rate, accuratezza di classificazione/backend, valid-pla
 - `structural_hallucination_rate`, basato su asset, campi, backend e operazioni non compatibili con il catalogo;
 - `forced_answer_rate` e `prudent_refusal_rate` per richieste non calcolabili;
 - timeout rate, error rate e result-verified rate;
+- numero di casi/esecuzioni con ground truth e result accuracy complessiva, per backend e per operation type;
 - mediana e p95 separate per planning, execution, explanation e totale.
 
 Le latenze misurano tempo osservato end-to-end nelle rispettive fasi: sono **latenza e proxy osservabile del costo computazionale**, non una misura diretta del costo computazionale. Carico del sistema, cold start e rete possono influenzarle.
 
 Il runner registra `explanation_present` e `explanation_ms`. Per risposte ambigue o non calcolabili registra anche la presenza strutturale di chiarimento o motivazione. Non valuta automaticamente qualità, correttezza o stile della spiegazione e non applica euristiche lessicali fragili.
+
+## Ground truth dei risultati
+
+L'accuratezza strutturale misura classificazione, backend, asset e validità del piano. L'accuratezza del risultato confronta invece le righe restituite con valori calcolati direttamente dalle sorgenti demo. Il corpus corrente contiene 20 casi con `expected_result`: 6 DuckDB, 7 MySQL e 7 MongoDB.
+
+Sono stati scelti count, group by, sum, avg e risultati ordinati o aggregati di dimensione controllata. Sono esclusi casi ambigui/non calcolabili, raggruppamenti temporali ancora instabili, projection molto grandi o senza ordine, output troncati e documenti il cui timestamp init dipende dall'istante di creazione del volume. `result_verified_rate` è la quota di casi logici dotati di ground truth; `result_accuracy` usa esclusivamente le relative esecuzioni come denominatore.
+
+La ground truth è rigenerabile con query statiche e read-only, senza passare dal planner o dall'endpoint QueryX:
+
+```bash
+docker compose run --rm -T \
+  -v "$PWD/benchmark:/app/benchmark:ro" \
+  queryx python benchmark/generate_ground_truth.py
+```
+
+Lo script usa la configurazione QueryX esistente, interroga direttamente MySQL e MongoDB e apre DuckDB in modalità read-only. Può anche scrivere il JSON con `--output`; non aggiorna automaticamente `cases.json` e non modifica alcun dato. Se una sorgente non è raggiungibile termina con errore. I valori copiati nel corpus mantengono la precisione restituita dalle sorgenti e usano la tolleranza numerica documentata, senza arrotondamenti arbitrari.
 
 ## Esecuzione
 

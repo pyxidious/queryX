@@ -94,10 +94,19 @@ def compare_results(
     if not isinstance(actual, dict):
         return False
     for key, expected_value in expected.items():
-        if key == "rows":
+        if key in {"rows", "rows_prefix", "unordered"}:
             continue
         if key not in actual or not structural_equal(actual[key], expected_value, tolerance):
             return False
+    if "rows_prefix" in expected:
+        actual_rows = actual.get("rows")
+        prefix = expected["rows_prefix"]
+        return (
+            isinstance(actual_rows, list)
+            and isinstance(prefix, list)
+            and len(actual_rows) >= len(prefix)
+            and structural_equal(actual_rows[:len(prefix)], prefix, tolerance)
+        )
     if "rows" not in expected:
         return True
     actual_rows = actual.get("rows")
@@ -227,6 +236,26 @@ def _equivalence_summary(records: list[dict[str, Any]]) -> dict[str, dict[str, A
     return result
 
 
+def _result_accuracy_breakdown(
+    records: list[dict[str, Any]], field: str
+) -> dict[str, dict[str, Any]]:
+    verified = [record for record in records if record.get("expected_result") is not None]
+    values = sorted({str(record.get(field) or "unknown") for record in verified})
+    return {
+        value: {
+            "verified_executions": len(items),
+            "result_accuracy": _rate(
+                sum(record.get("result_match") is True for record in items), len(items)
+            ),
+        }
+        for value in values
+        for items in [[
+            record for record in verified
+            if str(record.get(field) or "unknown") == value
+        ]]
+    }
+
+
 def summarize_records(
     records: list[dict[str, Any]], *, include_breakdowns: bool = True,
     include_categories: bool | None = None,
@@ -312,9 +341,22 @@ def summarize_records(
     summary["error_rate"] = _rate(
         sum(record.get("error_code") is not None for record in metric_records), len(metric_records)
     )
-    summary["result_verified_rate"] = _rate(
-        sum(record.get("result_match") is not None for record in metric_records),
-        len(metric_records),
+    verified_cases = [record for record in records if record.get("expected_result") is not None]
+    verified_executions = [
+        record for record in metric_records if record.get("expected_result") is not None
+    ]
+    summary["result_verified_cases"] = len(verified_cases)
+    summary["result_verified_executions"] = len(verified_executions)
+    summary["result_verified_rate"] = _rate(len(verified_cases), total)
+    summary["result_accuracy"] = _rate(
+        sum(record.get("result_match") is True for record in verified_executions),
+        len(verified_executions),
+    )
+    summary["result_accuracy_by_backend"] = _result_accuracy_breakdown(
+        metric_records, "expected_backend"
+    )
+    summary["result_accuracy_by_operation_type"] = _result_accuracy_breakdown(
+        metric_records, "operation_type"
     )
     if include_breakdowns:
         summary["by_category"] = _breakdown(records, "category")
@@ -564,7 +606,10 @@ def run_case(
     result_match = compare_results(
         result if isinstance(result, dict) else None,
         case.get("expected_result"),
-        ordered_rows=bool(case.get("ordered_rows", False)),
+        ordered_rows=bool(case.get("ordered_rows", False)) or (
+            isinstance(case.get("expected_result"), dict)
+            and case["expected_result"].get("unordered") is False
+        ),
         tolerance=float(case.get("numeric_tolerance", DEFAULT_TOLERANCE)),
     )
     structural_flags = _structural_flags(plan, response, assets)
@@ -628,12 +673,24 @@ def aggregate_repetitions(
     outcome = _consistency([item.get("pass") for item in repetitions])
     result_consistency: bool | None = None
     if case.get("expected_result") is not None:
-        result_consistency = _consistency([item.get("result_match") for item in repetitions])
-        baseline = repetitions[0].get("result")
-        result_consistency = result_consistency and all(
+        baseline_result = repetitions[0].get("result")
+        baseline = (
+            {
+                key: baseline_result[key]
+                for key in ("columns", "rows", "row_count", "truncated")
+                if isinstance(baseline_result, dict) and key in baseline_result
+            }
+            if isinstance(baseline_result, dict) else None
+        )
+        result_consistency = all(
+            item.get("result_match") is True for item in repetitions
+        ) and all(
             compare_results(
                 item.get("result"), baseline,
-                ordered_rows=bool(case.get("ordered_rows", False)),
+                ordered_rows=bool(case.get("ordered_rows", False)) or (
+                    isinstance(case.get("expected_result"), dict)
+                    and case["expected_result"].get("unordered") is False
+                ),
                 tolerance=float(case.get("numeric_tolerance", DEFAULT_TOLERANCE)),
             ) is True
             for item in repetitions[1:]

@@ -3,7 +3,8 @@
     "id": "duckdb_orders_by_status", "category": "duckdb", "operation_type": "group_by", "difficulty": "easy",
     "question": "Quanti ordini ci sono per order_status nel dataset CSV orders?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_status", "uncertainty_type": "none", "repeat_count": 3
+    "expected_result": {"rows": [["approved", 2], ["canceled", 625], ["created", 5], ["delivered", 96478], ["invoiced", 314], ["processing", 301], ["shipped", 1107], ["unavailable", 609]], "unordered": true},
+    "expected_error_code": null, "equivalence_group": "duckdb_orders_status", "uncertainty_type": "none", "repeat_count": 3
   },
   {
     "id": "duckdb_orders_by_month", "category": "duckdb", "operation_type": "temporal_grouping", "difficulty": "hard",
@@ -15,7 +16,8 @@
     "id": "duckdb_revenue_by_category", "category": "duckdb", "operation_type": "multi_asset", "difficulty": "hard",
     "question": "Quali product_category_name hanno generato più ricavi usando price nei dataset CSV?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "repeat_count": 3
+    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
+    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "repeat_count": 3, "numeric_tolerance": 1e-6
   },
   {
     "id": "duckdb_delivered_filter", "category": "duckdb", "operation_type": "filter", "difficulty": "easy",
@@ -33,7 +35,8 @@
     "id": "duckdb_status_sorted", "category": "duckdb", "operation_type": "sort", "difficulty": "medium",
     "question": "Nel file CSV orders conta gli ordini per order_status e ordina dal conteggio più alto", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [["delivered", 96478], ["shipped", 1107], ["canceled", 625], ["unavailable", 609], ["invoiced", 314], ["processing", 301], ["created", 5], ["approved", 2]], "unordered": false},
+    "expected_error_code": null, "uncertainty_type": "none"
   },
   {
     "id": "duckdb_monthly_file_variant", "category": "duckdb", "operation_type": "temporal_grouping", "difficulty": "medium",
@@ -57,13 +60,15 @@
     "id": "duckdb_items_price_sum", "category": "duckdb", "operation_type": "aggregation", "difficulty": "medium",
     "question": "Qual è la somma di price nel dataset CSV order_items?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_items",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [[13591643.699998682]]}, "expected_error_code": null,
+    "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "duckdb_revenue_top_categories", "category": "duckdb", "operation_type": "multi_asset", "difficulty": "hard",
     "question": "Nei dataset CSV, mostra le product_category_name con maggiore somma di price", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none"
+    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
+    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "duckdb_items_price_filter", "category": "duckdb", "operation_type": "filter", "difficulty": "medium",
@@ -76,25 +81,29 @@
     "id": "mysql_orders_by_status", "category": "mysql", "operation_type": "group_by", "difficulty": "easy",
     "question": "Quanti ordini ci sono per stato nel database MySQL?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [["cancelled", 41], ["paid", 224], ["pending", 107], ["refunded", 29], ["shipped", 99]], "unordered": true},
+    "expected_error_code": null, "uncertainty_type": "none"
   },
   {
     "id": "mysql_count_paid", "category": "mysql", "operation_type": "count", "difficulty": "easy",
     "question": "Quanti ordini MySQL hanno stato paid?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_paid_count", "uncertainty_type": "none", "repeat_count": 3
+    "expected_result": {"rows": [[224]]}, "expected_error_code": null,
+    "equivalence_group": "mysql_paid_count", "uncertainty_type": "none", "repeat_count": 3
   },
   {
     "id": "mysql_average_total", "category": "mysql", "operation_type": "aggregation", "difficulty": "easy",
     "question": "Qual è il totale medio degli ordini nel database MySQL?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_average_total", "uncertainty_type": "none"
+    "expected_result": {"rows": [[240.58234]]}, "expected_error_code": null,
+    "equivalence_group": "mysql_average_total", "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "mysql_sum_total", "category": "mysql", "operation_type": "aggregation", "difficulty": "easy",
     "question": "Qual è il valore totale degli ordini nel database MySQL?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [[120291.17]]}, "expected_error_code": null,
+    "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "mysql_total_over_100", "category": "mysql", "operation_type": "filter", "difficulty": "easy",
@@ -106,7 +115,7 @@
     "id": "mysql_count_pending", "category": "mysql", "operation_type": "count", "difficulty": "easy",
     "question": "Nel database MySQL conta gli ordini con status pending", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [[107]]}, "expected_error_code": null, "uncertainty_type": "none"
   },
   {
     "id": "mysql_paid_count_variant", "category": "mysql", "operation_type": "count", "difficulty": "medium",
@@ -149,7 +158,8 @@
     "id": "mongodb_count_profiles", "category": "mongodb", "operation_type": "count", "difficulty": "easy",
     "question": "Quanti profili ci sono nel database MongoDB?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none", "repeat_count": 3
+    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none", "repeat_count": 3
   },
   {
     "id": "mongodb_english_profiles", "category": "mongodb", "operation_type": "filter", "difficulty": "easy",
@@ -167,13 +177,15 @@
     "id": "mongodb_events_by_type", "category": "mongodb", "operation_type": "group_by", "difficulty": "easy",
     "question": "Quanti eventi ci sono per tipo nel database MongoDB?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none", "repeat_count": 3
+    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
+    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none", "repeat_count": 3
   },
   {
     "id": "mongodb_sum_amount", "category": "mongodb", "operation_type": "aggregation", "difficulty": "medium",
     "question": "Qual è l’importo totale degli eventi MongoDB?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
+    "expected_result": {"rows": [[29827.97]]}, "expected_error_code": null,
+    "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "mongodb_newsletter_disabled", "category": "mongodb", "operation_type": "filter", "difficulty": "medium",
@@ -209,7 +221,8 @@
     "id": "mongodb_events_by_type_variant", "category": "mongodb", "operation_type": "group_by", "difficulty": "medium",
     "question": "Nel database documentale conta gli events raggruppandoli per type", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
+    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
+    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
   },
   {
     "id": "mongodb_recent_events", "category": "mongodb", "operation_type": "top_k", "difficulty": "hard",
@@ -332,13 +345,15 @@
     "id": "rephrase_mysql_average", "category": "reformulation", "operation_type": "aggregation", "difficulty": "medium",
     "question": "Calcola la media del totale degli ordini MySQL", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_average_total", "uncertainty_type": "none"
+    "expected_result": {"rows": [[240.58234]]}, "expected_error_code": null,
+    "equivalence_group": "mysql_average_total", "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "rephrase_mongodb_profiles", "category": "reformulation", "operation_type": "count", "difficulty": "medium",
     "question": "Conta il numero di profili presenti in MongoDB", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
+    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
   },
   {
     "id": "robust_duckdb_status", "category": "robustness", "operation_type": "group_by", "difficulty": "medium",
@@ -356,13 +371,15 @@
     "id": "robust_duckdb_revenue", "category": "robustness", "operation_type": "multi_asset", "difficulty": "hard",
     "question": "Usando i file CSV order_items e prodotti, somma price per product_category_name", "execute": true,
     "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none"
+    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
+    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "numeric_tolerance": 1e-6
   },
   {
     "id": "robust_mysql_paid", "category": "robustness", "operation_type": "count", "difficulty": "medium",
     "question": "Quanti record della tabella orders del database relazionale MySQL hanno status paid?", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_paid_count", "uncertainty_type": "none"
+    "expected_result": {"rows": [[224]]}, "expected_error_code": null,
+    "equivalence_group": "mysql_paid_count", "uncertainty_type": "none"
   },
   {
     "id": "robust_mysql_average", "category": "robustness", "operation_type": "aggregation", "difficulty": "medium",
@@ -374,7 +391,8 @@
     "id": "robust_mongodb_profiles", "category": "robustness", "operation_type": "count", "difficulty": "medium",
     "question": "Nel database documentale MongoDB, numero complessivo di documenti profiles", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
+    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
   },
   {
     "id": "robust_mongodb_newsletter", "category": "robustness", "operation_type": "filter", "difficulty": "medium",
@@ -386,7 +404,8 @@
     "id": "robust_mongodb_events_type", "category": "robustness", "operation_type": "group_by", "difficulty": "medium",
     "question": "Raggruppa per type i documenti events e contali; la sorgente è MongoDB", "execute": true,
     "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
+    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
+    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
   },
   {
     "id": "robust_duckdb_monthly", "category": "robustness", "operation_type": "temporal_grouping", "difficulty": "hard",
