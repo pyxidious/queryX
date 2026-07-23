@@ -477,22 +477,59 @@ class NaturalLanguageQueryService:
                 else "La query non ha restituito risultati."
             ), None
         serialized = result.model_dump(mode="json")
+        returned_rows = serialized["rows"]
+        columns = serialized["columns"]
+        rows_for_explanation = returned_rows[:_MAX_EXPLANATION_ROWS]
+        rows_omitted_from_prompt = max(
+            len(returned_rows) - len(rows_for_explanation), 0
+        )
+        if rows_omitted_from_prompt:
+            answer = self._deterministic_tabular_answer(
+                question,
+                row_count=serialized["row_count"],
+                columns=columns,
+                truncated=serialized["truncated"],
+            )
+            logger.info(
+                "Used deterministic explanation because %s result rows were omitted "
+                "from the LLM context",
+                rows_omitted_from_prompt,
+            )
+            return answer, None
+        result_shape = (
+            "scalar"
+            if len(returned_rows) == 1 and len(columns) == 1
+            else "tabular"
+        )
         payload = {
             "question": question,
-            "columns": serialized["columns"],
-            "rows": serialized["rows"][:_MAX_EXPLANATION_ROWS],
+            "columns": columns,
+            "rows": rows_for_explanation,
             "row_count": serialized["row_count"],
-            "truncated": serialized["truncated"],
+            "returned_rows_count": len(returned_rows),
+            "rows_in_prompt": len(rows_for_explanation),
+            "rows_omitted_from_prompt": 0,
+            "result_truncated": serialized["truncated"],
+            "result_shape": result_shape,
         }
         messages = [
             {
                 "role": "system",
                 "content": (
                     "Write a concise natural-language answer of at most three sentences, based "
-                    "exclusively on the supplied result values. Do not perform or request new "
-                    "calculations. Do not include reasoning or hidden analysis. If truncated is "
-                    "true, clearly state that the displayed result is truncated. Return only "
-                    "the answer text in the same language as the user's question."
+                    "exclusively on the supplied result metadata and row values. All returned "
+                    "rows are present in the rows array. row_count always means the number of "
+                    "output rows, never the total of a measure or the number of business objects. "
+                    "Only interpret a value as a total count when result_shape is scalar and the "
+                    "single visible cell contains that count. For tabular or grouped results, "
+                    "describe the visible rows and columns without summing aggregation values. "
+                    "Never claim that the query result is truncated unless result_truncated is "
+                    "true. When result_truncated is false, do not mention truncation, omitted "
+                    "rows, hidden rows or additional rows. Do not infer values, ranges, totals, "
+                    "trends, or properties not directly supported by the supplied rows, and do "
+                    "not perform or request new calculations. Do not include reasoning or hidden "
+                    "analysis. Return only the answer text in the same language as the user's "
+                    "question."
                 ),
             },
             {
@@ -521,6 +558,32 @@ class NaturalLanguageQueryService:
             )
             answer = f"{answer} {truncation_notice}"
         return answer, None
+
+    @classmethod
+    def _deterministic_tabular_answer(
+        cls,
+        question: str,
+        *,
+        row_count: int,
+        columns: list[str],
+        truncated: bool,
+    ) -> str:
+        rendered_columns = ", ".join(f"`{column}`" for column in columns)
+        if cls._is_english_question(question):
+            answer = (
+                f"The query returned {row_count} rows with the columns "
+                f"{rendered_columns}. See the result table for the complete values."
+            )
+            if truncated:
+                answer = f"{answer} The displayed result is truncated."
+            return answer
+        answer = (
+            f"La query ha restituito {row_count} righe con le colonne "
+            f"{rendered_columns}. Consulta la tabella dei risultati per i valori completi."
+        )
+        if truncated:
+            answer = f"{answer} Il risultato mostrato è troncato."
+        return answer
 
     @staticmethod
     def _is_english_question(question: str) -> bool:

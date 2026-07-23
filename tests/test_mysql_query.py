@@ -687,6 +687,124 @@ def _add_duckdb_orders(settings: Settings) -> None:
     )
 
 
+
+def test_explanation_uses_deterministic_summary_when_llm_context_is_sampled(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, _, assets = mysql_query_env
+    client = _SequencedNaturalClient(
+        _mysql_plan(assets),
+        explanation="This explanation must never be requested.",
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    rows = [[f"2024-{month:02d}-01", month] for month in range(1, 26)]
+
+    class _CompleteResult:
+        row_count = 25
+        truncated = False
+
+        @staticmethod
+        def model_dump(mode: str = "json") -> dict[str, Any]:
+            assert mode == "json"
+            return {
+                "columns": ["month", "orders"],
+                "rows": rows,
+                "row_count": 25,
+                "truncated": False,
+            }
+
+    with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
+        answer, warning = service._explain(
+            "Quanti ordini ci sono per mese?", _CompleteResult()
+        )
+
+    assert warning is None
+    assert answer == (
+        "La query ha restituito 25 righe con le colonne `month`, `orders`. "
+        "Consulta la tabella dei risultati per i valori completi."
+    )
+    assert client.prompts == []
+    assert "15 result rows were omitted from the LLM context" in caplog.text
+
+
+def test_explanation_prompt_defines_row_count_as_output_rows(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    client = _SequencedNaturalClient(
+        _mysql_plan(assets),
+        explanation="La query ha restituito due gruppi.",
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+
+    class _SmallGroupedResult:
+        row_count = 2
+        truncated = False
+
+        @staticmethod
+        def model_dump(mode: str = "json") -> dict[str, Any]:
+            assert mode == "json"
+            return {
+                "columns": ["status", "orders"],
+                "rows": [["paid", 12], ["pending", 5]],
+                "row_count": 2,
+                "truncated": False,
+            }
+
+    answer, warning = service._explain(
+        "Quanti ordini ci sono per stato?", _SmallGroupedResult()
+    )
+
+    assert warning is None
+    assert answer == "La query ha restituito due gruppi."
+    system_prompt = client.prompts[-2]
+    payload = json.loads(client.prompts[-1])
+    assert payload["result_shape"] == "tabular"
+    assert payload["row_count"] == 2
+    assert payload["rows_omitted_from_prompt"] == 0
+    assert "row_count always means the number of output rows" in system_prompt
+    assert "never the total of a measure" in system_prompt
+
+
+def test_explanation_marks_only_real_result_truncation(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    client = _SequencedNaturalClient(
+        _mysql_plan(assets),
+        explanation="La query ha restituito le righe disponibili.",
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+
+    class _TruncatedResult:
+        row_count = 10
+        truncated = True
+
+        @staticmethod
+        def model_dump(mode: str = "json") -> dict[str, Any]:
+            assert mode == "json"
+            return {
+                "columns": ["id"],
+                "rows": [[index] for index in range(10)],
+                "row_count": 10,
+                "truncated": True,
+            }
+
+    answer, warning = service._explain(
+        "Mostra gli ordini disponibili", _TruncatedResult()
+    )
+
+    assert warning is None
+    assert answer == (
+        "La query ha restituito le righe disponibili. "
+        "Il risultato mostrato è troncato."
+    )
+    payload = json.loads(client.prompts[-1])
+    assert payload["rows_omitted_from_prompt"] == 0
+    assert payload["result_truncated"] is True
+
+
 def test_natural_language_mysql_hint_excludes_same_named_duckdb_schema(
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:

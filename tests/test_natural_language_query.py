@@ -880,8 +880,22 @@ def test_execute_false_does_not_execute_and_true_uses_existing_service(
     assert response.explanation_time_ms is not None
     explanation_payload = json.loads(client.calls[1][0][1]["content"])
     assert set(explanation_payload) == {
-        "question", "columns", "rows", "row_count", "truncated"
+        "question",
+        "columns",
+        "rows",
+        "row_count",
+        "returned_rows_count",
+        "rows_in_prompt",
+        "rows_omitted_from_prompt",
+        "result_truncated",
+        "result_shape",
     }
+    assert explanation_payload["row_count"] == 2
+    assert explanation_payload["returned_rows_count"] == 2
+    assert explanation_payload["rows_in_prompt"] == 2
+    assert explanation_payload["rows_omitted_from_prompt"] == 0
+    assert explanation_payload["result_truncated"] is False
+    assert explanation_payload["result_shape"] == "tabular"
     assert explanation_payload["question"] == "orders by status"
     assert "thinking" not in response.model_dump(mode="json")
     assert response.explanation_warning is None
