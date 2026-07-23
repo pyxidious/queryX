@@ -356,6 +356,31 @@ def _items_plan(asset: Any, **updates: Any) -> dict[str, Any]:
     return payload
 
 
+def _profiles_by_role_plan(asset: Any) -> dict[str, Any]:
+    return {
+        "sources": [{"alias": "profiles", "asset_id": asset.asset_id}],
+        "unwinds": [{"source_alias": "profiles", "field": "roles"}],
+        "projections": [{
+            "source_alias": "profiles",
+            "field": "roles[]",
+            "alias": "role",
+        }],
+        "filters": [],
+        "array_matches": [],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "profiles",
+            "field": "_id",
+            "alias": "profiles",
+        }],
+        "group_by": [{
+            "source_alias": "profiles",
+            "field": "roles[]",
+        }],
+        "order_by": [],
+    }
+
+
 def test_mongodb_collection_promotion_idempotence_schema_change_and_stale(
     mongodb_env: tuple[Settings, QueryService, Any],
 ) -> None:
@@ -1161,7 +1186,7 @@ def test_natural_language_accepts_strict_mongodb_array_plan_and_examples(
             "field": "items[].sku",
         }],
     )
-    client = _NaturalClient(plan)
+    client = _SequencedNaturalClient(plan)
 
     response = NaturalLanguageQueryService(
         settings, client=client  # type: ignore[arg-type]
@@ -1174,7 +1199,8 @@ def test_natural_language_accepts_strict_mongodb_array_plan_and_examples(
     assert response.normalized_plan.projections[0].field == "items[].sku"
     assert response.normalized_plan.group_by[0].field == "items[].sku"
     assert response.normalized_plan.aggregations[0].field == "items[].quantity"
-    prompt = json.loads(client.planning_messages[1]["content"])
+    assert len(client.planning_calls) == 1
+    prompt = json.loads(client.planning_calls[0][1]["content"])
     examples = prompt["catalog_scoped_resolution_examples"]
     questions = {item["question"] for item in examples}
     assert (
@@ -1184,6 +1210,94 @@ def test_natural_language_accepts_strict_mongodb_array_plan_and_examples(
     assert (
         "Qual è la quantità totale acquistata per SKU negli eventi MongoDB?"
     ) in questions
+
+
+def test_natural_language_quantity_by_sku_rejects_amount_and_retries_once(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    wrong = _events_amount_metric_plan(assets["events"], "sum", "total")
+    corrected = _items_plan(
+        assets["events"],
+        aggregations=[{
+            "function": "sum",
+            "source_alias": "events",
+            "field": "items[].quantity",
+            "alias": "quantity",
+        }],
+        group_by=[{
+            "source_alias": "events",
+            "field": "items[].sku",
+        }],
+    )
+    client = _SequencedNaturalClient(wrong, corrected)
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Qual è la quantità totale acquistata per SKU negli eventi MongoDB?"
+    ))
+
+    assert len(client.planning_calls) == 2
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_quantity_by_sku_mismatch"
+    assert "items[].quantity" in feedback["instruction"]
+    assert "properties.amount" in feedback["instruction"]
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.unwinds[0].field == "items"
+    assert plan.projections[0].field == plan.group_by[0].field == "items[].sku"
+    assert plan.aggregations[0].field == "items[].quantity"
+    assert plan.filters == [] and plan.array_matches == []
+
+
+def test_natural_language_profiles_by_role_requires_unwind_and_grouping(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    wrong = _profiles_count_plan(assets["profiles"])
+    corrected = _profiles_by_role_plan(assets["profiles"])
+    client = _SequencedNaturalClient(wrong, corrected)
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question=(
+            "Quanti profili MongoDB ci sono per ciascun ruolo presente "
+            "nell’array roles?"
+        )
+    ))
+
+    assert len(client.planning_calls) == 2
+    feedback = json.loads(client.planning_calls[1][-1]["content"])
+    assert feedback["validation_code"] == "mongodb_profiles_by_role_mismatch"
+    assert "roles[]" in feedback["instruction"]
+    plan = response.normalized_plan
+    assert plan is not None
+    assert plan.unwinds[0].field == "roles"
+    assert plan.projections[0].field == plan.group_by[0].field == "roles[]"
+    assert plan.projections[0].alias == "role"
+    assert plan.aggregations[0].field == "_id"
+    assert plan.aggregations[0].alias == "profiles"
+
+
+def test_natural_language_correct_profiles_by_role_plan_needs_no_retry(
+    mongodb_profiles_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mongodb_profiles_env
+    client = _SequencedNaturalClient(
+        _profiles_by_role_plan(assets["profiles"])
+    )
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Count MongoDB profiles by each role"
+    ))
+
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.group_by[0].field == "roles[]"
+    assert len(client.planning_calls) == 1
 
 
 def test_natural_language_retries_mongodb_source_alias_typo_once(

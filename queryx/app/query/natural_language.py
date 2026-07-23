@@ -753,6 +753,14 @@ class NaturalLanguageQueryService:
                         or len(projected_fields) != len(set(projected_fields))
                     ):
                         raise _PlanningSemanticError("mongodb_row_projection_mismatch")
+            array_shape_code = requirements.get("mongodb_array_shape_code")
+            if (
+                isinstance(array_shape_code, str)
+                and not self._matches_mongodb_array_shape(
+                    candidate, alias, requirements
+                )
+            ):
+                raise _PlanningSemanticError(array_shape_code)
             aggregation = requirements.get("aggregation")
             if aggregation is not None:
                 matched = any(
@@ -842,6 +850,54 @@ class NaturalLanguageQueryService:
                         "mongodb_scalar_aggregation_mismatch"
                     )
         return validation
+
+    @staticmethod
+    def _matches_mongodb_array_shape(
+        candidate: dict[str, Any],
+        source_alias: Any,
+        requirements: dict[str, Any],
+    ) -> bool:
+        unwind = requirements["unwind"]
+        projection = requirements["projection"]
+        aggregation = requirements["aggregation"]
+        group_by = requirements["group_by"]
+
+        def one(section: str) -> dict[str, Any] | None:
+            values = candidate.get(section, [])
+            return (
+                values[0]
+                if len(values) == 1 and isinstance(values[0], dict)
+                else None
+            )
+
+        candidate_unwind = one("unwinds")
+        candidate_projection = one("projections")
+        candidate_aggregation = one("aggregations")
+        candidate_group_by = one("group_by")
+        return (
+            isinstance(source_alias, str)
+            and candidate_unwind is not None
+            and candidate_unwind.get("source_alias") == source_alias
+            and candidate_unwind.get("field") == unwind["field"]
+            and not candidate_unwind.get("preserve_null_and_empty_arrays", False)
+            and candidate_projection is not None
+            and candidate_projection.get("source_alias") == source_alias
+            and candidate_projection.get("field") == projection["field"]
+            and candidate_projection.get("alias") == projection["alias"]
+            and candidate_projection.get("transform") is None
+            and candidate_aggregation is not None
+            and candidate_aggregation.get("function") == aggregation["function"]
+            and candidate_aggregation.get("source_alias") == source_alias
+            and candidate_aggregation.get("field") == aggregation["field"]
+            and candidate_aggregation.get("alias") == aggregation["alias"]
+            and candidate_group_by is not None
+            and candidate_group_by.get("source_alias") == source_alias
+            and candidate_group_by.get("field") == group_by["field"]
+            and candidate_group_by.get("transform") is None
+            and not candidate.get("array_matches")
+            and not candidate.get("filters")
+            and not candidate.get("order_by")
+        )
 
     @staticmethod
     def _semantic_values_equal(actual: Any, expected: Any) -> bool:
@@ -1112,6 +1168,21 @@ class NaturalLanguageQueryService:
                 "include source_alias set exactly to the alias declared in sources. Preserve "
                 "the numeric filter and keep projections, group_by and order_by unchanged. "
                 "Return only the corrected plan object."
+            )
+        elif validation_code == "mongodb_quantity_by_sku_mismatch":
+            instruction = (
+                "Correct only the MongoDB LogicalQueryPlan for the catalog-scoped "
+                "quantity-by-SKU intent. Unwind exactly items; project items[].sku as sku; "
+                "group by items[].sku; sum items[].quantity as quantity. Do not use "
+                "properties.amount, array_matches, filters or extra fields. Return only "
+                "the corrected plan object."
+            )
+        elif validation_code == "mongodb_profiles_by_role_mismatch":
+            instruction = (
+                "Correct only the MongoDB LogicalQueryPlan for the catalog-scoped "
+                "profiles-by-role count. Unwind exactly roles; project roles[] as role; "
+                "group by roles[]; count _id as profiles. Do not use array_matches, "
+                "filters or extra fields. Return only the corrected plan object."
             )
         semantic_requirements = self._semantic_requirements(question, context)
         if (
@@ -1729,11 +1800,48 @@ class NaturalLanguageQueryService:
             if asset["logical_name"].casefold() == "events" and user_filter:
                 requirements["filter"] = user_filter
                 requirements["exact_filter"] = True
+            if (
+                {"roles", "roles[]"}.issubset(fields)
+                and NaturalLanguageQueryService._count_per_role_intent(normalized)
+            ):
+                requirements.update({
+                    "unwind": {"field": "roles"},
+                    "projection": {"field": "roles[]", "alias": "role"},
+                    "aggregation": {
+                        "function": "count",
+                        "field": "_id",
+                        "alias": "profiles",
+                    },
+                    "group_by": {"field": "roles[]"},
+                    "mongodb_array_shape_code": (
+                        "mongodb_profiles_by_role_mismatch"
+                    ),
+                })
+        if asset.get("backend") == "mongodb":
+            fields = {str(field["name"]): field for field in asset["fields"]}
+            if (
+                {"items", "items[].sku", "items[].quantity"}.issubset(fields)
+                and NaturalLanguageQueryService._quantity_per_sku_intent(normalized)
+            ):
+                requirements.update({
+                    "unwind": {"field": "items"},
+                    "projection": {"field": "items[].sku", "alias": "sku"},
+                    "aggregation": {
+                        "function": "sum",
+                        "field": "items[].quantity",
+                        "alias": "quantity",
+                    },
+                    "group_by": {"field": "items[].sku"},
+                    "mongodb_array_shape_code": (
+                        "mongodb_quantity_by_sku_mismatch"
+                    ),
+                })
         if (
             asset.get("backend") == "mongodb"
             and asset["logical_name"].casefold() == "events"
             and requirements.get("aggregation", {}).get("function") in {"sum", "avg"}
             and intent != "count"
+            and not requirements.get("mongodb_array_shape_code")
         ):
             requirements["strict_mongodb_scalar_aggregation"] = True
         if (
@@ -1797,6 +1905,30 @@ class NaturalLanguageQueryService:
                     requirements["required_projections"]
                 )
         return requirements
+
+    @staticmethod
+    def _quantity_per_sku_intent(normalized_question: str) -> bool:
+        return bool(
+            re.search(r"\b(?:quantit[aà]|quantity)\b", normalized_question)
+            and re.search(
+                r"\b(?:per|by)\s+(?:(?:ciascun|ogni|each)\s+)?sku\b",
+                normalized_question,
+            )
+        )
+
+    @staticmethod
+    def _count_per_role_intent(normalized_question: str) -> bool:
+        role = r"(?:ruolo|ruoli|role|roles)"
+        return bool(
+            re.search(
+                rf"\b(?:per|by)\s+(?:(?:ciascun|ogni|each)\s+)?{role}\b",
+                normalized_question,
+            )
+            or re.search(
+                rf"\b(?:ciascun|ogni|each)\s+{role}\b",
+                normalized_question,
+            )
+        )
 
     @staticmethod
     def _mongodb_event_user_filter(
