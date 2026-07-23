@@ -1172,17 +1172,12 @@ def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    settings, _, _ = mysql_query_env
+    settings, query_service, _ = mysql_query_env
     _add_duckdb_orders(settings)
     asset = _duckdb_orders_asset(settings)
-    corrected = {
+    invalid = {
         "sources": [{"alias": "o", "asset_id": asset.id}],
-        "projections": [{
-            "source_alias": "o",
-            "field": "order_purchase_timestamp",
-            "transform": "date_trunc_month",
-            "alias": "month",
-        }],
+        "projections": [],
         "aggregations": [{
             "function": "count",
             "source_alias": "o",
@@ -1194,32 +1189,41 @@ def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression
             "field": "order_purchase_timestamp",
             "transform": "date_trunc_month",
         }],
-        "order_by": [{"field": "month", "direction": "asc"}],
+        "order_by": [],
+        "limit": None,
     }
-    invalid = {
-        **corrected,
-        "projections": [
-            *corrected["projections"],
-            {"source_alias": "o", "field": "order_id"},
-        ],
-    }
-    client = _SequencedNaturalClient(invalid, corrected)
+    client = _SequencedNaturalClient(invalid, invalid)
 
     with caplog.at_level("WARNING", logger="queryx.app.query.natural_language"):
         response = NaturalLanguageQueryService(
-            settings, client=client  # type: ignore[arg-type]
+            settings,
+            client=client,  # type: ignore[arg-type]
+            query_service=query_service,
         ).translate(NaturalLanguageQueryRequest(
             question=(
                 "Quanti ordini del dataset CSV orders ci sono per mese di "
                 "order_purchase_timestamp?"
-            )
+            ),
+            execute=True,
         ))
 
     retry = json.loads(client.planning_calls[1][-1]["content"])
     assert retry["validation_code"] == "invalid_group_by"
     assert "identical group_by expression" in retry["instruction"]
     assert response.normalized_plan is not None
+    assert response.normalized_plan.projections[0].source_alias == "o"
+    assert response.normalized_plan.projections[0].field == "order_purchase_timestamp"
+    assert response.normalized_plan.projections[0].alias == "month"
+    assert response.normalized_plan.group_by[0].source_alias == "o"
+    assert response.normalized_plan.group_by[0].field == "order_purchase_timestamp"
     assert response.normalized_plan.group_by[0].transform == "date_trunc_month"
+    assert not hasattr(response.normalized_plan.group_by[0], "alias")
+    assert response.normalized_plan.aggregations[0].function == "count"
+    assert response.normalized_plan.aggregations[0].field == "order_id"
+    assert response.normalized_plan.limit == settings.query_default_limit
+    query_service.validate(response.normalized_plan)
+    assert response.result is not None
+    assert response.result.rows == [["2024-01-01", 1]]
     assert "validation_code=invalid_group_by" in caplog.text
 
 

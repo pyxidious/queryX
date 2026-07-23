@@ -309,6 +309,9 @@ class NaturalLanguageQueryService:
                     messages, candidate, exc.code, context, question
                 )
             )
+            candidate = self._canonicalize_grouped_retry(
+                candidate, exc.code, question, context
+            )
             try:
                 validation = self._validate_candidate_semantics(
                     candidate, question, context
@@ -797,6 +800,76 @@ class NaturalLanguageQueryService:
             code,
             structure,
         )
+
+    def _canonicalize_grouped_retry(
+        self,
+        candidate: dict[str, Any],
+        validation_code: str,
+        question: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if validation_code != "invalid_group_by":
+            return candidate
+        requirements = self._semantic_requirements(question, context)
+        group = requirements.get("group_by")
+        aggregation = requirements.get("aggregation")
+        asset_id = requirements.get("asset_id")
+        if not all(isinstance(item, dict) for item in (group, aggregation)):
+            return candidate
+        source = next(
+            (
+                item
+                for item in candidate.get("sources", [])
+                if isinstance(item, dict) and item.get("asset_id") == asset_id
+            ),
+            None,
+        )
+        if source is None or not isinstance(source.get("alias"), str):
+            return candidate
+        source_alias = source["alias"]
+        expression = {
+            "source_alias": source_alias,
+            "field": group["field"],
+            **(
+                {"transform": group["transform"]}
+                if group.get("transform") is not None
+                else {}
+            ),
+        }
+        projection = {
+            **expression,
+            **(
+                {"alias": "month"}
+                if group.get("transform") == "date_trunc_month"
+                else {}
+            ),
+        }
+        canonical = {
+            **candidate,
+            "projections": [projection],
+            "aggregations": [{
+                "function": aggregation["function"],
+                "source_alias": source_alias,
+                "field": aggregation["field"],
+                **(
+                    {"alias": aggregation["alias"]}
+                    if aggregation.get("alias") is not None
+                    else {}
+                ),
+            }],
+            "group_by": [expression],
+            "limit": self.settings.query_default_limit,
+        }
+        logger.info(
+            "Canonicalized grouped retry validation_code=%s source_alias=%s "
+            "field=%s transform=%s limit=%s",
+            validation_code,
+            source_alias,
+            group["field"],
+            group.get("transform"),
+            self.settings.query_default_limit,
+        )
+        return canonical
 
     def _retry_invalid_plan(
         self,
