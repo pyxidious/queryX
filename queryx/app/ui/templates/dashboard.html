@@ -348,7 +348,6 @@
               <th>Run</th>
               <th>Recipe</th>
               <th>Stato</th>
-              <th>Aggiornato</th>
             </tr>
           </thead>
           <tbody>
@@ -361,7 +360,6 @@
                 </td>
                 <td>{{ run.recipe_name }}</td>
                 <td>{{ status_badge(run.status) }}</td>
-                <td>{{ run.updated_at }}</td>
               </tr>
             {% endfor %}
           </tbody>
