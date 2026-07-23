@@ -45,26 +45,34 @@ L'accuratezza strutturale misura classificazione, backend, asset e validità del
 
 Sono stati scelti count, group by, sum, avg e risultati ordinati o aggregati di dimensione controllata. Sono esclusi casi ambigui/non calcolabili, raggruppamenti temporali ancora instabili, projection molto grandi o senza ordine, output troncati e documenti il cui timestamp init dipende dall'istante di creazione del volume. `result_verified_rate` è la quota di casi logici dotati di ground truth; `result_accuracy` usa esclusivamente le relative esecuzioni come denominatore.
 
-La ground truth è rigenerabile con query statiche e read-only, senza passare dal planner o dall'endpoint QueryX:
+La ground truth è rigenerabile con query statiche e read-only, senza passare dal planner o dall'endpoint QueryX. Il percorso ufficiale usa il container applicativo, che dispone già degli hostname Docker, delle credenziali configurate e del volume DuckDB:
 
 ```bash
-docker compose run --rm -T \
-  -v "$PWD/benchmark:/app/benchmark:ro" \
-  queryx python benchmark/generate_ground_truth.py
+docker compose exec queryx python -m benchmark.generate_ground_truth
 ```
 
-Lo script usa la configurazione QueryX esistente, interroga direttamente MySQL e MongoDB e apre DuckDB in modalità read-only. Può anche scrivere il JSON con `--output`; non aggiorna automaticamente `cases.json` e non modifica alcun dato. Se una sorgente non è raggiungibile termina con errore. I valori copiati nel corpus mantengono la precisione restituita dalle sorgenti e usano la tolleranza numerica documentata, senza arrotondamenti arbitrari.
+`benchmark` è incluso nell'immagine e montato in `/app/benchmark`, quindi l'aggiornamento di `cases.json` e gli artefatti sotto `results/` persistono direttamente nel checkout host. Lo script individua `cases.json` relativamente al package, aggiorna esclusivamente gli `expected_result` già predisposti e non modifica alcun dato sorgente. Usa `MYSQL_URL`, `MONGODB_URL` e `DUCKDB_PATH` della configurazione QueryX, apre DuckDB in modalità read-only e non stampa credenziali.
+
+Path alternativi possono essere indicati senza dipendere dalla working directory:
+
+```bash
+docker compose exec queryx python -m benchmark.generate_ground_truth \
+  --cases /app/benchmark/cases.json \
+  --output /app/benchmark/ground-truth.json
+```
+
+Prima del calcolo vengono verificati file, connessioni, tabelle, collection e permessi. Gli errori operativi sono sintetici; `--debug` abilita il traceback per diagnosi. I valori mantengono la precisione restituita dalle sorgenti e usano la tolleranza numerica documentata, senza arrotondamenti arbitrari.
 
 ## Esecuzione
 
 Prerequisiti: QueryX e Ollama avviati, discovery MySQL/MongoDB completata, asset promossi e dataset/relazioni DuckDB richiesti dal corpus disponibili.
 
 ```bash
-python benchmark/run.py \
+docker compose exec queryx python -m benchmark.run \
   --base-url http://127.0.0.1:8000 \
-  --cases benchmark/cases.json \
-  --output-dir benchmark/results \
-  --model-label qwen3.5-9b
+  --cases /app/benchmark/cases.json \
+  --output-dir /app/benchmark/results \
+  --model-label qwen3.5-9b-100k
 ```
 
 Ogni run produce:
@@ -76,3 +84,5 @@ Ogni run produce:
 Errori HTTP, timeout e fallimenti dei casi vengono registrati e il runner prosegue. L'exit code è diverso da zero soltanto se fallisce il runner stesso.
 
 Per svolgere più run manuali, ripetere il comando cambiando `--model-label` o le condizioni sperimentali. Il parametro identifica gli artefatti ma non seleziona né configura automaticamente il modello. In futuro, risultati con label diverse potranno essere confrontati esternamente mantenendo invariati corpus, seed, configurazione e stato dei repository; l'esecuzione automatica multi-modello non è ancora implementata.
+
+Gli stessi passaggi sono disponibili come `make up`, `make seed`, `make ground-truth`, `make benchmark` e `make reproduce`. `MODEL_LABEL=... make benchmark` cambia soltanto l'etichetta degli artefatti.

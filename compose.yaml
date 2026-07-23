@@ -13,6 +13,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - queryx_catalog:/app/data
+      - ./benchmark:/app/benchmark
     depends_on:
       mysql:
         condition: service_healthy

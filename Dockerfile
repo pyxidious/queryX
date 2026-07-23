@@ -7,8 +7,10 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY queryx ./queryx
+COPY benchmark ./benchmark
+COPY tests ./tests
 
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[dev]'
 
 EXPOSE 8000
 

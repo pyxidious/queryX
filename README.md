@@ -302,6 +302,27 @@ Il seed verifica o crea, senza rimuovere quelli presenti, gli indici MySQL su em
 
 Dopo il cambio di scala occorre eseguire, nell'ordine: discovery/profiling delle sorgenti, rigenerazione della ground truth, un nuovo benchmark Qwen, il benchmark del secondo modello e infine il report Markdown. La ground truth attuale non viene aggiornata automaticamente dal seed.
 
+### Riproduzione completa
+
+Il percorso ufficiale non richiede Python o dipendenze installate sull'host, override degli URL né conoscenza dei path Docker:
+
+```bash
+git clone <repository>
+cd queryX
+docker compose up --build -d
+docker compose exec queryx python -m queryx.tools.seed_demo
+docker compose exec queryx python -m benchmark.generate_ground_truth
+docker compose exec queryx python -m benchmark.run \
+  --base-url http://127.0.0.1:8000 \
+  --cases /app/benchmark/cases.json \
+  --output-dir /app/benchmark/results \
+  --model-label qwen3.5-9b-100k
+```
+
+Il volume applicativo rende disponibile DuckDB come configurato da `DUCKDB_PATH`; gli hostname `mysql` e `mongodb` provengono dalla configurazione Compose. Il bind mount `./benchmark:/app/benchmark` persiste sul checkout host sia gli `expected_result` rigenerati in `cases.json`, sia JSON, CSV e summary prodotti dal runner.
+
+In alternativa, `make reproduce` esegue l'intera sequenza. Sono disponibili anche i target separati `make up`, `make seed`, `make ground-truth`, `make benchmark` e `make test`; `MODEL_LABEL=nome make benchmark` imposta l'etichetta del run.
+
 Avvio locale:
 
 ```bash

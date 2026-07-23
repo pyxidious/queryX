@@ -1,416 +1,1256 @@
 [
   {
-    "id": "duckdb_orders_by_status", "category": "duckdb", "operation_type": "group_by", "difficulty": "easy",
-    "question": "Quanti ordini ci sono per order_status nel dataset CSV orders?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": {"rows": [["approved", 2], ["canceled", 625], ["created", 5], ["delivered", 96478], ["invoiced", 314], ["processing", 301], ["shipped", 1107], ["unavailable", 609]], "unordered": true},
-    "expected_error_code": null, "equivalence_group": "duckdb_orders_status", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "duckdb_orders_by_month", "category": "duckdb", "operation_type": "temporal_grouping", "difficulty": "hard",
-    "question": "Quanti ordini del dataset CSV orders ci sono per mese di order_purchase_timestamp?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_monthly", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "duckdb_revenue_by_category", "category": "duckdb", "operation_type": "multi_asset", "difficulty": "hard",
-    "question": "Quali product_category_name hanno generato più ricavi usando price nei dataset CSV?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
-    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "repeat_count": 3, "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "duckdb_delivered_filter", "category": "duckdb", "operation_type": "filter", "difficulty": "easy",
-    "question": "Mostra gli ordini con order_status delivered nel dataset CSV orders", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_delivered", "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_order_projection", "category": "duckdb", "operation_type": "projection", "difficulty": "easy",
-    "question": "Mostra order_id, order_status e order_purchase_timestamp del dataset CSV orders", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_status_sorted", "category": "duckdb", "operation_type": "sort", "difficulty": "medium",
-    "question": "Nel file CSV orders conta gli ordini per order_status e ordina dal conteggio più alto", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": {"rows": [["delivered", 96478], ["shipped", 1107], ["canceled", 625], ["unavailable", 609], ["invoiced", 314], ["processing", 301], ["created", 5], ["approved", 2]], "unordered": false},
-    "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_monthly_file_variant", "category": "duckdb", "operation_type": "temporal_grouping", "difficulty": "medium",
-    "question": "Dal file orders raggruppa per mese order_purchase_timestamp e conta order_id", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_monthly", "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_monthly_duckdb_variant", "category": "duckdb", "operation_type": "temporal_grouping", "difficulty": "medium",
-    "question": "In DuckDB, numero di order_id per mese di order_purchase_timestamp nel dataset orders", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_monthly", "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_delivered_technical", "category": "duckdb", "operation_type": "filter", "difficulty": "medium",
-    "question": "Dataset CSV orders: filtra order_status uguale a delivered e proietta order_id e order_status", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_delivered", "uncertainty_type": "none"
-  },
-  {
-    "id": "duckdb_items_price_sum", "category": "duckdb", "operation_type": "aggregation", "difficulty": "medium",
-    "question": "Qual è la somma di price nel dataset CSV order_items?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_items",
-    "expected_result": {"rows": [[13591643.699998682]]}, "expected_error_code": null,
-    "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "duckdb_revenue_top_categories", "category": "duckdb", "operation_type": "multi_asset", "difficulty": "hard",
-    "question": "Nei dataset CSV, mostra le product_category_name con maggiore somma di price", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
-    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "duckdb_items_price_filter", "category": "duckdb", "operation_type": "filter", "difficulty": "medium",
-    "question": "Mostra order_id, product_id e price dal file order_items quando price è maggiore di 100", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_items",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-
-  {
-    "id": "mysql_orders_by_status", "category": "mysql", "operation_type": "group_by", "difficulty": "easy",
-    "question": "Quanti ordini ci sono per stato nel database MySQL?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [["cancelled", 41], ["paid", 224], ["pending", 107], ["refunded", 29], ["shipped", 99]], "unordered": true},
-    "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_count_paid", "category": "mysql", "operation_type": "count", "difficulty": "easy",
-    "question": "Quanti ordini MySQL hanno stato paid?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[224]]}, "expected_error_code": null,
-    "equivalence_group": "mysql_paid_count", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "mysql_average_total", "category": "mysql", "operation_type": "aggregation", "difficulty": "easy",
-    "question": "Qual è il totale medio degli ordini nel database MySQL?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[240.58234]]}, "expected_error_code": null,
-    "equivalence_group": "mysql_average_total", "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "mysql_sum_total", "category": "mysql", "operation_type": "aggregation", "difficulty": "easy",
-    "question": "Qual è il valore totale degli ordini nel database MySQL?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[120291.17]]}, "expected_error_code": null,
-    "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "mysql_total_over_100", "category": "mysql", "operation_type": "filter", "difficulty": "easy",
-    "question": "Mostra gli ordini MySQL con totale maggiore di 100", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_count_pending", "category": "mysql", "operation_type": "count", "difficulty": "easy",
-    "question": "Nel database MySQL conta gli ordini con status pending", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[107]]}, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_paid_count_variant", "category": "mysql", "operation_type": "count", "difficulty": "medium",
-    "question": "Nel database relazionale MySQL, numero di ordini il cui status è paid", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_paid_count", "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_pending_rows", "category": "mysql", "operation_type": "filter", "difficulty": "easy",
-    "question": "Mostra id, customer_id, status e total degli ordini MySQL con status pending", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_order_projection", "category": "mysql", "operation_type": "projection", "difficulty": "easy",
-    "question": "Elenca id, customer_id, status, total e created_at degli ordini MySQL", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_orders_total_sorted", "category": "mysql", "operation_type": "sort", "difficulty": "medium",
-    "question": "Elenca id e total degli ordini MySQL ordinati per total decrescente", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_top_five_orders", "category": "mysql", "operation_type": "top_k", "difficulty": "medium",
-    "question": "Mostra i 5 ordini MySQL con total più alto", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mysql_customers_projection", "category": "mysql", "operation_type": "projection", "difficulty": "easy",
-    "question": "Mostra id, email, name e created_at dei customers MySQL", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "customers",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-
-  {
-    "id": "mongodb_count_profiles", "category": "mongodb", "operation_type": "count", "difficulty": "easy",
-    "question": "Quanti profili ci sono nel database MongoDB?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
-    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "mongodb_english_profiles", "category": "mongodb", "operation_type": "filter", "difficulty": "easy",
-    "question": "Mostra i profili MongoDB con lingua inglese", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_newsletter_enabled", "category": "mongodb", "operation_type": "filter", "difficulty": "easy",
-    "question": "Mostra i profili MongoDB con newsletter attiva", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_newsletter_enabled", "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_events_by_type", "category": "mongodb", "operation_type": "group_by", "difficulty": "easy",
-    "question": "Quanti eventi ci sono per tipo nel database MongoDB?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
-    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "mongodb_sum_amount", "category": "mongodb", "operation_type": "aggregation", "difficulty": "medium",
-    "question": "Qual è l’importo totale degli eventi MongoDB?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": {"rows": [[29827.97]]}, "expected_error_code": null,
-    "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "mongodb_newsletter_disabled", "category": "mongodb", "operation_type": "filter", "difficulty": "medium",
-    "question": "Mostra i profili MongoDB con newsletter disattiva", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_newsletter_enabled_variant", "category": "mongodb", "operation_type": "filter", "difficulty": "medium",
-    "question": "Nel database documentale MongoDB elenca i profiles con preferences.newsletter uguale a true", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_newsletter_enabled", "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_profile_projection", "category": "mongodb", "operation_type": "projection", "difficulty": "easy",
-    "question": "Elenca email, preferences.language e roles dei profili MongoDB", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_events_user_one", "category": "mongodb", "operation_type": "count", "difficulty": "medium",
-    "question": "Quanti eventi MongoDB sono stati generati dall’utente 1?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_events_amount_filter", "category": "mongodb", "operation_type": "filter", "difficulty": "medium",
-    "question": "Mostra gli eventi MongoDB con properties.amount maggiore di 100", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_events_by_type_variant", "category": "mongodb", "operation_type": "group_by", "difficulty": "medium",
-    "question": "Nel database documentale conta gli events raggruppandoli per type", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
-    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
-  },
-  {
-    "id": "mongodb_recent_events", "category": "mongodb", "operation_type": "top_k", "difficulty": "hard",
-    "question": "Mostra i 5 eventi MongoDB più recenti con type, user_id e created_at", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "none"
-  },
-
-  {
-    "id": "uncertain_best_customers", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "easy",
-    "question": "Quali sono i clienti migliori?", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "ambiguous_metric", "repeat_count": 3
-  },
-  {
-    "id": "uncertain_best_orders", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "easy",
-    "question": "Quali sono gli ordini migliori?", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "vague_concept"
-  },
-  {
-    "id": "uncertain_unspecified_criterion", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "easy",
-    "question": "Mostra i risultati migliori senza usare un criterio specifico", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "vague_concept"
-  },
-  {
-    "id": "ambiguous_important_profiles", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "medium",
-    "question": "Mostra i profili più importanti.", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "vague_concept"
-  },
-  {
-    "id": "ambiguous_suspicious_events", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "medium",
-    "question": "Quali eventi sono sospetti?", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "ambiguous_metric"
-  },
-  {
-    "id": "incomplete_missing_threshold", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "medium",
-    "question": "Mostra gli ordini MySQL con total maggiore di una soglia", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "incomplete_request"
-  },
-  {
-    "id": "incomplete_unspecified_orders_source", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "hard",
-    "question": "Mostra gli ordini con stato paid senza specificare quale repository orders usare", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "incomplete_request"
-  },
-  {
-    "id": "incomplete_sort_criterion", "category": "uncertainty", "operation_type": "uncertainty", "difficulty": "medium",
-    "question": "Ordina gli ordini MySQL senza indicare il criterio di ordinamento", "execute": false,
-    "expected_classification": "ambiguous", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "incomplete_request"
-  },
-
-  {
-    "id": "unanswerable_profit", "category": "uncertainty", "operation_type": "unsupported_analysis", "difficulty": "easy",
-    "question": "Qual è il profitto totale?", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data", "repeat_count": 3
-  },
-  {
-    "id": "unanswerable_margin", "category": "uncertainty", "operation_type": "unsupported_analysis", "difficulty": "easy",
-    "question": "Qual è il margine complessivo?", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_costs", "category": "uncertainty", "operation_type": "unsupported_analysis", "difficulty": "easy",
-    "question": "Qual è il costo totale degli ordini, considerando che il catalogo non contiene alcun campo relativo ai costi?", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_conversion_rate", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "hard",
-    "question": "Qual è il tasso di conversione complessivo se non è definito quali eventi costituiscono una conversione?", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_churn", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "hard",
-    "question": "Calcola il churn dei clienti senza una definizione di abbandono e senza storico adeguato", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_sentiment", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "medium",
-    "question": "Qual è il sentiment medio dei clienti se il catalogo non contiene testo da analizzare né un modello dedicato?", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_fraud_risk", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "hard",
-    "question": "Determina il rischio di frode senza un criterio, etichette o feature di rischio disponibili", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "missing_data"
-  },
-  {
-    "id": "unanswerable_forecast", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "hard",
-    "question": "Prevedi il totale degli ordini del prossimo anno senza supporto predittivo", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "unsupported_combination"
-  },
-  {
-    "id": "unanswerable_mysql_join", "category": "missing_data", "operation_type": "unsupported_analysis", "difficulty": "hard",
-    "question": "Unisci customers e orders MySQL per calcolare il totale speso da ogni cliente", "execute": false,
-    "expected_classification": "unanswerable", "expected_backend": null, "expected_asset_name": null,
-    "expected_result": null, "expected_error_code": null, "uncertainty_type": "unsupported_combination"
-  },
-
-  {
-    "id": "rephrase_duckdb_status", "category": "reformulation", "operation_type": "group_by", "difficulty": "medium",
-    "question": "Nel dataset CSV orders, raggruppa gli ordini contando gli order_id per ciascun order_status", "execute": false,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_status", "uncertainty_type": "none"
-  },
-  {
-    "id": "rephrase_mysql_average", "category": "reformulation", "operation_type": "aggregation", "difficulty": "medium",
-    "question": "Calcola la media del totale degli ordini MySQL", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[240.58234]]}, "expected_error_code": null,
-    "equivalence_group": "mysql_average_total", "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "rephrase_mongodb_profiles", "category": "reformulation", "operation_type": "count", "difficulty": "medium",
-    "question": "Conta il numero di profili presenti in MongoDB", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
-    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
-  },
-  {
-    "id": "robust_duckdb_status", "category": "robustness", "operation_type": "group_by", "difficulty": "medium",
-    "question": "Per ogni order_status, dimmi quanti order_id risultano nel file orders DuckDB", "execute": false,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_status", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "robust_duckdb_delivered", "category": "robustness", "operation_type": "filter", "difficulty": "medium",
-    "question": "Dal dataset orders in DuckDB dammi gli ordini per cui order_status vale delivered", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_delivered", "uncertainty_type": "none"
-  },
-  {
-    "id": "robust_duckdb_revenue", "category": "robustness", "operation_type": "multi_asset", "difficulty": "hard",
-    "question": "Usando i file CSV order_items e prodotti, somma price per product_category_name", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "order_products",
-    "expected_result": {"row_count": 74, "rows_prefix": [["beleza_saude", 1258681.3399999924], ["relogios_presentes", 1205005.6799999964], ["cama_mesa_banho", 1036988.6799999895], ["esporte_lazer", 988048.9699999961], ["informatica_acessorios", 911954.3199999972]], "unordered": false},
-    "expected_error_code": null, "equivalence_group": "duckdb_category_revenue", "uncertainty_type": "none", "numeric_tolerance": 1e-6
-  },
-  {
-    "id": "robust_mysql_paid", "category": "robustness", "operation_type": "count", "difficulty": "medium",
-    "question": "Quanti record della tabella orders del database relazionale MySQL hanno status paid?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": {"rows": [[224]]}, "expected_error_code": null,
-    "equivalence_group": "mysql_paid_count", "uncertainty_type": "none"
-  },
-  {
-    "id": "robust_mysql_average", "category": "robustness", "operation_type": "aggregation", "difficulty": "medium",
-    "question": "Nel database relazionale, qual è la media del campo total della tabella orders MySQL?", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mysql", "expected_asset_name": "orders",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mysql_average_total", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "robust_mongodb_profiles", "category": "robustness", "operation_type": "count", "difficulty": "medium",
-    "question": "Nel database documentale MongoDB, numero complessivo di documenti profiles", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": {"rows": [[100]]}, "expected_error_code": null,
-    "equivalence_group": "mongodb_profiles_count", "uncertainty_type": "none"
-  },
-  {
-    "id": "robust_mongodb_newsletter", "category": "robustness", "operation_type": "filter", "difficulty": "medium",
-    "question": "Profiles con newsletter abilitata, nel database documentale MongoDB", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "profiles",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "mongodb_newsletter_enabled", "uncertainty_type": "none", "repeat_count": 3
-  },
-  {
-    "id": "robust_mongodb_events_type", "category": "robustness", "operation_type": "group_by", "difficulty": "medium",
-    "question": "Raggruppa per type i documenti events e contali; la sorgente è MongoDB", "execute": true,
-    "expected_classification": "answerable", "expected_backend": "mongodb", "expected_asset_name": "events",
-    "expected_result": {"rows": [["login", 104], ["logout", 57], ["page_view", 217], ["purchase", 122]], "unordered": true},
-    "expected_error_code": null, "equivalence_group": "mongodb_events_type", "uncertainty_type": "none"
-  },
-  {
-    "id": "robust_duckdb_monthly", "category": "robustness", "operation_type": "temporal_grouping", "difficulty": "hard",
-    "question": "Orders CSV: conteggio mensile degli order_id basato su order_purchase_timestamp", "execute": false,
-    "expected_classification": "answerable", "expected_backend": "duckdb", "expected_asset_name": "Order Dataset",
-    "expected_result": null, "expected_error_code": null, "equivalence_group": "duckdb_orders_monthly", "uncertainty_type": "none"
+    "id": "duckdb_orders_by_status",
+    "category": "duckdb",
+    "operation_type": "group_by",
+    "difficulty": "easy",
+    "question": "Quanti ordini ci sono per order_status nel dataset CSV orders?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": {
+      "rows": [
+        [
+          "approved",
+          2
+        ],
+        [
+          "canceled",
+          625
+        ],
+        [
+          "created",
+          5
+        ],
+        [
+          "delivered",
+          96478
+        ],
+        [
+          "invoiced",
+          314
+        ],
+        [
+          "processing",
+          301
+        ],
+        [
+          "shipped",
+          1107
+        ],
+        [
+          "unavailable",
+          609
+        ]
+      ],
+      "unordered": true
+    },
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_status",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "duckdb_orders_by_month",
+    "category": "duckdb",
+    "operation_type": "temporal_grouping",
+    "difficulty": "hard",
+    "question": "Quanti ordini del dataset CSV orders ci sono per mese di order_purchase_timestamp?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_monthly",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "duckdb_revenue_by_category",
+    "category": "duckdb",
+    "operation_type": "multi_asset",
+    "difficulty": "hard",
+    "question": "Quali product_category_name hanno generato più ricavi usando price nei dataset CSV?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "order_products",
+    "expected_result": {
+      "row_count": 74,
+      "rows_prefix": [
+        [
+          "beleza_saude",
+          1258681.339999992
+        ],
+        [
+          "relogios_presentes",
+          1205005.6799999964
+        ],
+        [
+          "cama_mesa_banho",
+          1036988.6799999892
+        ],
+        [
+          "esporte_lazer",
+          988048.9699999961
+        ],
+        [
+          "informatica_acessorios",
+          911954.3199999969
+        ]
+      ],
+      "unordered": false
+    },
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_category_revenue",
+    "uncertainty_type": "none",
+    "repeat_count": 3,
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "duckdb_delivered_filter",
+    "category": "duckdb",
+    "operation_type": "filter",
+    "difficulty": "easy",
+    "question": "Mostra gli ordini con order_status delivered nel dataset CSV orders",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_delivered",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_order_projection",
+    "category": "duckdb",
+    "operation_type": "projection",
+    "difficulty": "easy",
+    "question": "Mostra order_id, order_status e order_purchase_timestamp del dataset CSV orders",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_status_sorted",
+    "category": "duckdb",
+    "operation_type": "sort",
+    "difficulty": "medium",
+    "question": "Nel file CSV orders conta gli ordini per order_status e ordina dal conteggio più alto",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": {
+      "rows": [
+        [
+          "delivered",
+          96478
+        ],
+        [
+          "shipped",
+          1107
+        ],
+        [
+          "canceled",
+          625
+        ],
+        [
+          "unavailable",
+          609
+        ],
+        [
+          "invoiced",
+          314
+        ],
+        [
+          "processing",
+          301
+        ],
+        [
+          "created",
+          5
+        ],
+        [
+          "approved",
+          2
+        ]
+      ],
+      "unordered": false
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_monthly_file_variant",
+    "category": "duckdb",
+    "operation_type": "temporal_grouping",
+    "difficulty": "medium",
+    "question": "Dal file orders raggruppa per mese order_purchase_timestamp e conta order_id",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_monthly",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_monthly_duckdb_variant",
+    "category": "duckdb",
+    "operation_type": "temporal_grouping",
+    "difficulty": "medium",
+    "question": "In DuckDB, numero di order_id per mese di order_purchase_timestamp nel dataset orders",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_monthly",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_delivered_technical",
+    "category": "duckdb",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Dataset CSV orders: filtra order_status uguale a delivered e proietta order_id e order_status",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_delivered",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "duckdb_items_price_sum",
+    "category": "duckdb",
+    "operation_type": "aggregation",
+    "difficulty": "medium",
+    "question": "Qual è la somma di price nel dataset CSV order_items?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "order_items",
+    "expected_result": {
+      "rows": [
+        [
+          13591643.699998675
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "duckdb_revenue_top_categories",
+    "category": "duckdb",
+    "operation_type": "multi_asset",
+    "difficulty": "hard",
+    "question": "Nei dataset CSV, mostra le product_category_name con maggiore somma di price",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "order_products",
+    "expected_result": {
+      "row_count": 74,
+      "rows_prefix": [
+        [
+          "beleza_saude",
+          1258681.339999992
+        ],
+        [
+          "relogios_presentes",
+          1205005.6799999964
+        ],
+        [
+          "cama_mesa_banho",
+          1036988.6799999892
+        ],
+        [
+          "esporte_lazer",
+          988048.9699999961
+        ],
+        [
+          "informatica_acessorios",
+          911954.3199999969
+        ]
+      ],
+      "unordered": false
+    },
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_category_revenue",
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "duckdb_items_price_filter",
+    "category": "duckdb",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Mostra order_id, product_id e price dal file order_items quando price è maggiore di 100",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "order_items",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_orders_by_status",
+    "category": "mysql",
+    "operation_type": "group_by",
+    "difficulty": "easy",
+    "question": "Quanti ordini ci sono per stato nel database MySQL?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          "cancelled",
+          9991
+        ],
+        [
+          "paid",
+          45140
+        ],
+        [
+          "pending",
+          19987
+        ],
+        [
+          "refunded",
+          4973
+        ],
+        [
+          "shipped",
+          19909
+        ]
+      ],
+      "unordered": true
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_count_paid",
+    "category": "mysql",
+    "operation_type": "count",
+    "difficulty": "easy",
+    "question": "Quanti ordini MySQL hanno stato paid?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          45140
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mysql_paid_count",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "mysql_average_total",
+    "category": "mysql",
+    "operation_type": "aggregation",
+    "difficulty": "easy",
+    "question": "Qual è il totale medio degli ordini nel database MySQL?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          255.10446
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mysql_average_total",
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "mysql_sum_total",
+    "category": "mysql",
+    "operation_type": "aggregation",
+    "difficulty": "easy",
+    "question": "Qual è il valore totale degli ordini nel database MySQL?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          25510445.95
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "mysql_total_over_100",
+    "category": "mysql",
+    "operation_type": "filter",
+    "difficulty": "easy",
+    "question": "Mostra gli ordini MySQL con totale maggiore di 100",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_count_pending",
+    "category": "mysql",
+    "operation_type": "count",
+    "difficulty": "easy",
+    "question": "Nel database MySQL conta gli ordini con status pending",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          19987
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_paid_count_variant",
+    "category": "mysql",
+    "operation_type": "count",
+    "difficulty": "medium",
+    "question": "Nel database relazionale MySQL, numero di ordini il cui status è paid",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "mysql_paid_count",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_pending_rows",
+    "category": "mysql",
+    "operation_type": "filter",
+    "difficulty": "easy",
+    "question": "Mostra id, customer_id, status e total degli ordini MySQL con status pending",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_order_projection",
+    "category": "mysql",
+    "operation_type": "projection",
+    "difficulty": "easy",
+    "question": "Elenca id, customer_id, status, total e created_at degli ordini MySQL",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_orders_total_sorted",
+    "category": "mysql",
+    "operation_type": "sort",
+    "difficulty": "medium",
+    "question": "Elenca id e total degli ordini MySQL ordinati per total decrescente",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_top_five_orders",
+    "category": "mysql",
+    "operation_type": "top_k",
+    "difficulty": "medium",
+    "question": "Mostra i 5 ordini MySQL con total più alto",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mysql_customers_projection",
+    "category": "mysql",
+    "operation_type": "projection",
+    "difficulty": "easy",
+    "question": "Mostra id, email, name e created_at dei customers MySQL",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "customers",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_count_profiles",
+    "category": "mongodb",
+    "operation_type": "count",
+    "difficulty": "easy",
+    "question": "Quanti profili ci sono nel database MongoDB?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": {
+      "rows": [
+        [
+          10000
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "mongodb_english_profiles",
+    "category": "mongodb",
+    "operation_type": "filter",
+    "difficulty": "easy",
+    "question": "Mostra i profili MongoDB con lingua inglese",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_newsletter_enabled",
+    "category": "mongodb",
+    "operation_type": "filter",
+    "difficulty": "easy",
+    "question": "Mostra i profili MongoDB con newsletter attiva",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_newsletter_enabled",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_events_by_type",
+    "category": "mongodb",
+    "operation_type": "group_by",
+    "difficulty": "easy",
+    "question": "Quanti eventi ci sono per tipo nel database MongoDB?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": {
+      "rows": [
+        [
+          "login",
+          19901
+        ],
+        [
+          "logout",
+          10007
+        ],
+        [
+          "page_view",
+          45007
+        ],
+        [
+          "purchase",
+          25085
+        ]
+      ],
+      "unordered": true
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_events_type",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "mongodb_sum_amount",
+    "category": "mongodb",
+    "operation_type": "aggregation",
+    "difficulty": "medium",
+    "question": "Qual è l’importo totale degli eventi MongoDB?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": {
+      "rows": [
+        [
+          6403819.42
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "mongodb_newsletter_disabled",
+    "category": "mongodb",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Mostra i profili MongoDB con newsletter disattiva",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_newsletter_enabled_variant",
+    "category": "mongodb",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Nel database documentale MongoDB elenca i profiles con preferences.newsletter uguale a true",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_newsletter_enabled",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_profile_projection",
+    "category": "mongodb",
+    "operation_type": "projection",
+    "difficulty": "easy",
+    "question": "Elenca email, preferences.language e roles dei profili MongoDB",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_events_user_one",
+    "category": "mongodb",
+    "operation_type": "count",
+    "difficulty": "medium",
+    "question": "Quanti eventi MongoDB sono stati generati dall’utente 1?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_events_amount_filter",
+    "category": "mongodb",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Mostra gli eventi MongoDB con properties.amount maggiore di 100",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_events_by_type_variant",
+    "category": "mongodb",
+    "operation_type": "group_by",
+    "difficulty": "medium",
+    "question": "Nel database documentale conta gli events raggruppandoli per type",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": {
+      "rows": [
+        [
+          "login",
+          19901
+        ],
+        [
+          "logout",
+          10007
+        ],
+        [
+          "page_view",
+          45007
+        ],
+        [
+          "purchase",
+          25085
+        ]
+      ],
+      "unordered": true
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_events_type",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "mongodb_recent_events",
+    "category": "mongodb",
+    "operation_type": "top_k",
+    "difficulty": "hard",
+    "question": "Mostra i 5 eventi MongoDB più recenti con type, user_id e created_at",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "uncertain_best_customers",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "easy",
+    "question": "Quali sono i clienti migliori?",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "ambiguous_metric",
+    "repeat_count": 3
+  },
+  {
+    "id": "uncertain_best_orders",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "easy",
+    "question": "Quali sono gli ordini migliori?",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "vague_concept"
+  },
+  {
+    "id": "uncertain_unspecified_criterion",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "easy",
+    "question": "Mostra i risultati migliori senza usare un criterio specifico",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "vague_concept"
+  },
+  {
+    "id": "ambiguous_important_profiles",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "medium",
+    "question": "Mostra i profili più importanti.",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "vague_concept"
+  },
+  {
+    "id": "ambiguous_suspicious_events",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "medium",
+    "question": "Quali eventi sono sospetti?",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "ambiguous_metric"
+  },
+  {
+    "id": "incomplete_missing_threshold",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "medium",
+    "question": "Mostra gli ordini MySQL con total maggiore di una soglia",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "incomplete_request"
+  },
+  {
+    "id": "incomplete_unspecified_orders_source",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "hard",
+    "question": "Mostra gli ordini con stato paid senza specificare quale repository orders usare",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "incomplete_request"
+  },
+  {
+    "id": "incomplete_sort_criterion",
+    "category": "uncertainty",
+    "operation_type": "uncertainty",
+    "difficulty": "medium",
+    "question": "Ordina gli ordini MySQL senza indicare il criterio di ordinamento",
+    "execute": false,
+    "expected_classification": "ambiguous",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "incomplete_request"
+  },
+  {
+    "id": "unanswerable_profit",
+    "category": "uncertainty",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "easy",
+    "question": "Qual è il profitto totale?",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data",
+    "repeat_count": 3
+  },
+  {
+    "id": "unanswerable_margin",
+    "category": "uncertainty",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "easy",
+    "question": "Qual è il margine complessivo?",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_costs",
+    "category": "uncertainty",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "easy",
+    "question": "Qual è il costo totale degli ordini, considerando che il catalogo non contiene alcun campo relativo ai costi?",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_conversion_rate",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "hard",
+    "question": "Qual è il tasso di conversione complessivo se non è definito quali eventi costituiscono una conversione?",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_churn",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "hard",
+    "question": "Calcola il churn dei clienti senza una definizione di abbandono e senza storico adeguato",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_sentiment",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "medium",
+    "question": "Qual è il sentiment medio dei clienti se il catalogo non contiene testo da analizzare né un modello dedicato?",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_fraud_risk",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "hard",
+    "question": "Determina il rischio di frode senza un criterio, etichette o feature di rischio disponibili",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "missing_data"
+  },
+  {
+    "id": "unanswerable_forecast",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "hard",
+    "question": "Prevedi il totale degli ordini del prossimo anno senza supporto predittivo",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "unsupported_combination"
+  },
+  {
+    "id": "unanswerable_mysql_join",
+    "category": "missing_data",
+    "operation_type": "unsupported_analysis",
+    "difficulty": "hard",
+    "question": "Unisci customers e orders MySQL per calcolare il totale speso da ogni cliente",
+    "execute": false,
+    "expected_classification": "unanswerable",
+    "expected_backend": null,
+    "expected_asset_name": null,
+    "expected_result": null,
+    "expected_error_code": null,
+    "uncertainty_type": "unsupported_combination"
+  },
+  {
+    "id": "rephrase_duckdb_status",
+    "category": "reformulation",
+    "operation_type": "group_by",
+    "difficulty": "medium",
+    "question": "Nel dataset CSV orders, raggruppa gli ordini contando gli order_id per ciascun order_status",
+    "execute": false,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_status",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "rephrase_mysql_average",
+    "category": "reformulation",
+    "operation_type": "aggregation",
+    "difficulty": "medium",
+    "question": "Calcola la media del totale degli ordini MySQL",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          255.10446
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mysql_average_total",
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "rephrase_mongodb_profiles",
+    "category": "reformulation",
+    "operation_type": "count",
+    "difficulty": "medium",
+    "question": "Conta il numero di profili presenti in MongoDB",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": {
+      "rows": [
+        [
+          10000
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "robust_duckdb_status",
+    "category": "robustness",
+    "operation_type": "group_by",
+    "difficulty": "medium",
+    "question": "Per ogni order_status, dimmi quanti order_id risultano nel file orders DuckDB",
+    "execute": false,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_status",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "robust_duckdb_delivered",
+    "category": "robustness",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Dal dataset orders in DuckDB dammi gli ordini per cui order_status vale delivered",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_delivered",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "robust_duckdb_revenue",
+    "category": "robustness",
+    "operation_type": "multi_asset",
+    "difficulty": "hard",
+    "question": "Usando i file CSV order_items e prodotti, somma price per product_category_name",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "order_products",
+    "expected_result": {
+      "row_count": 74,
+      "rows_prefix": [
+        [
+          "beleza_saude",
+          1258681.339999992
+        ],
+        [
+          "relogios_presentes",
+          1205005.6799999964
+        ],
+        [
+          "cama_mesa_banho",
+          1036988.6799999892
+        ],
+        [
+          "esporte_lazer",
+          988048.9699999961
+        ],
+        [
+          "informatica_acessorios",
+          911954.3199999969
+        ]
+      ],
+      "unordered": false
+    },
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_category_revenue",
+    "uncertainty_type": "none",
+    "numeric_tolerance": 1e-06
+  },
+  {
+    "id": "robust_mysql_paid",
+    "category": "robustness",
+    "operation_type": "count",
+    "difficulty": "medium",
+    "question": "Quanti record della tabella orders del database relazionale MySQL hanno status paid?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": {
+      "rows": [
+        [
+          45140
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mysql_paid_count",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "robust_mysql_average",
+    "category": "robustness",
+    "operation_type": "aggregation",
+    "difficulty": "medium",
+    "question": "Nel database relazionale, qual è la media del campo total della tabella orders MySQL?",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mysql",
+    "expected_asset_name": "orders",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "mysql_average_total",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "robust_mongodb_profiles",
+    "category": "robustness",
+    "operation_type": "count",
+    "difficulty": "medium",
+    "question": "Nel database documentale MongoDB, numero complessivo di documenti profiles",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": {
+      "rows": [
+        [
+          10000
+        ]
+      ]
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_profiles_count",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "robust_mongodb_newsletter",
+    "category": "robustness",
+    "operation_type": "filter",
+    "difficulty": "medium",
+    "question": "Profiles con newsletter abilitata, nel database documentale MongoDB",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "profiles",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_newsletter_enabled",
+    "uncertainty_type": "none",
+    "repeat_count": 3
+  },
+  {
+    "id": "robust_mongodb_events_type",
+    "category": "robustness",
+    "operation_type": "group_by",
+    "difficulty": "medium",
+    "question": "Raggruppa per type i documenti events e contali; la sorgente è MongoDB",
+    "execute": true,
+    "expected_classification": "answerable",
+    "expected_backend": "mongodb",
+    "expected_asset_name": "events",
+    "expected_result": {
+      "rows": [
+        [
+          "login",
+          19901
+        ],
+        [
+          "logout",
+          10007
+        ],
+        [
+          "page_view",
+          45007
+        ],
+        [
+          "purchase",
+          25085
+        ]
+      ],
+      "unordered": true
+    },
+    "expected_error_code": null,
+    "equivalence_group": "mongodb_events_type",
+    "uncertainty_type": "none"
+  },
+  {
+    "id": "robust_duckdb_monthly",
+    "category": "robustness",
+    "operation_type": "temporal_grouping",
+    "difficulty": "hard",
+    "question": "Orders CSV: conteggio mensile degli order_id basato su order_purchase_timestamp",
+    "execute": false,
+    "expected_classification": "answerable",
+    "expected_backend": "duckdb",
+    "expected_asset_name": "Order Dataset",
+    "expected_result": null,
+    "expected_error_code": null,
+    "equivalence_group": "duckdb_orders_monthly",
+    "uncertainty_type": "none"
   }
 ]
