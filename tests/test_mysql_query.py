@@ -1168,6 +1168,130 @@ def test_duckdb_monthly_count_has_a_bounded_exact_planning_example(
     assert response.normalized_plan.limit == settings.query_default_limit
 
 
+def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, _, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    corrected = {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [{
+            "source_alias": "o",
+            "field": "order_purchase_timestamp",
+            "transform": "date_trunc_month",
+            "alias": "month",
+        }],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "o",
+            "field": "order_id",
+            "alias": "orders",
+        }],
+        "group_by": [{
+            "source_alias": "o",
+            "field": "order_purchase_timestamp",
+            "transform": "date_trunc_month",
+        }],
+        "order_by": [{"field": "month", "direction": "asc"}],
+    }
+    invalid = {
+        **corrected,
+        "projections": [
+            *corrected["projections"],
+            {"source_alias": "o", "field": "order_id"},
+        ],
+    }
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    with caplog.at_level("WARNING", logger="queryx.app.query.natural_language"):
+        response = NaturalLanguageQueryService(
+            settings, client=client  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(
+            question=(
+                "Quanti ordini del dataset CSV orders ci sono per mese di "
+                "order_purchase_timestamp?"
+            )
+        ))
+
+    retry = json.loads(client.planning_calls[1][-1]["content"])
+    assert retry["validation_code"] == "invalid_group_by"
+    assert "identical group_by expression" in retry["instruction"]
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.group_by[0].transform == "date_trunc_month"
+    assert "validation_code=invalid_group_by" in caplog.text
+
+
+def test_natural_language_mysql_top_k_uses_order_and_limit_without_filter(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, _, assets = mysql_query_env
+    projections = [
+        {"source_alias": "o", "field": field}
+        for field in ("id", "customer_id", "status", "total", "created_at")
+    ]
+    corrected = {
+        "sources": [{"alias": "o", "asset_id": assets["orders"].asset_id}],
+        "projections": projections,
+        "filters": [],
+        "order_by": [{"field": "total", "direction": "desc"}],
+        "limit": 5,
+    }
+    invalid = {
+        **corrected,
+        "filters": [{
+            "source_alias": "o",
+            "field": "total",
+            "operator": "gt",
+            "value": 5,
+        }],
+    }
+    client = _SequencedNaturalClient(invalid, corrected)
+
+    with caplog.at_level("WARNING", logger="queryx.app.query.natural_language"):
+        response = NaturalLanguageQueryService(
+            settings, client=client  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(
+            question="Mostra i cinque ordini MySQL con total più alto"
+        ))
+
+    retry = json.loads(client.planning_calls[1][-1]["content"])
+    assert retry["validation_code"] == "row_filter_mismatch"
+    assert "filter" not in retry["semantic_requirements"]
+    assert retry["semantic_requirements"]["order_by"] == {
+        "field": "total",
+        "direction": "desc",
+    }
+    assert retry["semantic_requirements"]["limit"] == 5
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.filters == []
+    assert response.normalized_plan.order_by[0].field == "total"
+    assert response.normalized_plan.order_by[0].direction == "desc"
+    assert response.normalized_plan.limit == 5
+    assert "validation_code=row_filter_mismatch" in caplog.text
+    assert "'value': 5" not in caplog.text
+
+
+def test_natural_language_mysql_regular_group_by_remains_valid(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+) -> None:
+    settings, _, assets = mysql_query_env
+    client = _SequencedNaturalClient(_mysql_plan(assets))
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(
+        question="Quanti ordini ci sono per stato nel database MySQL?"
+    ))
+
+    assert len(client.planning_calls) == 1
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.projections[0].field == "status"
+    assert response.normalized_plan.group_by[0].field == "status"
+
+
 def test_duckdb_delivered_filter_is_required_and_retried_once(
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
 ) -> None:

@@ -68,6 +68,8 @@ Treat "mostra", "elenca", "visualizza" and "dammi gli ordini" as row-returning i
 Treat "quanti", "conta" and "numero di" as count intent. Never turn a row-returning request into a count.
 When the user explicitly lists fields, project exactly those fields and do not add filters, aggregations or categories that were not requested.
 For row-returning requests, leave order_by empty unless the user explicitly asks for ordering.
+Treat a requested result cardinality such as "five", "cinque" or "top 5" as LIMIT, never as a filter threshold.
+Treat superlatives such as "highest", "più alto" or "più elevato" as descending order on the named catalog field, not as a filter.
 Every source_alias in projections, filters, aggregations, group_by and joins must exactly match an alias declared in sources.
 Every MongoDB aggregation must include source_alias, using exactly the alias declared by its source.
 Use catalog-scoped semantic_metric_hints for avg or sum only when their field exists in the selected asset.
@@ -299,6 +301,7 @@ class NaturalLanguageQueryService:
                 candidate, question, context
             )
         except (QueryValidationError, _PlanningSemanticError) as exc:
+            self._log_rejected_plan(exc.code, candidate)
             if retry_used:
                 raise self._invalid_plan_error(exc, candidate) from exc
             candidate = self._unwrap_logical_query_plan(
@@ -311,6 +314,7 @@ class NaturalLanguageQueryService:
                     candidate, question, context
                 )
             except (QueryValidationError, _PlanningSemanticError) as retry_exc:
+                self._log_rejected_plan(retry_exc.code, candidate)
                 raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
@@ -603,6 +607,35 @@ class NaturalLanguageQueryService:
                     ]
                     if projected_fields != required_fields:
                         raise _PlanningSemanticError("row_projection_mismatch")
+                    expected_order = requirements.get("order_by")
+                    if expected_order is not None:
+                        matching_projection = next(
+                            (
+                                item
+                                for item in candidate.get("projections", [])
+                                if isinstance(item, dict)
+                                and item.get("source_alias") == alias
+                                and item.get("field") == expected_order["field"]
+                            ),
+                            None,
+                        )
+                        output_name = (
+                            matching_projection.get("alias")
+                            if isinstance(matching_projection, dict)
+                            and matching_projection.get("alias")
+                            else expected_order["field"]
+                        )
+                        if candidate.get("order_by") != [{
+                            "field": output_name,
+                            "direction": expected_order["direction"],
+                        }]:
+                            raise _PlanningSemanticError("row_order_by_mismatch")
+                    expected_limit = requirements.get("limit")
+                    if (
+                        expected_limit is not None
+                        and candidate.get("limit") != expected_limit
+                    ):
+                        raise _PlanningSemanticError("row_limit_mismatch")
                 if requirements.get("strict_mongodb_row_shape"):
                     projected_fields = [
                         item.get("field")
@@ -732,6 +765,39 @@ class NaturalLanguageQueryService:
             candidate_plan=self._safe_debug_candidate(candidate),
         )
 
+    @staticmethod
+    def _log_rejected_plan(code: str, candidate: dict[str, Any]) -> None:
+        def fields(section: str, allowed: tuple[str, ...]) -> list[dict[str, Any]]:
+            return [
+                {key: item[key] for key in allowed if key in item}
+                for item in candidate.get(section, [])
+                if isinstance(item, dict)
+            ]
+
+        structure = {
+            "sources": fields("sources", ("alias",)),
+            "joins": fields(
+                "joins", ("left_alias", "right_alias", "join_type")
+            ),
+            "projections": fields(
+                "projections", ("source_alias", "field", "transform", "alias")
+            ),
+            "filters": fields("filters", ("source_alias", "field", "operator")),
+            "aggregations": fields(
+                "aggregations", ("function", "source_alias", "field", "alias")
+            ),
+            "group_by": fields(
+                "group_by", ("source_alias", "field", "transform")
+            ),
+            "order_by": fields("order_by", ("field", "direction")),
+            "limit": candidate.get("limit"),
+        }
+        logger.warning(
+            "LogicalQueryPlan rejected validation_code=%s plan_structure=%s",
+            code,
+            structure,
+        )
+
     def _retry_invalid_plan(
         self,
         messages: list[dict[str, str]],
@@ -784,12 +850,15 @@ class NaturalLanguageQueryService:
                 "row_filter_mismatch",
                 "row_projection_mismatch",
                 "row_order_by_mismatch",
+                "row_limit_mismatch",
             }
         ):
             instruction = (
                 "Correct only the LogicalQueryPlan while preserving the original row-returning "
-                "intent. Use exactly the required projections and filter, with no aggregations "
-                "or group_by. Do not reuse a count or category structure from another request. "
+                "intent. Use exactly the projections, filters, order_by and limit declared in "
+                "semantic_requirements; an absent filter means filters must be empty. A requested "
+                "cardinality is a limit, never a filter threshold. Use no aggregations or group_by. "
+                "Do not reuse a count or category structure from another request. "
                 "Return only the corrected plan object."
             )
         elif validation_code in {
@@ -823,6 +892,16 @@ class NaturalLanguageQueryService:
                 "Regenerate only the compact DuckDB LogicalQueryPlan from semantic_requirements. "
                 "Use exactly one projection and the identical group_by expression, exactly one "
                 "count aggregation, and no extra sources, fields or metrics. Return only the plan object."
+            )
+        elif (
+            validation_code == "invalid_group_by"
+            and semantic_requirements.get("group_by")
+        ):
+            instruction = (
+                "Regenerate only the grouped LogicalQueryPlan from semantic_requirements. "
+                "Use exactly one non-aggregated projection and an identical group_by expression "
+                "with the same source_alias, physical field and transform. Use exactly one count "
+                "aggregation and no extra projections, fields or metrics. Return only the plan object."
             )
         elif validation_code in {
             "mongodb_filter_mismatch",
@@ -1249,6 +1328,17 @@ class NaturalLanguageQueryService:
             requirements["ordering_requested"] = (
                 NaturalLanguageQueryService._ordering_requested(normalized)
             )
+        if intent == "row_returning":
+            requested_order = NaturalLanguageQueryService._requested_ordering(
+                normalized, asset
+            )
+            if requested_order is not None:
+                requirements["order_by"] = requested_order
+                requested_limit = NaturalLanguageQueryService._requested_limit(
+                    normalized
+                )
+                if requested_limit is not None:
+                    requirements["limit"] = requested_limit
         for hint in asset.get("semantic_metric_hints", []):
             if any(term in normalized for term in hint["terms"]):
                 requirements["aggregation"] = {
@@ -1513,9 +1603,59 @@ class NaturalLanguageQueryService:
     def _ordering_requested(normalized_question: str) -> bool:
         return bool(re.search(
             r"\b(ordina|ordinati|ordinate|ordine\s+(?:crescente|decrescente)|"
-            r"crescente|decrescente|pi[uù]\s+recenti|meno\s+recenti)\b",
+            r"crescente|decrescente|pi[uù]\s+recenti|meno\s+recenti|"
+            r"pi[uù]\s+(?:alto|alti|elevato|elevati)|highest|top)\b",
             normalized_question,
         ))
+
+    @staticmethod
+    def _requested_ordering(
+        normalized_question: str, asset: dict[str, Any]
+    ) -> dict[str, str] | None:
+        descending = re.search(
+            r"\b(?:pi[uù]\s+(?:alto|alti|elevato|elevati)|highest|top)\b",
+            normalized_question,
+        )
+        if descending is None:
+            return None
+        for field in asset["fields"]:
+            name = str(field["name"])
+            terms = {name.casefold(), name.casefold().replace("_", " ")}
+            for hint in asset.get("semantic_field_hints", []):
+                if hint.get("field") == name:
+                    terms.update(
+                        str(term).casefold() for term in hint.get("terms", [])
+                    )
+            if any(
+                re.search(rf"\b{re.escape(term)}\b", normalized_question)
+                for term in terms
+            ):
+                return {"field": name, "direction": "desc"}
+        return None
+
+    @staticmethod
+    def _requested_limit(normalized_question: str) -> int | None:
+        words = {
+            "uno": 1,
+            "due": 2,
+            "tre": 3,
+            "quattro": 4,
+            "cinque": 5,
+            "one": 1,
+            "two": 2,
+            "three": 3,
+            "four": 4,
+            "five": 5,
+        }
+        match = re.search(
+            r"\b(?:top\s+)?(\d+|uno|due|tre|quattro|cinque|"
+            r"one|two|three|four|five)\b",
+            normalized_question,
+        )
+        if match is None:
+            return None
+        token = match.group(1)
+        return int(token) if token.isdigit() else words[token]
 
     @staticmethod
     def _explicit_projection_fields(
