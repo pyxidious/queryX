@@ -40,14 +40,105 @@ Il modello linguistico non accede direttamente ai database. Credenziali, nomi fi
 - Docker;
 - Docker Compose;
 - Ollama;
-- almeno un modello installato localmente.
+- almeno un modello installato localmente;
+- `curl`;
+- Python 3, utilizzato dagli script di supporto.
 
-## Avvio rapido
+## Clonazione e configurazione
 
 ```bash
 git clone https://github.com/pyxidious/queryX.git
 cd queryX
 cp .env.example .env
+```
+
+Scarica il modello Ollama configurato nel file `.env`:
+
+```bash
+ollama pull qwen3.5:9b
+```
+
+Il nome del modello deve corrispondere alla variabile:
+
+```env
+OLLAMA_MODEL=qwen3.5:9b
+```
+
+Con Docker, QueryX raggiunge Ollama sull'host tramite:
+
+```env
+OLLAMA_BASE_URL=http://host.docker.internal:11434
+```
+
+## Script di gestione
+
+QueryX include script dedicati per avvio, arresto e riproduzione delle attività sperimentali.
+
+Prima del primo utilizzo, rendili eseguibili:
+
+```bash
+chmod +x scripts/start-queryx.sh
+chmod +x scripts/stop-queryx.sh
+chmod +x scripts/reproduce.sh
+```
+
+## Avvio di QueryX
+
+Lo script di avvio:
+
+- verifica la presenza dei comandi necessari;
+- avvia Ollama se non è già disponibile;
+- costruisce e avvia i container Docker;
+- attende che l'API QueryX sia pronta;
+- mostra gli indirizzi delle interfacce principali;
+- visualizza lo stato dei container.
+
+```bash
+./scripts/start-queryx.sh
+```
+
+Al termine dell'avvio saranno disponibili:
+
+- Dashboard: `http://localhost:8000/ui`
+- Interrogazione dati: `http://localhost:8000/ui/query`
+- API OpenAPI: `http://localhost:8000/docs`
+
+È possibile evitare l'avvio automatico di Ollama impostando:
+
+```bash
+START_OLLAMA=false ./scripts/start-queryx.sh
+```
+
+In questo caso Ollama deve essere già attivo sull'host.
+
+## Arresto di QueryX
+
+Per arrestare i container QueryX mantenendo i dati persistenti:
+
+```bash
+./scripts/stop-queryx.sh
+```
+
+Per arrestare anche un processo Ollama avviato dallo script QueryX:
+
+```bash
+STOP_OLLAMA=true ./scripts/stop-queryx.sh
+```
+
+Per rimuovere anche i volumi Docker:
+
+```bash
+REMOVE_VOLUMES=true ./scripts/stop-queryx.sh
+```
+
+> Attenzione: la rimozione dei volumi elimina catalogo, dati persistenti, ingestion e database dimostrativi. Questa opzione deve essere usata soltanto quando si desidera ricostruire completamente l'ambiente.
+
+## Avvio manuale
+
+In alternativa agli script:
+
+```bash
+ollama serve
 docker compose up --build -d
 ```
 
@@ -56,28 +147,6 @@ Verifica dell'applicazione:
 ```bash
 curl http://localhost:8000/health
 ```
-
-Interfacce principali:
-
-- Home UI: `http://localhost:8000/ui`
-- UI query: `http://localhost:8000/ui/query`
-- API OpenAPI: `http://localhost:8000/docs`
-
-## Configurazione di Ollama
-
-Avvia Ollama sull'host:
-
-```bash
-ollama serve
-```
-
-Scarica il modello configurato in `.env`:
-
-```bash
-ollama pull qwen3.5:9b
-```
-
-Il nome deve corrispondere a `OLLAMA_MODEL`. Con Docker, QueryX raggiunge Ollama tramite `host.docker.internal`.
 
 ## Dati dimostrativi
 
@@ -103,7 +172,9 @@ curl -X POST http://localhost:8000/sources/mysql/scan
 curl -X POST http://localhost:8000/sources/mongodb/scan
 ```
 
-## Prima interrogazione
+## Interrogazione in linguaggio naturale
+
+Esempio tramite API:
 
 ```bash
 curl -X POST http://localhost:8000/query/natural-language \
@@ -114,7 +185,130 @@ curl -X POST http://localhost:8000/query/natural-language \
   }'
 ```
 
+La stessa operazione può essere eseguita tramite l'interfaccia:
+
+```text
+http://localhost:8000/ui/query
+```
+
+## Riproduzione interattiva
+
+Lo script:
+
+```bash
+./scripts/reproduce.sh
+```
+
+esegue inizialmente una fase di preflight che verifica:
+
+- Docker;
+- Docker Compose;
+- Ollama;
+- disponibilità del modello configurato;
+- presenza del file `.env`;
+- raggiungibilità dei servizi richiesti.
+
+Successivamente permette di scegliere se effettuare il warm-up del modello Ollama.
+
+Esempio:
+
+```text
+Ollama model warm-up
+--------------------
+The model can be loaded into memory before continuing.
+
+Warm up Ollama model 'qwen3.5:9b' now? [Y/n]:
+```
+
+Il warm-up invia una richiesta preliminare al modello e lo mantiene caricato in memoria prima delle interrogazioni o del benchmark.
+
+Dopo l'avvio dell'ambiente viene mostrato il menu:
+
+```text
+What do you want to run?
+  1) Ask a single natural-language question
+  2) Run the complete experimental benchmark
+  3) Exit
+```
+
+### Domanda singola
+
+Scegliendo l'opzione `1`, lo script richiede:
+
+- la domanda in linguaggio naturale;
+- se generare soltanto il piano;
+- se eseguire anche il piano prodotto.
+
+Esempio:
+
+```text
+Question: Quanti ordini ci sono nel database MySQL?
+Execute the generated plan? [Y/n]: y
+```
+
+La risposta JSON viene formattata automaticamente tramite `jq`, quando disponibile.
+
+### Benchmark completo
+
+Scegliendo l'opzione `2`, lo script esegue:
+
+1. generazione dei dati dimostrativi;
+2. discovery e profiling della sorgente MySQL;
+3. discovery e profiling della sorgente MongoDB;
+4. generazione della ground truth;
+5. conteggio e preparazione dei casi;
+6. esecuzione completa del benchmark.
+
+Durante le operazioni più lunghe viene mostrato un indicatore animato con il tempo trascorso.
+
+Esempio:
+
+```text
+| Benchmark... elapsed: 04:18
+```
+
+Al termine vengono mostrati:
+
+- etichetta del modello;
+- numero di casi elaborati;
+- directory dei risultati.
+
+I risultati vengono salvati in:
+
+```text
+benchmark/results/
+```
+
+## Riproduzione tramite Makefile
+
+La procedura interattiva può essere avviata anche con:
+
+```bash
+make reproduce
+```
+
+Per specificare l'etichetta del benchmark:
+
+```bash
+MODEL_LABEL=qwen3.5-9b-100k make reproduce
+```
+
+Sono inoltre disponibili i passaggi separati:
+
+```bash
+make up
+make wait
+make preflight
+make seed
+make scan
+make ground-truth
+make benchmark
+make test
+```
+
 ## Importazione di CSV e Parquet
+
+Tramite API:
 
 ```bash
 curl -X POST http://localhost:8000/ingestions/uploads \
@@ -122,7 +316,13 @@ curl -X POST http://localhost:8000/ingestions/uploads \
   -F 'logical_name=orders'
 ```
 
-Flusso:
+Tramite interfaccia web:
+
+```text
+http://localhost:8000/ui/ingestions/new
+```
+
+Flusso di ingestion:
 
 ```text
 upload
@@ -133,32 +333,44 @@ upload
 → vista DuckDB
 ```
 
-Non sono supportati ZIP, URL remoti, download automatici o upload multipli.
+Non sono supportati:
 
-## Riproduzione completa
+- archivi ZIP;
+- URL remoti;
+- download automatici;
+- upload multipli nella stessa richiesta.
 
-Il comando seguente verifica Ollama, avvia i servizi, attende l'API, genera i dati, aggiorna il catalogo, rigenera la ground truth ed esegue il benchmark:
+## Esempio di ingestion dimostrativa
 
-```bash
-make reproduce
+Per una demo è possibile utilizzare un piccolo file CSV:
+
+```csv
+order_id,customer_name,city,category,amount
+1001,Anna Rossi,Milano,Elettronica,349.90
+1002,Luca Bianchi,Roma,Casa,89.50
+1003,Giulia Verdi,Torino,Libri,42.00
+1004,Marco Neri,Napoli,Elettronica,599.00
+1005,Sara Gallo,Bologna,Sport,125.75
 ```
 
-Per specificare l'etichetta del run:
+Nome consigliato:
 
-```bash
-MODEL_LABEL=qwen3.5-9b-100k make reproduce
+```text
+demo_sales.csv
 ```
 
-Passaggi separati:
+Nome logico:
 
-```bash
-make up
-make wait
-make seed
-make scan
-make ground-truth
-make benchmark
-make test
+```text
+demo_sales
+```
+
+Dopo l'ingestion e la preparazione analytics, il dataset può essere interrogato dall'interfaccia QueryX.
+
+Esempio:
+
+```text
+Qual è il totale degli importi nel dataset demo_sales?
 ```
 
 ## Test
@@ -167,6 +379,12 @@ Suite completa:
 
 ```bash
 make test
+```
+
+Il comando esegue:
+
+```bash
+docker compose exec queryx pytest -q
 ```
 
 Test specifici per seed e benchmark:
@@ -187,6 +405,33 @@ make test-reproduction
 | `POST` | `/query/validate` | validazione del piano |
 | `POST` | `/query/execute` | esecuzione del piano |
 | `POST` | `/query/natural-language` | interrogazione in linguaggio naturale |
+
+## Struttura degli script
+
+```text
+scripts/
+├── start-queryx.sh
+├── stop-queryx.sh
+└── reproduce.sh
+```
+
+### `start-queryx.sh`
+
+Gestisce l'avvio dell'ambiente e l'attesa dei servizi.
+
+### `stop-queryx.sh`
+
+Arresta lo stack Docker e, opzionalmente, Ollama e i volumi.
+
+### `reproduce.sh`
+
+Gestisce:
+
+- preflight;
+- warm-up opzionale di Ollama;
+- domanda singola;
+- benchmark sperimentale;
+- stato di avanzamento delle operazioni.
 
 ## Documentazione
 
