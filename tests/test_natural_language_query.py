@@ -934,13 +934,13 @@ def test_empty_explanation_content_returns_warning_and_keeps_result(
     assert response.explanation_warning.code == "explanation_unavailable"
 
 
-def test_explanation_uses_bounded_rows_and_marks_truncation(
+def test_explanation_uses_deterministic_summary_when_rows_exceed_llm_context(
     nl_env: tuple[Settings, dict[str, Any], str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings, assets, _ = nl_env
     client = StubOllamaClient(
         _single_plan(assets),
-        "Prima frase. Seconda frase. Terza frase. Quarta frase.",
+        "This explanation must not be requested.",
     )
     service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
     result = QueryExecutionResult(
@@ -957,12 +957,52 @@ def test_explanation_uses_bounded_rows_and_marks_truncation(
         NaturalLanguageQueryRequest(question="orders by status", execute=True)
     )
 
-    explanation_payload = json.loads(client.calls[1][0][1]["content"])
-    assert len(explanation_payload["rows"]) == 10
     assert response.answer == (
-        "Prima frase. Seconda frase. Il risultato mostrato è troncato."
+        "La query ha restituito 15 righe con le colonne `status`, `orders`. "
+        "Consulta la tabella dei risultati per i valori completi. "
+        "Il risultato mostrato è troncato."
     )
-    assert len(re.split(r"(?<=[.!?])\s+", response.answer)) == 3
+    # Only the planning call is present: no LLM explanation is requested for a
+    # result whose full rows do not fit in the explanation context.
+    assert len(client.calls) == 1
+    assert response.explanation_warning is None
+    assert response.explanation_time_ms is not None
+    assert response.explanation_time_ms >= 0
+
+
+def test_explicit_top_k_does_not_report_result_as_truncated(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    settings, assets, _ = nl_env
+    client = StubOllamaClient(
+        "La query ha restituito i cinque ordini richiesti."
+    )
+    service = NaturalLanguageQueryService(settings, client=client)  # type: ignore[arg-type]
+    result = QueryExecutionResult(
+        columns=["id", "total"],
+        rows=[[index, "500.00"] for index in range(1, 6)],
+        row_count=5,
+        truncated=True,
+        execution_time_ms=1.0,
+        plan_fingerprint="fingerprint",
+    )
+
+    answer, warning = service._explain(
+        "Mostra i cinque ordini MySQL con total più alto",
+        result,
+    )
+
+    assert warning is None
+    assert answer == "La query ha restituito i cinque ordini richiesti."
+    assert "troncat" not in answer.casefold()
+    assert len(client.calls) == 1
+    payload = json.loads(client.calls[0][0][1]["content"])
+    assert payload["row_count"] == 5
+    assert payload["returned_rows_count"] == 5
+    assert payload["rows_in_prompt"] == 5
+    assert payload["rows_omitted_from_prompt"] == 0
+    assert payload["result_truncated"] is False
+    assert payload["result_shape"] == "tabular"
 
 
 def test_empty_result_has_a_clear_answer_without_an_llm_call(

@@ -479,6 +479,10 @@ class NaturalLanguageQueryService:
         serialized = result.model_dump(mode="json")
         returned_rows = serialized["rows"]
         columns = serialized["columns"]
+        requested_limit = self._requested_limit(question.casefold())
+        effective_truncated = bool(
+            serialized["truncated"] and requested_limit is None
+        )
         rows_for_explanation = returned_rows[:_MAX_EXPLANATION_ROWS]
         rows_omitted_from_prompt = max(
             len(returned_rows) - len(rows_for_explanation), 0
@@ -488,7 +492,7 @@ class NaturalLanguageQueryService:
                 question,
                 row_count=serialized["row_count"],
                 columns=columns,
-                truncated=serialized["truncated"],
+                truncated=effective_truncated,
             )
             logger.info(
                 "Used deterministic explanation because %s result rows were omitted "
@@ -509,7 +513,7 @@ class NaturalLanguageQueryService:
             "returned_rows_count": len(returned_rows),
             "rows_in_prompt": len(rows_for_explanation),
             "rows_omitted_from_prompt": 0,
-            "result_truncated": serialized["truncated"],
+            "result_truncated": effective_truncated,
             "result_shape": result_shape,
         }
         messages = [
@@ -549,8 +553,10 @@ class NaturalLanguageQueryService:
                 code="explanation_unavailable",
                 message="The query succeeded, but Ollama returned an empty explanation.",
             )
-        answer = self._limit_sentences(raw_answer, 2 if result.truncated else 3)
-        if result.truncated:
+        answer = self._limit_sentences(
+            raw_answer, 2 if effective_truncated else 3
+        )
+        if effective_truncated:
             truncation_notice = (
                 "The displayed result is truncated."
                 if self._is_english_question(question)
