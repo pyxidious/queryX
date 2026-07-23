@@ -21,7 +21,11 @@ from queryx.app.catalog.storage import CatalogStorage
 from queryx.app.core.config import Settings
 from queryx.app.ingestion.service import IngestionService
 from queryx.app.ingestion.storage import IngestionStorage
-from queryx.app.llm.ollama_client import OllamaResponse, OllamaTextResponse
+from queryx.app.llm.ollama_client import (
+    OllamaInvalidResponseError,
+    OllamaResponse,
+    OllamaTextResponse,
+)
 from queryx.app.main import create_app
 from queryx.app.processing.service import ProcessingService
 from queryx.app.query.mysql_executor import MySQLQueryExecutor
@@ -587,6 +591,30 @@ class _SequencedNaturalClient(_NaturalClient):
         self, messages: list[dict[str, str]], json_schema: dict[str, Any]
     ) -> OllamaResponse:
         self.planning_calls.append(messages)
+        return OllamaResponse(self.plans.pop(0), {})
+
+
+class _InvalidJsonThenPlanClient(_SequencedNaturalClient):
+    def __init__(
+        self,
+        plan: dict[str, Any],
+        classification: dict[str, Any] | None = None,
+        explanation: str = "La query ha restituito il risultato richiesto.",
+    ) -> None:
+        super().__init__(
+            plan,
+            classification=classification,
+            explanation=explanation,
+        )
+        self.invalid_json_raised = False
+
+    def chat_json(
+        self, messages: list[dict[str, str]], json_schema: dict[str, Any]
+    ) -> OllamaResponse:
+        self.planning_calls.append(messages)
+        if not self.invalid_json_raised:
+            self.invalid_json_raised = True
+            raise OllamaInvalidResponseError("Ollama returned invalid JSON")
         return OllamaResponse(self.plans.pop(0), {})
 
 
@@ -1168,7 +1196,7 @@ def test_duckdb_monthly_count_has_a_bounded_exact_planning_example(
     assert response.normalized_plan.limit == settings.query_default_limit
 
 
-def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression(
+def test_duckdb_monthly_count_canonicalizes_invalid_grouping_without_llm_retry(
     mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1192,9 +1220,9 @@ def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression
         "order_by": [],
         "limit": None,
     }
-    client = _SequencedNaturalClient(invalid, invalid)
+    client = _SequencedNaturalClient(invalid)
 
-    with caplog.at_level("WARNING", logger="queryx.app.query.natural_language"):
+    with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
         response = NaturalLanguageQueryService(
             settings,
             client=client,  # type: ignore[arg-type]
@@ -1207,9 +1235,7 @@ def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression
             execute=True,
         ))
 
-    retry = json.loads(client.planning_calls[1][-1]["content"])
-    assert retry["validation_code"] == "invalid_group_by"
-    assert "identical group_by expression" in retry["instruction"]
+    assert len(client.planning_calls) == 1
     assert response.normalized_plan is not None
     assert response.normalized_plan.projections[0].source_alias == "o"
     assert response.normalized_plan.projections[0].field == "order_purchase_timestamp"
@@ -1225,6 +1251,62 @@ def test_duckdb_monthly_count_retries_invalid_grouping_with_canonical_expression
     assert response.result is not None
     assert response.result.rows == [["2024-01-01", 1]]
     assert "validation_code=invalid_group_by" in caplog.text
+    assert "Canonicalized grouped retry" in caplog.text
+
+
+def test_duckdb_monthly_count_canonicalizes_after_json_retry_without_third_call(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, query_service, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    invalid = {
+        "sources": [{"alias": "o", "asset_id": asset.id}],
+        "projections": [],
+        "aggregations": [{
+            "function": "count",
+            "source_alias": "o",
+            "field": "order_id",
+            "alias": "orders",
+        }],
+        "group_by": [{
+            "source_alias": "o",
+            "field": "order_purchase_timestamp",
+            "transform": "date_trunc_month",
+        }],
+        "order_by": [],
+        "limit": None,
+    }
+    client = _InvalidJsonThenPlanClient(invalid)
+
+    with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
+        response = NaturalLanguageQueryService(
+            settings,
+            client=client,  # type: ignore[arg-type]
+            query_service=query_service,
+        ).translate(NaturalLanguageQueryRequest(
+            question=(
+                "Quanti ordini del dataset CSV orders ci sono per mese di "
+                "order_purchase_timestamp?"
+            ),
+            execute=True,
+        ))
+
+    assert client.invalid_json_raised is True
+    assert len(client.planning_calls) == 2
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.projections[0].field == "order_purchase_timestamp"
+    assert response.normalized_plan.projections[0].transform == "date_trunc_month"
+    assert response.normalized_plan.projections[0].alias == "month"
+    assert response.normalized_plan.group_by[0].field == "order_purchase_timestamp"
+    assert response.normalized_plan.group_by[0].transform == "date_trunc_month"
+    assert response.normalized_plan.aggregations[0].field == "order_id"
+    assert response.normalized_plan.limit == settings.query_default_limit
+    query_service.validate(response.normalized_plan)
+    assert response.result is not None
+    assert response.result.rows == [["2024-01-01", 1]]
+    assert "Canonicalized grouped retry" in caplog.text
 
 
 def test_natural_language_mysql_top_k_uses_order_and_limit_without_filter(

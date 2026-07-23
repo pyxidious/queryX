@@ -302,23 +302,49 @@ class NaturalLanguageQueryService:
             )
         except (QueryValidationError, _PlanningSemanticError) as exc:
             self._log_rejected_plan(exc.code, candidate)
-            if retry_used:
-                raise self._invalid_plan_error(exc, candidate) from exc
-            candidate = self._unwrap_logical_query_plan(
-                self._retry_invalid_plan(
-                    messages, candidate, exc.code, context, question
-                )
-            )
-            candidate = self._canonicalize_grouped_retry(
+
+            # Deterministic grouped-plan repair must be attempted before deciding
+            # whether the LLM retry budget has already been consumed. This keeps
+            # monthly grouping recoverable even when _generate() used its JSON
+            # syntax retry and returned retry_used=True.
+            repaired_candidate = self._canonicalize_grouped_retry(
                 candidate, exc.code, question, context
             )
-            try:
-                validation = self._validate_candidate_semantics(
-                    candidate, question, context
+            active_error: QueryValidationError | _PlanningSemanticError | None = exc
+            if repaired_candidate != candidate:
+                candidate = repaired_candidate
+                try:
+                    validation = self._validate_candidate_semantics(
+                        candidate, question, context
+                    )
+                except (QueryValidationError, _PlanningSemanticError) as repair_exc:
+                    self._log_rejected_plan(repair_exc.code, candidate)
+                    active_error = repair_exc
+                else:
+                    active_error = None
+
+            if active_error is not None:
+                if retry_used:
+                    raise self._invalid_plan_error(active_error, candidate) from active_error
+                candidate = self._unwrap_logical_query_plan(
+                    self._retry_invalid_plan(
+                        messages,
+                        candidate,
+                        active_error.code,
+                        context,
+                        question,
+                    )
                 )
-            except (QueryValidationError, _PlanningSemanticError) as retry_exc:
-                self._log_rejected_plan(retry_exc.code, candidate)
-                raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
+                candidate = self._canonicalize_grouped_retry(
+                    candidate, active_error.code, question, context
+                )
+                try:
+                    validation = self._validate_candidate_semantics(
+                        candidate, question, context
+                    )
+                except (QueryValidationError, _PlanningSemanticError) as retry_exc:
+                    self._log_rejected_plan(retry_exc.code, candidate)
+                    raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
         answer: str | None = None
