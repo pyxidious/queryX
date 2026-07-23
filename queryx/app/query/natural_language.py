@@ -303,10 +303,8 @@ class NaturalLanguageQueryService:
         except (QueryValidationError, _PlanningSemanticError) as exc:
             self._log_rejected_plan(exc.code, candidate)
 
-            # Deterministic grouped-plan repair must be attempted before deciding
-            # whether the LLM retry budget has already been consumed. This keeps
-            # monthly grouping recoverable even when _generate() used its JSON
-            # syntax retry and returned retry_used=True.
+            # Deterministic repairs are attempted before checking whether the
+            # JSON-syntax retry budget has already been consumed.
             repaired_candidate = self._canonicalize_grouped_retry(
                 candidate, exc.code, question, context
             )
@@ -325,7 +323,9 @@ class NaturalLanguageQueryService:
 
             if active_error is not None:
                 if retry_used:
-                    raise self._invalid_plan_error(active_error, candidate) from active_error
+                    raise self._invalid_plan_error(
+                        active_error, candidate
+                    ) from active_error
                 candidate = self._unwrap_logical_query_plan(
                     self._retry_invalid_plan(
                         messages,
@@ -344,7 +344,9 @@ class NaturalLanguageQueryService:
                     )
                 except (QueryValidationError, _PlanningSemanticError) as retry_exc:
                     self._log_rejected_plan(retry_exc.code, candidate)
-                    raise self._invalid_plan_error(retry_exc, candidate) from retry_exc
+                    raise self._invalid_plan_error(
+                        retry_exc, candidate
+                    ) from retry_exc
         planning_time_ms = (monotonic() - planning_started) * 1000
         result = self.query_service.execute(validation.normalized_plan) if request.execute else None
         answer: str | None = None
@@ -836,23 +838,98 @@ class NaturalLanguageQueryService:
     ) -> dict[str, Any]:
         if validation_code != "invalid_group_by":
             return candidate
+
         requirements = self._semantic_requirements(question, context)
         group = requirements.get("group_by")
         aggregation = requirements.get("aggregation")
         asset_id = requirements.get("asset_id")
-        if not all(isinstance(item, dict) for item in (group, aggregation)):
-            return candidate
-        source = next(
-            (
-                item
-                for item in candidate.get("sources", [])
-                if isinstance(item, dict) and item.get("asset_id") == asset_id
-            ),
-            None,
-        )
-        if source is None or not isinstance(source.get("alias"), str):
-            return candidate
-        source_alias = source["alias"]
+        repair_source = "semantic_requirements"
+
+        source: dict[str, Any] | None = None
+        if isinstance(asset_id, str):
+            source = next(
+                (
+                    item
+                    for item in candidate.get("sources", [])
+                    if isinstance(item, dict) and item.get("asset_id") == asset_id
+                ),
+                None,
+            )
+
+        if not (
+            isinstance(group, dict)
+            and isinstance(aggregation, dict)
+            and source is not None
+            and isinstance(source.get("alias"), str)
+        ):
+            # Catalog-scoped requirements can be empty when more than one
+            # same-named DuckDB asset is present. In that case, repair only the
+            # already-selected candidate shape and leave final validation
+            # mandatory.
+            repair_source = "candidate_shape"
+            group_items = candidate.get("group_by", [])
+            aggregation_items = candidate.get("aggregations", [])
+            if len(group_items) != 1 or len(aggregation_items) != 1:
+                logger.info(
+                    "Skipped grouped retry canonicalization reason=unsupported_shape "
+                    "group_count=%s aggregation_count=%s",
+                    len(group_items),
+                    len(aggregation_items),
+                )
+                return candidate
+
+            candidate_group = group_items[0]
+            candidate_aggregation = aggregation_items[0]
+            if not (
+                isinstance(candidate_group, dict)
+                and isinstance(candidate_aggregation, dict)
+                and candidate_group.get("transform") == "date_trunc_month"
+                and candidate_aggregation.get("function") == "count"
+                and isinstance(candidate_group.get("source_alias"), str)
+                and isinstance(candidate_group.get("field"), str)
+                and isinstance(candidate_aggregation.get("source_alias"), str)
+                and isinstance(candidate_aggregation.get("field"), str)
+                and candidate_group["source_alias"]
+                == candidate_aggregation["source_alias"]
+            ):
+                logger.info(
+                    "Skipped grouped retry canonicalization "
+                    "reason=unsupported_candidate_expression"
+                )
+                return candidate
+
+            source_alias = candidate_group["source_alias"]
+            source = next(
+                (
+                    item
+                    for item in candidate.get("sources", [])
+                    if isinstance(item, dict) and item.get("alias") == source_alias
+                ),
+                None,
+            )
+            if source is None:
+                logger.info(
+                    "Skipped grouped retry canonicalization "
+                    "reason=source_alias_not_declared source_alias=%s",
+                    source_alias,
+                )
+                return candidate
+
+            group = {
+                "field": candidate_group["field"],
+                "transform": candidate_group["transform"],
+            }
+            aggregation = {
+                "function": candidate_aggregation["function"],
+                "field": candidate_aggregation["field"],
+                **(
+                    {"alias": candidate_aggregation["alias"]}
+                    if isinstance(candidate_aggregation.get("alias"), str)
+                    else {}
+                ),
+            }
+
+        source_alias = str(source["alias"])
         expression = {
             "source_alias": source_alias,
             "field": group["field"],
@@ -870,6 +947,15 @@ class NaturalLanguageQueryService:
                 else {}
             ),
         }
+        candidate_limit = candidate.get("limit")
+        if (
+            not isinstance(candidate_limit, int)
+            or isinstance(candidate_limit, bool)
+            or candidate_limit <= 0
+            or candidate_limit > self.settings.query_max_limit
+        ):
+            candidate_limit = self.settings.query_default_limit
+
         canonical = {
             **candidate,
             "projections": [projection],
@@ -884,18 +970,20 @@ class NaturalLanguageQueryService:
                 ),
             }],
             "group_by": [expression],
-            "limit": self.settings.query_default_limit,
+            "limit": candidate_limit,
         }
         logger.info(
-            "Canonicalized grouped retry validation_code=%s source_alias=%s "
-            "field=%s transform=%s limit=%s",
+            "Canonicalized grouped retry validation_code=%s repair_source=%s "
+            "source_alias=%s field=%s transform=%s limit=%s",
             validation_code,
+            repair_source,
             source_alias,
             group["field"],
             group.get("transform"),
-            self.settings.query_default_limit,
+            candidate_limit,
         )
         return canonical
+
 
     def _retry_invalid_plan(
         self,

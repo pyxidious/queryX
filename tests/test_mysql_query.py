@@ -1196,14 +1196,8 @@ def test_duckdb_monthly_count_has_a_bounded_exact_planning_example(
     assert response.normalized_plan.limit == settings.query_default_limit
 
 
-def test_duckdb_monthly_count_canonicalizes_invalid_grouping_without_llm_retry(
-    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    settings, query_service, _ = mysql_query_env
-    _add_duckdb_orders(settings)
-    asset = _duckdb_orders_asset(settings)
-    invalid = {
+def _invalid_duckdb_monthly_count_plan(asset: Any) -> dict[str, Any]:
+    return {
         "sources": [{"alias": "o", "asset_id": asset.id}],
         "projections": [],
         "aggregations": [{
@@ -1220,7 +1214,18 @@ def test_duckdb_monthly_count_canonicalizes_invalid_grouping_without_llm_retry(
         "order_by": [],
         "limit": None,
     }
-    client = _SequencedNaturalClient(invalid)
+
+
+def test_duckdb_monthly_count_canonicalizes_without_llm_retry(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, query_service, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    client = _SequencedNaturalClient(
+        _invalid_duckdb_monthly_count_plan(asset)
+    )
 
     with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
         response = NaturalLanguageQueryService(
@@ -1239,11 +1244,11 @@ def test_duckdb_monthly_count_canonicalizes_invalid_grouping_without_llm_retry(
     assert response.normalized_plan is not None
     assert response.normalized_plan.projections[0].source_alias == "o"
     assert response.normalized_plan.projections[0].field == "order_purchase_timestamp"
+    assert response.normalized_plan.projections[0].transform == "date_trunc_month"
     assert response.normalized_plan.projections[0].alias == "month"
     assert response.normalized_plan.group_by[0].source_alias == "o"
     assert response.normalized_plan.group_by[0].field == "order_purchase_timestamp"
     assert response.normalized_plan.group_by[0].transform == "date_trunc_month"
-    assert not hasattr(response.normalized_plan.group_by[0], "alias")
     assert response.normalized_plan.aggregations[0].function == "count"
     assert response.normalized_plan.aggregations[0].field == "order_id"
     assert response.normalized_plan.limit == settings.query_default_limit
@@ -1261,24 +1266,9 @@ def test_duckdb_monthly_count_canonicalizes_after_json_retry_without_third_call(
     settings, query_service, _ = mysql_query_env
     _add_duckdb_orders(settings)
     asset = _duckdb_orders_asset(settings)
-    invalid = {
-        "sources": [{"alias": "o", "asset_id": asset.id}],
-        "projections": [],
-        "aggregations": [{
-            "function": "count",
-            "source_alias": "o",
-            "field": "order_id",
-            "alias": "orders",
-        }],
-        "group_by": [{
-            "source_alias": "o",
-            "field": "order_purchase_timestamp",
-            "transform": "date_trunc_month",
-        }],
-        "order_by": [],
-        "limit": None,
-    }
-    client = _InvalidJsonThenPlanClient(invalid)
+    client = _InvalidJsonThenPlanClient(
+        _invalid_duckdb_monthly_count_plan(asset)
+    )
 
     with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
         response = NaturalLanguageQueryService(
@@ -1307,6 +1297,46 @@ def test_duckdb_monthly_count_canonicalizes_after_json_retry_without_third_call(
     assert response.result is not None
     assert response.result.rows == [["2024-01-01", 1]]
     assert "Canonicalized grouped retry" in caplog.text
+
+
+def test_duckdb_monthly_count_candidate_shape_fallback_when_requirements_empty(
+    mysql_query_env: tuple[Settings, QueryService, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings, query_service, _ = mysql_query_env
+    _add_duckdb_orders(settings)
+    asset = _duckdb_orders_asset(settings)
+    client = _SequencedNaturalClient(
+        _invalid_duckdb_monthly_count_plan(asset)
+    )
+    monkeypatch.setattr(
+        NaturalLanguageQueryService,
+        "_semantic_requirements",
+        staticmethod(lambda question, context: {}),
+    )
+
+    with caplog.at_level("INFO", logger="queryx.app.query.natural_language"):
+        response = NaturalLanguageQueryService(
+            settings,
+            client=client,  # type: ignore[arg-type]
+            query_service=query_service,
+        ).translate(NaturalLanguageQueryRequest(
+            question=(
+                "Quanti ordini del dataset CSV orders ci sono per mese di "
+                "order_purchase_timestamp?"
+            ),
+            execute=True,
+        ))
+
+    assert len(client.planning_calls) == 1
+    assert response.normalized_plan is not None
+    assert response.normalized_plan.projections[0].alias == "month"
+    assert response.normalized_plan.group_by[0].transform == "date_trunc_month"
+    assert response.normalized_plan.aggregations[0].field == "order_id"
+    assert response.result is not None
+    assert response.result.rows == [["2024-01-01", 1]]
+    assert "repair_source=candidate_shape" in caplog.text
 
 
 def test_natural_language_mysql_top_k_uses_order_and_limit_without_filter(
