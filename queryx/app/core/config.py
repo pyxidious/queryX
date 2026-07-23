@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     ollama_temperature: float = Field(default=0, ge=0)
     ollama_think: bool = False
     ollama_keep_alive: str = "10m"
+    ollama_planning_format: Literal["schema", "json"] = "schema"
     ollama_debug_prompts: bool = False
 
     queryx_enrichment_max_entities: int = Field(default=50, ge=1)

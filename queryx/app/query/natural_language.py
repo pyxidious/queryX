@@ -906,9 +906,10 @@ class NaturalLanguageQueryService:
                 ) from exc
 
     def _request(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        schema = LogicalQueryPlan.model_json_schema()
         try:
-            return self.client.chat_json(messages, schema).content
+            return self.client.chat_json(
+                messages, self._planning_format()
+            ).content
         except OllamaInvalidResponseError:
             raise
         except OllamaTimeoutError as exc:
@@ -917,6 +918,11 @@ class NaturalLanguageQueryService:
             ) from exc
         except (OllamaUnavailableError, OllamaModelNotFoundError) as exc:
             raise self._llm_unavailable(exc, "planning") from exc
+
+    def _planning_format(self) -> dict[str, Any] | str:
+        if self.settings.ollama_planning_format == "json":
+            return "json"
+        return LogicalQueryPlan.model_json_schema()
 
     @staticmethod
     def _llm_unavailable(

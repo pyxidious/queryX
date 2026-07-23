@@ -111,6 +111,26 @@ def test_text_chat_extracts_content_and_ignores_thinking(
     assert "format" not in captured[0]
 
 
+def test_json_format_string_is_sent_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_urlopen(request: Any, timeout: int) -> _Response:
+        if request.full_url.endswith("/api/tags"):
+            return _Response({"models": [{"name": "model"}]})
+        captured.append(json.loads(request.data))
+        return _Response({"message": {"content": '{"sources":[]}'}})
+
+    monkeypatch.setattr(client_module, "urlopen", fake_urlopen)
+    OllamaClient("http://ollama:11434", "model").chat_json(
+        [{"role": "user", "content": "plan"}],
+        "json",
+    )
+
+    assert captured[0]["format"] == "json"
+
+
 @pytest.mark.parametrize(
     "failure",
     [TimeoutError("slow"), URLError(socket.timeout("slow"))],

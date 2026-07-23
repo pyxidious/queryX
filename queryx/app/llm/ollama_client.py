@@ -102,7 +102,7 @@ class OllamaClient:
     def chat_json(
         self,
         messages: list[dict[str, str]],
-        json_schema: dict[str, Any],
+        json_schema: dict[str, Any] | str,
     ) -> OllamaResponse:
         self.ensure_model()
         payload = {

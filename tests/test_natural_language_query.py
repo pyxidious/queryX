@@ -46,14 +46,18 @@ class StubOllamaClient:
         classifications: list[dict[str, Any] | Exception] | None = None,
     ) -> None:
         self.responses = list(responses)
-        self.calls: list[tuple[list[dict[str, str]], dict[str, Any]]] = []
+        self.calls: list[
+            tuple[list[dict[str, str]], dict[str, Any] | str]
+        ] = []
         self.classifications = list(classifications or [])
         self.classification_calls: list[
             tuple[list[dict[str, str]], dict[str, Any]]
         ] = []
 
     def chat_json(
-        self, messages: list[dict[str, str]], json_schema: dict[str, Any]
+        self,
+        messages: list[dict[str, str]],
+        json_schema: dict[str, Any] | str,
     ) -> OllamaResponse:
         self.calls.append((messages, json_schema))
         response = self.responses.pop(0)
@@ -517,6 +521,89 @@ def test_planner_uses_direct_pydantic_schema_without_top_level_oneof(
     assert classification_schema.get("$defs")
     assert "oneOf" not in classification_schema
     assert set(legacy_schema) == {"oneOf"}
+
+
+def test_planning_format_defaults_to_schema_and_rejects_invalid_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OLLAMA_PLANNING_FORMAT", raising=False)
+    assert Settings(_env_file=None).ollama_planning_format == "schema"
+
+    with pytest.raises(ValueError, match="schema.*json"):
+        Settings(_env_file=None, ollama_planning_format="unsupported")
+
+
+@pytest.mark.parametrize("planning_format", ["schema", "json"])
+def test_planning_format_is_explicit_and_classification_schema_is_unchanged(
+    nl_env: tuple[Settings, dict[str, Any], str],
+    planning_format: str,
+) -> None:
+    base_settings, assets, _ = nl_env
+    settings = base_settings.model_copy(
+        update={"ollama_planning_format": planning_format}
+    )
+    client = StubOllamaClient(_single_plan(assets))
+
+    response = NaturalLanguageQueryService(
+        settings, client=client  # type: ignore[arg-type]
+    ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    expected_format: dict[str, Any] | str = (
+        LogicalQueryPlan.model_json_schema()
+        if planning_format == "schema"
+        else "json"
+    )
+    assert response.normalized_plan is not None
+    assert client.calls[0][1] == expected_format
+    assert client.classification_calls[0][1] == (
+        NaturalLanguageClassification.model_json_schema()
+    )
+
+
+def test_json_planning_mode_keeps_retry_and_semantic_validation(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    base_settings, assets, _ = nl_env
+    settings = base_settings.model_copy(
+        update={"ollama_planning_format": "json"}
+    )
+    client = StubOllamaClient(
+        OllamaInvalidResponseError("not JSON"),
+        _invalid_group_plan(assets),
+    )
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(
+            settings, client=client  # type: ignore[arg-type]
+        ).translate(
+            NaturalLanguageQueryRequest(
+                question="Quanti ordini ci sono per stato?"
+            )
+        )
+
+    assert captured.value.code == "invalid_logical_plan"
+    assert len(client.calls) == 2
+    assert all(call[1] == "json" for call in client.calls)
+
+
+def test_json_planning_mode_rejects_pydantic_invalid_plan(
+    nl_env: tuple[Settings, dict[str, Any], str],
+) -> None:
+    base_settings, _, _ = nl_env
+    settings = base_settings.model_copy(
+        update={"ollama_planning_format": "json"}
+    )
+    invalid = {"sources": []}
+    client = StubOllamaClient(invalid)
+
+    with pytest.raises(NaturalLanguageQueryError) as captured:
+        NaturalLanguageQueryService(
+            settings, client=client  # type: ignore[arg-type]
+        ).translate(NaturalLanguageQueryRequest(question="orders by status"))
+
+    assert captured.value.code == "invalid_logical_plan"
+    assert len(client.calls) == 1
+    assert all(call[1] == "json" for call in client.calls)
 
 
 @pytest.mark.parametrize(
