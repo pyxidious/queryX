@@ -1,329 +1,177 @@
 # QueryX
 
-QueryX è un modular monolith Python/FastAPI per trasformare domande in linguaggio naturale in interrogazioni controllate su repository dati, validare i risultati e produrre risposte spiegate. La discovery tecnica è deterministica; Ollama è opzionale e viene usato soltanto per l’arricchimento semantico.
+QueryX è un agente AI per data engineering che trasforma domande in linguaggio naturale in interrogazioni controllate su sorgenti dati eterogenee.
 
-## Funzionalità disponibili
+Supporta:
 
-- registry e discovery per MySQL e MongoDB;
-- catalogo tecnico SQLite con snapshot, fingerprint e schema drift;
-- enrichment semantico opzionale, persistito separatamente;
-- importazione manuale di un singolo file CSV o Parquet;
-- staging sicuro, inspection limitata, SHA-256 e job persistenti;
-- `DataAsset`, `AssetVersion`, storage binding e lineage;
-- normalizzazione canonica Parquet tramite PyArrow;
-- viste persistenti DuckDB e preview limitate;
-- relazioni dichiarate tra asset e query logiche deterministiche bounded;
-- coda SQLite con claim atomico, lease, heartbeat, retry e cancellazione;
-- API FastAPI e UI Jinja offline con CSRF e autoescape.
+- file CSV e Parquet tramite DuckDB;
+- database relazionali MySQL;
+- database documentali MongoDB;
+- modelli linguistici locali tramite Ollama.
 
-QueryX non comunica direttamente con Kaggle e non effettua download, ricerca dataset, URL fetching o estrazione ZIP. Un dataset può essere stato scaricato manualmente da Kaggle o da qualunque altra fonte: l’utente deve estrarlo localmente e caricare uno dei file CSV o Parquet.
+L'LLM classifica la richiesta e propone un `LogicalQueryPlan`, ma non genera direttamente SQL o pipeline MongoDB eseguibili. Il piano viene validato rispetto al catalogo, compilato deterministicamente ed eseguito soltanto se rispetta i vincoli del sistema.
 
 ## Architettura
 
-API e worker usano la stessa immagine e gli stessi service applicativi, ma sono processi distinti. SQLite ospita catalogo e coda; non è richiesto un broker esterno.
-
 ```mermaid
-flowchart LR
-    User[Utente] -->|upload CSV/Parquet| API[FastAPI / UI]
-    API --> Stage[(staging)]
-    API --> Queue[(SQLite WorkItem)]
-    Queue --> Worker[queryx-worker]
-    Worker --> Ingestion[Ingestion service]
-    Ingestion --> Raw[(raw)]
-    Ingestion --> Catalog[(DataAsset / AssetVersion)]
-    Catalog --> Processing[Processing service]
-    Processing --> Parquet[(normalized Parquet)]
-    Parquet --> DuckDB[(DuckDB view)]
-    Catalog --> Relationships[(AssetRelationship)]
-    Relationships --> Plan[LogicalQueryPlan validato]
-    DuckDB --> Plan
-    Plan --> Result[risultato strutturato bounded]
-    API --> Sources[MySQL / MongoDB metadata]
-    API --> Ollama[Ollama opzionale]
+flowchart TD
+    U[Utente] --> A[FastAPI]
+    A --> O[Ollama]
+    A --> C[(Catalogo SQLite)]
+    C --> O
+    O --> P[LogicalQueryPlan]
+    P --> V[Validatore]
+    C --> V
+    V --> E[Compiler ed executor]
+    E --> D[(DuckDB)]
+    E --> M[(MySQL)]
+    E --> N[(MongoDB)]
+    D --> R[Risultato]
+    M --> R
+    N --> R
+    R --> A
 ```
 
-Il flusso ufficiale dei dataset gestiti è:
+Il modello linguistico non accede direttamente ai database. Credenziali, nomi fisici, SQL e pipeline restano dettagli interni all'applicazione.
 
-```text
-download ed estrazione eseguiti dall’utente
-→ upload manuale CSV/Parquet
-→ staging
-→ IngestionJob
-→ raw
-→ DataAsset/AssetVersion
-→ normalizzazione Parquet
-→ DuckDB
-```
+## Requisiti
 
-Ogni file produce un `IngestionJob` indipendente. Non sono supportati ZIP, upload multipli, URL o provider esterni.
+Percorso consigliato:
 
-## Importazione manuale
+- Git;
+- Docker;
+- Docker Compose;
+- Ollama;
+- almeno un modello installato localmente.
 
-Apri `http://localhost:8000/ui/ingestions/new`, scegli un file CSV o Parquet e, facoltativamente, un nome logico o un asset esistente. Se la sorgente distribuisce un archivio, estrailo prima sul computer:
+## Avvio rapido
 
 ```bash
-unzip dataset.zip -d dataset
+git clone https://github.com/pyxidious/queryX.git
+cd queryX
+cp .env.example .env
+docker compose up --build -d
 ```
 
-Poi carica un singolo `.csv` o `.parquet`. Il filename ricevuto viene validato ma non viene mai usato come path; QueryX genera nomi fisici interni.
-
-Esempio minimo:
+Verifica dell'applicazione:
 
 ```bash
-curl -X POST http://localhost:8000/ingestions/uploads \
-  -F 'file=@./orders.csv' \
-  -F 'logical_name=orders'
+curl http://localhost:8000/health
 ```
 
-Per aggiungere una versione a un asset esistente:
+Interfacce principali:
+
+- UI query: `http://localhost:8000/ui/query`
+- API OpenAPI: `http://localhost:8000/docs`
+
+## Configurazione di Ollama
+
+Avvia Ollama sull'host:
 
 ```bash
-curl -X POST http://localhost:8000/ingestions/uploads \
-  -F 'file=@./orders-v2.parquet' \
-  -F 'logical_name=orders' \
-  -F 'asset_id=<asset-id>'
+ollama serve
 ```
 
-## Provenienza dichiarata
-
-L’upload accetta metadata opzionali strutturati:
-
-| Campo multipart | Limite | Significato |
-|---|---:|---|
-| `source_provider` | enum | `manual` (default), `kaggle`, `other` |
-| `source_reference` | 512 | riferimento descrittivo o slug |
-| `source_version` | 128 | versione dichiarata |
-| `dataset_title` | 256 | titolo dichiarato |
-| `license_name` | 128 | licenza dichiarata |
-| `provenance_notes` | 1000 | note descrittive |
-
-Gli spazi vengono normalizzati e l’HTML viene rifiutato. `source_reference` non è un path né un URL operativo: non viene aperto, risolto o reso automaticamente cliccabile. QueryX non verifica e non certifica la licenza. I campi liberi non vengono inviati automaticamente a Ollama e non devono essere inseriti nei log applicativi.
-
-Esempio di dataset scaricato ed estratto manualmente da Kaggle:
+Scarica il modello configurato nel file `.env`, ad esempio:
 
 ```bash
-curl -X POST http://localhost:8000/ingestions/uploads \
-  -F 'file=@./olist_orders_dataset.csv' \
-  -F 'logical_name=orders' \
-  -F 'source_provider=kaggle' \
-  -F 'source_reference=olistbr/brazilian-ecommerce' \
-  -F 'source_version=latest-downloaded-manually' \
-  -F 'dataset_title=Brazilian E-Commerce Public Dataset by Olist' \
-  -F 'license_name=CC BY-NC-SA 4.0'
+ollama pull qwen3.5:9b
 ```
 
-La provenance è metadata descrittivo dell’origine dichiarata. I metadata tecnici derivano invece dall’inspection deterministica del file. La provenance:
+Il nome del modello deve corrispondere alla configurazione `OLLAMA_*` presente in `.env`.
 
-- è persistita sull’`IngestionJob` e nel metadata JSON del lineage;
-- è esposta sul job e sull’`AssetVersion`;
-- non entra nel content fingerprint, schema fingerprint o recipe fingerprint;
-- non modifica inspection, `observed_schema`, `canonical_schema` o `serving_schema`;
-- non causa nuove versioni: un contenuto idempotente può riusare la stessa versione;
-- genera un nuovo edge soltanto quando la dichiarazione è realmente diversa.
+## Dati dimostrativi
 
-## API principali
-
-- `GET /health`
-- `GET /worker/status`
-- `GET /sources`
-- `POST /sources/{source_id}/scan`
-- `GET /catalog/current`
-- `POST /ingestions/uploads`
-- `GET /ingestions/{job_id}`
-- `GET /ingestions/{job_id}/preview`
-- `POST /ingestions/{job_id}/cancel`
-- `GET /assets`
-- `GET /assets/{asset_id}`
-- `GET /assets/{asset_id}/versions/{version_id}`
-- `POST /assets/{asset_id}/versions/{version_id}/prepare`
-- `POST /relationships`, `GET /relationships`, `GET /relationships/{id}`
-- `DELETE /relationships/{id}`
-- `POST /query/validate`
-- `POST /query/execute`
-- `POST /query/natural-language`
-
-I campi JSON preesistenti restano invariati; `provenance` è additivo nelle risposte di job e versione.
-
-## Ingestion e processing
-
-CSV richiede UTF-8 e intestazioni. L’inferenza del tipo usa un campione limitato; il conteggio può essere stimato. Poiché un campione non può dimostrare l’assenza di null nell’intero file, la nullability dei CSV inferiti è conservativa (`nullable=true`): i campi vuoti sono trattati come null durante inspection e normalizzazione. La policy strict continua a rifiutare valori non vuoti incompatibili con il tipo inferito, overflow e strutture non valide. Parquet conserva invece tipi e nullability dichiarati nel footer. Le preview vengono lette on demand dai binding controllati e non espongono path fisici.
-
-L’ingestion termina in `ready`, quando raw, asset e versione sono validi. Il processing è separato: applica `canonical-parquet-v1`, scrive un Parquet normalizzato, registra una vista DuckDB e valida schema e output. `observed_schema`, `canonical_schema` e `serving_schema` rimangono distinti.
-
-Idempotenza:
-
-- stesso contenuto, recipe e asset target: riuso della versione pronta;
-- contenuto o recipe differenti sullo stesso asset: nuova versione;
-- stesso contenuto su asset diversi: asset separati e warning di duplicazione;
-- stessa provenance sul riuso: nessun lineage equivalente duplicato;
-- provenance diversa sul riuso: edge descrittivo aggiuntivo.
-
-## Relazioni e query deterministiche
-
-`AssetRelationship` descrive un join ammesso tra due `DataAsset`: campi sinistro e destro, cardinalità, join predefinito (`inner` o `left`), origine e stato. In questa milestone le relazioni sono soltanto dichiarate manualmente; QueryX verifica che gli asset e i campi esistano nell'`observed_schema` corrente e impedisce duplicati attivi equivalenti. `DELETE /relationships/{id}` disabilita il record senza cancellarlo.
-
-Esempio:
+Con lo stack avviato:
 
 ```bash
-curl -X POST http://localhost:8000/relationships \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name": "orders-products",
-    "left_asset_id": "<order-items-asset-id>",
-    "left_field": "product_id",
-    "right_asset_id": "<products-asset-id>",
-    "right_field": "product_id",
-    "relationship_type": "many_to_one",
-    "join_type_default": "inner"
+docker compose exec queryx python -m queryx.tools.seed_demo
+```
+
+Il seed deterministico genera:
+
+| Backend | Dati | Totale |
+|---|---|---:|
+| MySQL | customers | 10.000 |
+| MySQL | orders | 100.000 |
+| MongoDB | profiles | 10.000 |
+| MongoDB | events | 100.000 |
+
+Lo script può essere rilanciato senza creare duplicati.
+
+## Prima interrogazione
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language   -H 'Content-Type: application/json'   -d '{
+    "question": "Quanti ordini ci sono per stato?",
+    "execute": true
   }'
 ```
 
-Il `LogicalQueryPlan` contiene esclusivamente sorgenti catalogate, join tramite relationship ID, proiezioni, filtri, aggregazioni, group by, ordinamento e limite. Il client non invia SQL, pipeline MongoDB, connection string, host, schema/tabelle/collection fisici, nomi di viste DuckDB o path. La validazione risolve internamente il backend: una versione con serving binding DuckDB `ready`, una tabella MySQL virtuale oppure una collection MongoDB virtuale provenienti dall'ultimo snapshot `current` e completato. Controlla inoltre alias, campi osservati, tipi, aggregazioni, group by e limite.
+La risposta contiene classificazione, piano normalizzato, risultato e tempi di esecuzione.
 
-Esempio “numero ordini per stato”:
+## Importazione di CSV e Parquet
 
-```json
-{
-  "sources": [{"alias": "o", "asset_id": "<orders-asset-id>"}],
-  "projections": [
-    {"source_alias": "o", "field": "order_status", "alias": "status"}
-  ],
-  "aggregations": [
-    {"function": "count", "source_alias": "o", "field": "order_id", "alias": "orders"}
-  ],
-  "group_by": [{"source_alias": "o", "field": "order_status"}],
-  "order_by": [{"field": "orders", "direction": "desc"}],
-  "limit": 100
-}
-```
-
-Per raggruppare temporalmente è disponibile la sola trasformazione controllata `date_trunc_month`, applicabile a campi date/timestamp nelle proiezioni e nel corrispondente `group_by`. I join usano sempre un `relationship_id` dichiarato; i casi orders/customer, orders/order_items e products/order_items non sono hardcoded e vanno registrati con gli ID reali del catalogo.
-
-`POST /query/validate` normalizza il limite e restituisce lo schema di output previsto senza eseguire. `POST /query/execute` sceglie automaticamente il backend dell'asset e compila internamente una query bounded; restituisce colonne, righe, conteggio, indicazione di troncamento, tempo, fingerprint e warning. DuckDB continua a usare il serving binding e il file lock esistenti. MySQL usa una `SELECT` parametrizzata, backtick, sessione read-only e `MYSQL_QUERY_TIMEOUT_SECONDS` (default 10). MongoDB usa soltanto `$match`, `$project`, `$group`, `$sort` e `$limit`, con database e collection risolti dal catalogo e `MONGODB_QUERY_TIMEOUT_SECONDS` (default 10). Il piano logico è il contratto pubblico; SQL, pipeline fisica e credenziali restano dettagli interni e non compaiono nelle risposte standard.
-
-Primo smoke plan per la tabella demo MySQL `orders` (l'`asset_id` opaco si ricava dal catalogo corrente):
-
-```json
-{
-  "sources": [{"alias": "o", "asset_id": "<mysql-orders-asset-id>"}],
-  "projections": [{"source_alias": "o", "field": "status", "alias": "status"}],
-  "filters": [{"source_alias": "o", "field": "total", "operator": "gte", "value": 50}],
-  "aggregations": [{"function": "sum", "source_alias": "o", "field": "total", "alias": "revenue"}],
-  "group_by": [{"source_alias": "o", "field": "status"}],
-  "order_by": [{"field": "revenue", "direction": "desc"}],
-  "limit": 100
-}
-```
-
-Primo piano MongoDB per la collection demo `orders`:
-
-```json
-{
-  "sources": [{"alias": "o", "asset_id": "<mongodb-orders-asset-id>"}],
-  "projections": [{"source_alias": "o", "field": "status", "alias": "status"}],
-  "filters": [{"source_alias": "o", "field": "total", "operator": "gte", "value": 50}],
-  "aggregations": [{"function": "avg", "source_alias": "o", "field": "total", "alias": "average_total"}],
-  "group_by": [{"source_alias": "o", "field": "status"}],
-  "order_by": [{"field": "average_total", "direction": "desc"}],
-  "limit": 100
-}
-```
-
-MySQL e MongoDB sono intenzionalmente single-source: projection, filtri controllati, aggregazioni (`count`, `count_distinct`, `sum`, `avg`, `min`, `max`), group by, order by e limit. MongoDB accetta solo campi osservati esattamente, inclusi path annidati catalogati; pipeline, operatori `$...`, JavaScript, `$where` e mapReduce forniti dal client sono rifiutati. Join MySQL/MongoDB, trasformazioni temporali su questi backend, piani multi-source e query federate non sono ancora supportati. Un piano che mescola backend viene rifiutato con `federation_not_supported`.
-
-Ogni esecuzione crea un `QueryRun` di audit con piano normalizzato redatto, fingerprint, backend, source/versioni coinvolte, stato e metriche. Le righe del risultato, SQL/pipeline completi, le credenziali e i valori dei filtri non vengono persistiti. Timeout, limite predefinito e massimo sono configurati con `QUERY_TIMEOUT_SECONDS`, `MYSQL_QUERY_TIMEOUT_SECONDS`, `MONGODB_QUERY_TIMEOUT_SECONDS`, `QUERY_DEFAULT_LIMIT` e `QUERY_MAX_LIMIT`. La UI temporanea `/ui/query` accetta JSON e offre Validate/Execute; `/ui/relationships` permette di elencare e dichiarare relazioni.
-
-## Linguaggio naturale → piano logico
-
-`POST /query/natural-language` usa prima Ollama per classificare in JSON strict la domanda come `answerable`, `ambiguous` o `unanswerable`, usando soltanto asset interrogabili, campi/tipi e relazioni attive. Una richiesta ambigua restituisce una domanda di chiarimento; una richiesta non calcolabile indica i dati o le metriche mancanti. In entrambi i casi `normalized_plan` e `result` sono null e non vengono invocati planning, compiler o executor. Non è ancora presente memoria conversazionale multi-turn.
-
-Solo per `answerable`, Ollama produce un candidato `LogicalQueryPlan`. Il prompt è limitato agli asset rilevanti che hanno versione e serving binding `ready`, ai relativi campi/tipi, alle relazioni attive e allo schema JSON del piano. Non contiene righe campione, path fisici, nomi di relation DuckDB o query fisiche.
+QueryX accetta un singolo file CSV o Parquet per richiesta:
 
 ```bash
-curl -X POST http://localhost:8000/query/natural-language \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"Quanti ordini ci sono per stato?","execute":false}'
+curl -X POST http://localhost:8000/ingestions/uploads   -F 'file=@./orders.csv'   -F 'logical_name=orders'
 ```
 
-La risposta aggiunge `classification`, `reason` e l'eventuale `clarification_question`; contiene inoltre `normalized_plan`, `output_schema`, `warnings` e il tempo di planning. Con `execute=true` e una domanda answerable contiene anche il risultato bounded, una breve `answer` opzionale e i tempi separati di execution ed explanation. La spiegazione usa soltanto domanda, colonne e un massimo di 10 righe del risultato, non riceve dettagli fisici o ragionamenti, segnala risultati vuoti o troncati e non può rendere fallita una query già completata. Ollama usa temperatura zero e le configurazioni esistenti per modello, timeout e context window. Classificazione e planning ammettono al massimo un retry per JSON non valido; il planning può usare il proprio retry anche per un piano semanticamente rifiutato. Il piano corretto passa nuovamente dal validatore deterministico prima di qualsiasi esecuzione.
+Flusso:
 
-Il modello non è un'autorità: il JSON viene parsato con modelli strict e passa sempre dal validatore deterministico esistente. Solo un piano valido può raggiungere il normale `QueryService`; compiler ed executor non ricevono testo libero. Input che tenta di fornire query fisiche viene rifiutato. Gli errori applicativi sono `llm_unavailable`, `llm_timeout`, `invalid_llm_json`, `invalid_logical_plan` e `ambiguous_question`.
+```text
+upload
+→ staging
+→ inspection
+→ registrazione nel catalogo
+→ normalizzazione Parquet
+→ vista DuckDB
+```
 
-Nella pagina `/ui/query` sono disponibili “Genera piano” e “Genera ed esegui”. Il piano prodotto resta visibile nell'editor JSON e il risultato riusa la stessa tabella bounded dell'esecuzione manuale. Per richieste ambigue o non calcolabili la pagina mostra rispettivamente “Chiarimento necessario” o “Richiesta non calcolabile”, senza azioni Validate/Execute finché non esiste un piano.
+Non sono supportati ZIP, URL remoti, download automatici o upload multipli.
 
-## Worker
+## Riproduzione completa
 
-Il worker gestisce esclusivamente ingestion e processing. Il claim usa `BEGIN IMMEDIATE`; lease, heartbeat, backoff, retry limitati, cancellazione cooperativa e reconciliation restano separati dallo stato del dominio.
+Il percorso più semplice è:
 
 ```bash
-python -m queryx.app.worker
+make reproduce
 ```
 
-In modalità `worker`, l’API accoda e restituisce `202`; in modalità `inline`, utile per sviluppo e test, esegue nello stesso processo.
-
-## Avvio
-
-Requisiti: Docker con Compose oppure Python 3.12.
+Sono disponibili anche i passaggi separati:
 
 ```bash
-cp .env.example .env
-docker compose up --build
+make up
+make seed
+make ground-truth
+make benchmark
+make test
 ```
 
-Compose definisce `queryx`, `queryx-worker`, `mysql` e `mongodb`. API e worker condividono l’immagine e il volume `/app/data`. Non servono credenziali o secret per fonti di dataset.
-
-### Seed demo deterministico
-
-Con lo stack avviato, un solo comando porta i dati demo ai target totali di 10.000 customer e 100.000 order in MySQL, più 10.000 profile e 100.000 event in MongoDB:
+Per assegnare un'etichetta al benchmark:
 
 ```bash
-docker compose exec queryx python -m queryx.tools.seed_demo
+MODEL_LABEL=qwen3.5-9b-100k make benchmark
 ```
 
-Lo script usa il seed fisso `20260723`, conserva gli identificativi demo esistenti e inserisce soltanto il deficit verso i target tramite identificatori stabili e upsert MongoDB. Può quindi essere rilanciato senza duplicati e senza ricreare i volumi. Non elimina dati: se una collection o tabella supera già il target, termina con errore. Inserimenti e commit avvengono in batch da 2.000 record; il riepilogo JSON finale verifica direttamente i quattro conteggi:
+La documentazione dettagliata del benchmark sarà disponibile in `benchmark/README.md`.
 
-```json
-{"mongodb": {"events": 100000, "profiles": 10000}, "mysql": {"customers": 10000, "orders": 100000}}
-```
-
-I target e la dimensione del batch sono configurabili per prove locali, mantenendo questi valori come default:
+## Test
 
 ```bash
-QUERYX_SEED_MYSQL_CUSTOMERS=10000
-QUERYX_SEED_MYSQL_ORDERS=100000
-QUERYX_SEED_MONGODB_PROFILES=10000
-QUERYX_SEED_MONGODB_EVENTS=100000
-QUERYX_SEED_BATCH_SIZE=2000
+make test
 ```
 
-Gli order hanno totali uniformemente distribuiti fra 10 e 500, status `paid`/`pending`/`shipped`/`cancelled`/`refunded` con pesi 45/20/20/10/5 e note assenti nell'80% circa dei casi. I profile distribuiscono `language` fra `en`/`it`/`fr`/`es` con pesi 40/30/20/10, newsletter vera/falsa/assente con pesi 45/35/20 e da uno a tre ruoli. Gli event distribuiscono `purchase`/`page_view`/`login`/`logout` con pesi 25/45/20/10; `amount`, valuta e items sono generati esclusivamente per i purchase, mentre device, path e tags restano coerenti con il tipo di evento.
-
-Il seed verifica o crea, senza rimuovere quelli presenti, gli indici MySQL su email customer, customer/status/data degli order e gli indici MongoDB sui campi interrogati di profile ed event, inclusi i campi annidati. Non aggiunge colonne né modifica lo schema funzionale.
-
-Dopo il cambio di scala occorre eseguire, nell'ordine: discovery/profiling delle sorgenti, rigenerazione della ground truth, un nuovo benchmark Qwen, il benchmark del secondo modello e infine il report Markdown. La ground truth attuale non viene aggiornata automaticamente dal seed.
-
-### Riproduzione completa
-
-Il percorso ufficiale non richiede Python o dipendenze installate sull'host, override degli URL né conoscenza dei path Docker:
+In alternativa:
 
 ```bash
-git clone <repository>
-cd queryX
-docker compose up --build -d
-docker compose exec queryx python -m queryx.tools.seed_demo
-docker compose exec queryx python -m benchmark.generate_ground_truth
-docker compose exec queryx python -m benchmark.run \
-  --base-url http://127.0.0.1:8000 \
-  --cases /app/benchmark/cases.json \
-  --output-dir /app/benchmark/results \
-  --model-label qwen3.5-9b-100k
+docker compose exec queryx pytest -q
 ```
 
-Il volume applicativo rende disponibile DuckDB come configurato da `DUCKDB_PATH`; gli hostname `mysql` e `mongodb` provengono dalla configurazione Compose. Il bind mount `./benchmark:/app/benchmark` persiste sul checkout host sia gli `expected_result` rigenerati in `cases.json`, sia JSON, CSV e summary prodotti dal runner.
+La documentazione dettagliata della suite sarà disponibile in `tests/README.md`.
 
-In alternativa, `make reproduce` esegue l'intera sequenza. Sono disponibili anche i target separati `make up`, `make seed`, `make ground-truth`, `make benchmark` e `make test`; `MODEL_LABEL=nome make benchmark` imposta l'etichetta del run.
-
-Avvio locale:
+## Avvio locale per sviluppo
 
 ```bash
 python -m venv .venv
@@ -332,53 +180,172 @@ pip install -e '.[dev]'
 uvicorn queryx.app.main:app --reload
 ```
 
-## Configurazione essenziale
-
-La configurazione è documentata in `.env.example`. Le aree principali sono:
-
-- MySQL e MongoDB (`MYSQL_*`, `MONGODB_*`);
-- storage (`CATALOG_DB_PATH`, `DATA_RAW_DIR`, `DATA_STAGING_DIR`, `DATA_NORMALIZED_DIR`);
-- ingestion e processing (`INGESTION_*`, `PARQUET_*`, `DUCKDB_*`);
-- query bounded (`QUERY_DEFAULT_LIMIT`, `QUERY_MAX_LIMIT`, `QUERY_TIMEOUT_SECONDS`, `MYSQL_QUERY_TIMEOUT_SECONDS`, `MONGODB_QUERY_TIMEOUT_SECONDS`);
-- worker (`QUERYX_EXECUTION_MODE`, `WORKER_*`);
-- UI (`QUERYX_UI_*`);
-- enrichment semantico (`OLLAMA_*`, `QUERYX_ENRICHMENT_*`).
-
-## Compatibilità SQLite legacy
-
-L’inizializzazione applica soltanto modifiche additive e idempotenti. Cataloghi creati da versioni precedenti possono contenere le tabelle legacy `acquisition_runs`, `acquisition_files`, relativi indici o colonne. Il codice corrente non li legge, non li scrive, non li mostra e non tenta di eliminarli.
-
-Queste tabelle possono essere eliminate soltanto ricreando volontariamente il catalogo. L’aggiornamento non cancella asset, job, binding, lineage, raw o normalized esistenti.
-
-## Sicurezza e limiti correnti
-
-- soli CSV e Parquet, un file per richiesta;
-- limite upload configurabile, default 25 MiB;
-- nessun ZIP o estrazione server-side;
-- nessun download, URL fetching o richiesta browser esterna;
-- niente autenticazione/autorizzazione applicativa integrata;
-- CSRF HMAC double-submit per POST UI, autoescape Jinja e asset locali;
-- nessun SQL arbitrario, DDL/DML, subquery o funzione non prevista dal piano;
-- query sempre bounded (default 100, massimo 1000) e timeout default 10 secondi;
-- SQLite e worker singolo sono adatti allo stadio corrente, non a un cluster distribuito;
-- la licenza è una dichiarazione dell’utente, non una valutazione legale;
-- GraphDB non è ancora supportato.
-
-## Test e verifiche
-
-La suite è offline:
+In un secondo terminale:
 
 ```bash
-pytest -q
-python -m compileall -q queryx tests
-docker compose config --quiet
-git diff --check
+python -m queryx.app.worker
 ```
 
-## Roadmap
+Questa modalità richiede MySQL, MongoDB e Ollama già raggiungibili agli indirizzi configurati in `.env`.
 
-1. richiesta interattiva di chiarimento per domande ambigue;
-2. spiegazione del risultato;
-3. benchmark tra modelli;
-4. test di robustezza, consistenza e incertezza;
-5. GraphDB.
+## Interfacce principali:
+
+- Home UI: `http://localhost:8000/ui`
+- UI query: `http://localhost:8000/ui/query`
+- API OpenAPI: `http://localhost:8000/docs`
+
+## API principali
+
+| Metodo | Endpoint | Funzione |
+|---|---|---|
+| `GET` | `/health` | stato dell'applicazione |
+| `GET` | `/sources` | elenco delle sorgenti |
+| `POST` | `/sources/{source_id}/scan` | discovery e profiling |
+| `GET` | `/catalog/current` | catalogo corrente |
+| `POST` | `/ingestions/uploads` | upload CSV o Parquet |
+| `POST` | `/query/validate` | validazione del piano |
+| `POST` | `/query/execute` | esecuzione del piano |
+| `POST` | `/query/natural-language` | interrogazione in linguaggio naturale |
+
+### Avvio di discovery e profiling di una sorgente
+
+Sostituire `<source_id>` con l'identificativo restituito da `GET /sources`.
+
+```bash
+curl -X POST http://localhost:8000/sources/<source_id>/scan
+```
+
+### Lettura del catalogo corrente
+
+```bash
+curl http://localhost:8000/catalog/current
+```
+
+### Upload di un file CSV
+
+```bash
+curl -X POST http://localhost:8000/ingestions/uploads \
+  -F 'file=@./orders.csv' \
+  -F 'logical_name=orders'
+```
+
+### Upload di un file Parquet
+
+```bash
+curl -X POST http://localhost:8000/ingestions/uploads \
+  -F 'file=@./orders.parquet' \
+  -F 'logical_name=orders'
+```
+
+### Validazione di un piano logico
+
+Salvare il piano in un file chiamato `plan.json`.
+
+```bash
+curl -X POST http://localhost:8000/query/validate \
+  -H 'Content-Type: application/json' \
+  -d @plan.json
+```
+
+### Esecuzione di un piano logico
+
+```bash
+curl -X POST http://localhost:8000/query/execute \
+  -H 'Content-Type: application/json' \
+  -d @plan.json
+```
+
+### Generazione del piano da linguaggio naturale
+
+Con `execute` impostato a `false`, QueryX genera e valida il piano senza eseguirlo.
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Quanti ordini ci sono per stato?",
+    "execute": false
+  }'
+```
+
+### Generazione ed esecuzione da linguaggio naturale
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Qual è il totale medio degli ordini per stato?",
+    "execute": true
+  }'
+```
+
+### Esempio con filtro numerico
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Quanti ordini hanno un totale maggiore o uguale a 100?",
+    "execute": true
+  }'
+```
+
+### Esempio MongoDB con array annidato
+
+```bash
+curl -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Quanti eventi contengono almeno un articolo con quantità maggiore o uguale a 2?",
+    "execute": true
+  }'
+```
+
+### Formattazione della risposta con `jq`
+
+```bash
+curl -sS \
+  -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Quanti ordini ci sono per stato?",
+    "execute": true
+  }' | jq
+```
+
+### Visualizzazione dei soli campi principali
+
+```bash
+curl -sS \
+  -X POST http://localhost:8000/query/natural-language \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "Quanti ordini ci sono per stato?",
+    "execute": true
+  }' |
+jq '{
+  classification: .classification,
+  normalized_plan: .normalized_plan,
+  result: .result,
+  answer: .answer
+}'
+```
+
+## Limiti attuali
+
+- MySQL e MongoDB supportano piani single-source;
+- le query federate tra backend non sono supportate;
+- i join devono essere dichiarati nel catalogo;
+- non è presente memoria conversazionale multi-turno;
+- GraphDB non è ancora supportato.
+
+## Struttura della documentazione
+
+```text
+README.md
+benchmark/README.md
+tests/README.md
+docs/
+```
+
+Il README principale descrive avvio e riproduzione generale. Benchmark, test e dettagli tecnici sono documentati separatamente.
